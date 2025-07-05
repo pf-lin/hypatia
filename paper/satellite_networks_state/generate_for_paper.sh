@@ -31,7 +31,7 @@ id="$1"
 num_threads=$2
 
 # Check validity of arguments
-if [ "${id}" -lt "0" ] || [ "${id}" -gt "14" ]; then
+if [ "${id}" -lt "0" ] || [ "${id}" -gt "20" ]; then
   echo "Invalid workload id: ${id}"
   exit 1
 fi
@@ -97,4 +97,26 @@ if [ "${id}" = "13" ]; then
 fi
 if [ "${id}" = "14" ]; then
   python main_25x25.py 200 1000 algorithm_free_one_only_over_isls ${num_threads}
+fi
+
+# OneWeb-1200 with ISLs
+if [ "${id}" = "15" ]; then
+  python main_oneweb_1200.py 200 50 isls_plus_grid ground_stations_top_100 algorithm_lohi_routing ${num_threads}
+fi
+if [ "${id}" = "16" ]; then
+  python main_oneweb_1200.py 200 100 isls_plus_grid ground_stations_top_100 algorithm_lohi_routing ${num_threads}
+fi
+if [ "${id}" = "17" ]; then
+  python main_oneweb_1200.py 200 1000 isls_plus_grid ground_stations_top_100 algorithm_lohi_routing ${num_threads}
+fi
+
+# 6x18 with ISLs (6 orbits, 18 satellites per orbit)
+if [ "${id}" = "18" ]; then
+  python main_6x18.py 200 50 isls_plus_grid ground_stations_top_100 algorithm_lohi_routing ${num_threads}
+fi
+if [ "${id}" = "19" ]; then
+  python main_6x18.py 200 100 isls_plus_grid ground_stations_top_100 algorithm_lohi_routing ${num_threads}
+fi
+if [ "${id}" = "20" ]; then
+  python main_6x18.py 200 1000 isls_plus_grid ground_stations_top_100 algorithm_lohi_routing ${num_threads}
 fi

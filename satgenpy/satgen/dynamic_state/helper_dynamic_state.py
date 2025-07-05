@@ -46,7 +46,9 @@ def worker(args):
         max_gsl_length_m,
         max_isl_length_m,
         dynamic_state_algorithm,
-        print_logs
+        print_logs,
+        num_orbits,
+        num_sats_per_orbit
      ) = args
 
     # Generate dynamic state
@@ -67,13 +69,17 @@ def worker(args):
                                   # "algorithm_free_one_only_over_isls"
                                   # "algorithm_free_gs_one_sat_many_only_over_isls"
                                   # "algorithm_paired_many_only_over_isls"
-        print_logs
+                                  # "algorithm_lohi_routing"
+        print_logs,
+        num_orbits,
+        num_sats_per_orbit
     )
 
 
 def help_dynamic_state(
         output_generated_data_dir, num_threads, name, time_step_ms, duration_s,
-        max_gsl_length_m, max_isl_length_m, dynamic_state_algorithm, print_logs
+        max_gsl_length_m, max_isl_length_m, dynamic_state_algorithm, print_logs,
+        num_orbits=None, num_sats_per_orbit=None
 ):
 
     # Directory
@@ -132,7 +138,9 @@ def help_dynamic_state(
             max_gsl_length_m,
             max_isl_length_m,
             dynamic_state_algorithm,
-            print_logs
+            print_logs,
+            num_orbits,
+            num_sats_per_orbit
         ))
 
         current += num_time_steps
