@@ -53,10 +53,14 @@ def generate_tles_from_scratch_with_sgp(
         # <TLE line 1>
         # <TLE line 2>
         satellite_counter = 0
+        constellation_type = "polar" if inclination_degree > 80.0 and inclination_degree < 100.0 else "delta"
         for orbit in range(0, num_orbits):
 
             # Orbit-dependent
-            raan_degree = orbit * 360.0 / num_orbits
+            if constellation_type == "polar":
+                raan_degree = orbit * 180.0 / num_orbits
+            else:
+                raan_degree = orbit * 360.0 / num_orbits
             orbit_wise_shift = 0
             if orbit % 2 == 1:
                 if phase_diff:
@@ -154,10 +158,14 @@ def generate_tles_from_scratch_manual(
         # <TLE line 1>
         # <TLE line 2>
         satellite_counter = 0
+        constellation_type = "polar" if inclination_degree > 80.0 and inclination_degree < 100.0 else "delta"
         for orbit in range(0, num_orbits):
 
             # Orbit-dependent
-            raan_degree = orbit * 360.0 / num_orbits
+            if constellation_type == "polar":
+                raan_degree = orbit * 180.0 / num_orbits
+            else:
+                raan_degree = orbit * 360.0 / num_orbits
             orbit_wise_shift = 0
             if orbit % 2 == 1:
                 if phase_diff:
