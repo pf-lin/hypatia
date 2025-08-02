@@ -112,6 +112,7 @@ class MainHelper:
                 output_generated_data_dir + "/" + name + "/isls.txt",
                 self.NUM_ORBS,
                 self.NUM_SATS_PER_ORB,
+                self.INCLINATION_DEGREE,
                 isl_shift=0,
                 idx_offset=0
             )
