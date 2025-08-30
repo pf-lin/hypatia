@@ -29,6 +29,7 @@ import cartopy
 import cartopy.crs as ccrs
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+import numpy as np
 
 
 GROUND_STATION_USED_COLOR = "#3b3b3b"
@@ -254,11 +255,18 @@ def print_graphical_routes_and_rtt(
                             )
 
                         # Plot the line
-                        plt.plot(
-                            [from_longitude_deg, to_longitude_deg],
-                            [from_latitude_deg, to_latitude_deg],
-                            color=ISL_COLOR, linewidth=0.5, marker='',
-                            # transform=ccrs.Geodetic(), # Use Geodetic projection for curved lines
+                        # plt.plot(
+                        #     [from_longitude_deg, to_longitude_deg],
+                        #     [from_latitude_deg, to_latitude_deg],
+                        #     color=ISL_COLOR, linewidth=0.5, marker='',
+                        #     # transform=ccrs.Geodetic(), # Use Geodetic projection for curved lines
+                        # )
+                        
+                        plot_connection_with_dateline_handling(
+                            ax,  # 注意：使用 ax 而不是 plt
+                            from_longitude_deg, from_latitude_deg,
+                            to_longitude_deg, to_latitude_deg,
+                            color=ISL_COLOR, linewidth=0.5, marker=''
                         )
 
                 # Across all points, we need to find the latitude / longitude to zoom into
@@ -361,3 +369,47 @@ def print_graphical_routes_and_rtt(
 
                 # Save final PDF figure
                 f.savefig(pdf_filename, bbox_inches='tight')
+
+def plot_connection_with_dateline_handling(ax, from_lon, from_lat, to_lon, to_lat, n=50, **kwargs):
+    """
+    在處理日期變更線時安全繪製線段（不會產生跨圖長直線）。
+    - ax: matplotlib axes（若是 cartopy 請傳入 transform=ccrs.PlateCarree()）
+    - from_lon, from_lat, to_lon, to_lat: 經緯度（度，假設 -180..180 或 0..360 都可）
+    - n: 插值點數
+    - kwargs: 傳給 ax.plot
+    """
+    # 可處理單一數值或 numpy array
+    def norm(arr):
+        a = np.array(arr, dtype=float)
+        return ((a + 180) % 360) - 180
+
+    # 正規化輸入到 -180..180
+    from_lon = float(norm(from_lon))
+    to_lon = float(norm(to_lon))
+    # 若經度差超過 180，對 to_lon 做 +/−360 展開使之與 from_lon 在同一連續區間
+    d = to_lon - from_lon
+    if d > 180:
+        to_lon -= 360
+    elif d < -180:
+        to_lon += 360
+
+    # 產生連續（未 wrap）的插值點
+    lon_cont = np.linspace(from_lon, to_lon, n)
+    lat_cont = np.linspace(from_lat, to_lat, n)
+
+    # wrap 回 -180..180（用於繪圖座標）
+    lon_plot = norm(lon_cont)
+
+    # 找出 wrap 導致的跳躍（相鄰點差距過大，表示跨越了邊界）
+    diffs = np.abs(np.diff(lon_plot))
+    split_positions = np.where(diffs > 180)[0] + 1  # split index positions
+
+    if split_positions.size == 0:
+        ax.plot(lon_plot, lat_cont, **kwargs)
+    else:
+        # 將 lon/lat 在跳躍處切段，逐段繪製（避免跨段連線）
+        lon_segs = np.split(lon_plot, split_positions)
+        lat_segs = np.split(lat_cont, split_positions)
+        for lon_seg, lat_seg in zip(lon_segs, lat_segs):
+            if len(lon_seg) >= 2:
+                ax.plot(lon_seg, lat_seg, **kwargs)
