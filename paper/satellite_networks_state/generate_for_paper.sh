@@ -31,7 +31,7 @@ id="$1"
 num_threads=$2
 
 # Check validity of arguments
-if [ "${id}" -lt "0" ] || [ "${id}" -gt "20" ]; then
+if [ "${id}" -lt "0" ] || [ "${id}" -gt "32" ]; then
   echo "Invalid workload id: ${id}"
   exit 1
 fi
@@ -119,4 +119,48 @@ if [ "${id}" = "19" ]; then
 fi
 if [ "${id}" = "20" ]; then
   python main_6x18.py 200 1000 isls_plus_grid ground_stations_top_100 algorithm_lohi_routing ${num_threads}
+fi
+
+# 6x12 with ISLs (6 orbits, 12 satellites per orbit)
+if [ "${id}" = "21" ]; then
+  python main_6x12.py 200 50 isls_plus_grid ground_stations_top_100 algorithm_lohi_routing ${num_threads}
+fi
+if [ "${id}" = "22" ]; then
+  python main_6x12.py 200 100 isls_plus_grid ground_stations_top_100 algorithm_lohi_routing ${num_threads}
+fi
+if [ "${id}" = "23" ]; then
+  python main_6x12.py 200 1000 isls_plus_grid ground_stations_top_100 algorithm_lohi_routing ${num_threads}
+fi
+
+# 6X12 with ISLs (6 orbits, 12 satellites per orbit) with algorithm_free_one_only_over_isls
+if [ "${id}" = "24" ]; then
+  python main_6x12.py 200 50 isls_plus_grid ground_stations_top_100 algorithm_free_one_only_over_isls ${num_threads}
+fi
+if [ "${id}" = "25" ]; then
+  python main_6x12.py 200 100 isls_plus_grid ground_stations_top_100 algorithm_free_one_only_over_isls ${num_threads}
+fi
+if [ "${id}" = "26" ]; then
+  python main_6x12.py 200 1000 isls_plus_grid ground_stations_top_100 algorithm_free_one_only_over_isls ${num_threads}
+fi
+
+# OneWeb-1200 with ISLs and algorithm_free_one_only_over_isls
+if [ "${id}" = "27" ]; then
+  python main_oneweb_1200.py 200 50 isls_plus_grid ground_stations_top_100 algorithm_free_one_only_over_isls ${num_threads}
+fi
+if [ "${id}" = "28" ]; then
+  python main_oneweb_1200.py 200 100 isls_plus_grid ground_stations_top_100 algorithm_free_one_only_over_isls ${num_threads}
+fi
+if [ "${id}" = "29" ]; then
+  python main_oneweb_1200.py 200 1000 isls_plus_grid ground_stations_top_100 algorithm_free_one_only_over_isls ${num_threads}
+fi
+
+# OneWeb-1200 with ISLs and algorithm_paired_one_only_over_isls
+if [ "${id}" = "30" ]; then
+  python main_oneweb_1200.py 200 50 isls_plus_grid ground_stations_top_100 algorithm_paired_one_only_over_isls ${num_threads}
+fi
+if [ "${id}" = "31" ]; then
+  python main_oneweb_1200.py 200 100 isls_plus_grid ground_stations_top_100 algorithm_paired_one_only_over_isls ${num_threads}
+fi
+if [ "${id}" = "32" ]; then
+  python main_oneweb_1200.py 200 1000 isls_plus_grid ground_stations_top_100 algorithm_paired_one_only_over_isls ${num_threads}
 fi
