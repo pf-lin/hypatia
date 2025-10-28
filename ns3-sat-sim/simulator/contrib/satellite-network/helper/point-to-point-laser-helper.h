@@ -52,6 +52,8 @@ public:
   void SetDeviceAttribute (std::string name, const AttributeValue &value);
   void SetChannelAttribute (std::string name, const AttributeValue &value);
 
+  void SetQueueTraceFile(std::string filename);
+
   // Installers
   NetDeviceContainer Install (NodeContainer c);
   NetDeviceContainer Install (Ptr<Node> a, Ptr<Node> b);
@@ -61,6 +63,10 @@ private:
   ObjectFactory m_channelFactory;       //!< Channel Factory
   ObjectFactory m_remoteChannelFactory; //!< Remote Channel Factory
   ObjectFactory m_deviceFactory;        //!< Device Factory
+
+  bool m_enableQueueTraces = false;
+  // Run directory
+  std::string m_queueTraceFile;
 };
 
 } // namespace ns3

@@ -243,6 +243,12 @@ namespace ns3 {
         p2p_laser_helper.SetDeviceAttribute ("DataRate", DataRateValue (DataRate (std::to_string(m_isl_data_rate_megabit_per_s) + "Mbps")));
         std::cout << "    >> ISL data rate........ " << m_isl_data_rate_megabit_per_s << " Mbit/s" << std::endl;
         std::cout << "    >> ISL max queue size... " << m_isl_max_queue_size_pkts << " packets" << std::endl;
+        m_enable_queue_traces = parse_boolean(m_basicSimulation->GetConfigParamOrFail("enable_link_queue_tracking"));
+        if (m_enable_queue_traces) {
+            std::cout << "  > Enable queue traces" << std::endl;
+            m_queue_trace_file = m_basicSimulation->GetLogsDir() + "/isl_queue_traces.csv";
+            p2p_laser_helper.SetQueueTraceFile(m_queue_trace_file);
+        }
 
         // Traffic control helper
         TrafficControlHelper tch_isl;

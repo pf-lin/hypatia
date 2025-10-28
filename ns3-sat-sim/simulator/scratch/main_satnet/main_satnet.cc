@@ -39,6 +39,7 @@
 #include "ns3/arbiter-single-forward-helper.h"
 #include "ns3/ipv4-arbiter-routing-helper.h"
 #include "ns3/gsl-if-bandwidth-helper.h"
+#include "ns3/queue-analyzer.h"
 
 using namespace ns3;
 
@@ -98,6 +99,11 @@ int main(int argc, char *argv[]) {
 
     // Finalize the simulation
     basicSimulation->Finalize();
+
+    QueueAnalyzer analyzer;
+    std::string isl_queue_trace_file = run_dir + "/logs_ns3/isl_queue_traces.csv";
+    analyzer.ProcessTraceFile(isl_queue_trace_file);
+    analyzer.PrintStatistics();
 
     return 0;
 

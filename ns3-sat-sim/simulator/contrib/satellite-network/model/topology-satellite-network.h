@@ -131,6 +131,8 @@ namespace ns3 {
         int64_t m_gsl_max_queue_size_pkts;
         bool m_enable_isl_utilization_tracking;
         int64_t m_isl_utilization_tracking_interval_ns;
+        bool m_enable_queue_traces;
+        std::string m_queue_trace_file;
 
     };
 
