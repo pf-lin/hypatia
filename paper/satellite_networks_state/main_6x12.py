@@ -29,8 +29,8 @@ EARTH_RADIUS = 6378135.0
 
 # GENERATION CONSTANTS
 
-BASE_NAME = "oneweb_1200"
-NICE_NAME = "OneWeb-1200"
+BASE_NAME = "6x12"
+NICE_NAME = "6x12-OneWeb"
 
 # ONEWEB 1200
 
@@ -54,8 +54,8 @@ MAX_GSL_LENGTH_M = math.sqrt(math.pow(SATELLITE_CONE_RADIUS_M, 2) + math.pow(ALT
 # ISLs are not allowed to dip below 80 km altitude in order to avoid weather conditions
 MAX_ISL_LENGTH_M = 2 * math.sqrt(math.pow(EARTH_RADIUS + ALTITUDE_M, 2) - math.pow(EARTH_RADIUS + 80000, 2))
 
-NUM_ORBS = 18
-NUM_SATS_PER_ORB = 40
+NUM_ORBS = 6
+NUM_SATS_PER_ORB = 12
 
 # Inclination value obtained from OneWeb TLE data at:
 # https://celestrak.org/norad/elements/table.php?GROUP=oneweb&FORMAT=2le
@@ -83,7 +83,7 @@ def main():
     args = sys.argv[1:]
     if len(args) != 6:
         print("Must supply exactly six arguments")
-        print("Usage: python main_oneweb_1200.py [duration (s)] [time step (ms)] "
+        print("Usage: python main_6x12.py [duration (s)] [time step (ms)] "
               "[isls_plus_grid / isls_none] "
               "[ground_stations_{top_100, paris_moscow_grid}] "
               "[algorithm_{free_one_only_over_isls, free_one_only_gs_relays, paired_many_only_over_isls, lohi_routing}] "

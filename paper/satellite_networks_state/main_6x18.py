@@ -46,8 +46,8 @@ PHASE_DIFF = True
 MEAN_MOTION_REV_PER_DAY = 13.0   # Altitude ~1200 km
 ALTITUDE_M = 1200000  # Altitude ~1200 km
 
-# Considering an elevation angle of 15 degrees; OneWeb typically uses 15-40 degrees
-SATELLITE_CONE_RADIUS_M = ALTITUDE_M / math.tan(math.radians(15.0))
+# Considering an elevation angle of 55 degrees; OneWeb typically uses 55-85 degrees
+SATELLITE_CONE_RADIUS_M = ALTITUDE_M / math.tan(math.radians(55.0))
 
 MAX_GSL_LENGTH_M = math.sqrt(math.pow(SATELLITE_CONE_RADIUS_M, 2) + math.pow(ALTITUDE_M, 2))
 
