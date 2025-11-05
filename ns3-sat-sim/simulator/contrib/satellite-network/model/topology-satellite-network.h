@@ -55,6 +55,7 @@
 #include "ns3/wifi-net-device.h"
 #include "ns3/point-to-point-laser-net-device.h"
 #include "ns3/ipv4.h"
+#include "ns3/ptop-link-queue-tracker.h"
 
 namespace ns3 {
 
@@ -86,6 +87,7 @@ namespace ns3 {
 
         // Post-processing
         void CollectUtilizationStatistics();
+        void WriteISLQueueTrackingResults();
 
     private:
 
@@ -133,6 +135,9 @@ namespace ns3 {
         int64_t m_isl_utilization_tracking_interval_ns;
         bool m_enable_queue_traces;
         std::string m_queue_trace_file;
+
+        // ISL queue trackers
+        std::vector<std::pair<std::pair<int32_t, int32_t>, Ptr<PtopLinkQueueTracker>>> m_isl_queue_trackers;
 
     };
 

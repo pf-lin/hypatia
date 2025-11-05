@@ -86,6 +86,9 @@ namespace ns3 {
             m_isl_utilization_tracking_interval_ns = parse_positive_int64(m_basicSimulation->GetConfigParamOrFail("isl_utilization_tracking_interval_ns"));
         }
 
+        // ISL queue tracking settings
+        m_enable_queue_traces = parse_boolean(m_basicSimulation->GetConfigParamOrFail("enable_link_queue_tracking"));
+
         // Create ISLs
         std::cout << "  > Reading and creating ISLs" << std::endl;
         ReadISLs();
@@ -243,12 +246,6 @@ namespace ns3 {
         p2p_laser_helper.SetDeviceAttribute ("DataRate", DataRateValue (DataRate (std::to_string(m_isl_data_rate_megabit_per_s) + "Mbps")));
         std::cout << "    >> ISL data rate........ " << m_isl_data_rate_megabit_per_s << " Mbit/s" << std::endl;
         std::cout << "    >> ISL max queue size... " << m_isl_max_queue_size_pkts << " packets" << std::endl;
-        m_enable_queue_traces = parse_boolean(m_basicSimulation->GetConfigParamOrFail("enable_link_queue_tracking"));
-        if (m_enable_queue_traces) {
-            std::cout << "  > Enable queue traces" << std::endl;
-            m_queue_trace_file = m_basicSimulation->GetLogsDir() + "/isl_queue_traces.csv";
-            p2p_laser_helper.SetQueueTraceFile(m_queue_trace_file);
-        }
 
         // Traffic control helper
         TrafficControlHelper tch_isl;
@@ -301,12 +298,49 @@ namespace ns3 {
                 m_islFromTo.push_back(std::make_pair(sat1_id, sat0_id));
             }
 
+            // 如果啟用 queue tracking，創建 tracker
+            if (m_enable_queue_traces) {
+                Ptr<PointToPointLaserNetDevice> netDeviceA = netDevices.Get(0)->GetObject<PointToPointLaserNetDevice>();
+                Ptr<PointToPointLaserNetDevice> netDeviceB = netDevices.Get(1)->GetObject<PointToPointLaserNetDevice>();
+
+                // 檢查是否成功獲取
+                if (netDeviceA == nullptr || netDeviceB == nullptr) {
+                    std::cerr << "ERROR: Failed to get PointToPointLaserNetDevice" << std::endl;
+                    continue;
+                }
+                
+                // 檢查 queue 是否存在
+                if (netDeviceA->GetQueue() == nullptr || netDeviceB->GetQueue() == nullptr) {
+                    std::cerr << "ERROR: Queue is null for ISL " << sat0_id << " <-> " << sat1_id << std::endl;
+                    continue;
+                }
+
+                // 為 A -> B 方向創建 tracker - 直接使用 queue
+                Ptr<PtopLinkQueueTracker> tracker_a_b = CreateObject<PtopLinkQueueTracker>();
+                tracker_a_b->SetQueue(netDeviceA->GetQueue());
+                m_isl_queue_trackers.push_back(
+                    std::make_pair(std::make_pair(sat0_id, sat1_id), tracker_a_b)
+                );
+
+                // 為 B -> A 方向創建 tracker
+                Ptr<PtopLinkQueueTracker> tracker_b_a = CreateObject<PtopLinkQueueTracker>();
+                tracker_b_a->SetQueue(netDeviceB->GetQueue());
+                m_isl_queue_trackers.push_back(
+                    std::make_pair(std::make_pair(sat1_id, sat0_id), tracker_b_a)
+                );
+            }
+
             counter += 1;
         }
         fs.close();
 
         // Completed
         std::cout << "    >> Created " << std::to_string(counter) << " ISL(s)" << std::endl;
+
+        if (m_enable_queue_traces) {
+            std::cout << "  > Enable queue traces" << std::endl;
+            std::cout << "    >> Installed " << m_isl_queue_trackers.size() << " queue trackers" << std::endl;
+        }
 
     }
 
@@ -485,6 +519,85 @@ namespace ns3 {
             fclose(file_utilization_csv);
 
         }
+    }
+
+    void TopologySatelliteNetwork::WriteISLQueueTrackingResults() {
+        std::cout << "STORE ISL QUEUE TRACKING RESULTS" << std::endl;
+
+        if (!m_enable_queue_traces) {
+            std::cout << "  > ISL queue tracking not enabled, skipping" << std::endl;
+
+        } else {
+
+            // Open CSV files
+            std::string filename_pkt = m_basicSimulation->GetLogsDir() + "/isl_queue_pkt.csv";
+            std::string filename_byte = m_basicSimulation->GetLogsDir() + "/isl_queue_byte.csv";
+
+            std::cout<< "  > Opening ISL queue tracking output files" << std::endl;      
+            FILE* file_queue_pkt_csv = fopen(filename_pkt.c_str(), "w+");
+            std::cout << "    >> Opened: " << filename_pkt << std::endl;
+            FILE* file_queue_byte_csv = fopen(filename_byte.c_str(), "w+");
+            std::cout << "    >> Opened: " << filename_byte << std::endl;
+
+            if (!file_queue_pkt_csv || !file_queue_byte_csv) {
+                NS_ABORT_MSG("Failed to open ISL queue tracking output files");
+            }
+
+            // 排序 trackers (按照 from, to 排序)
+            std::sort(m_isl_queue_trackers.begin(), m_isl_queue_trackers.end(),
+                [](const std::pair<std::pair<int32_t, int32_t>, Ptr<PtopLinkQueueTracker>>& a, 
+                const std::pair<std::pair<int32_t, int32_t>, Ptr<PtopLinkQueueTracker>>& b) {
+                    return (a.first.first == b.first.first) ? 
+                        (a.first.second < b.first.second) : 
+                        (a.first.first < b.first.first);
+                }
+            );
+
+            // 寫入每個 tracker 的資料
+            for (const auto& entry : m_isl_queue_trackers) {
+                int32_t from = entry.first.first;
+                int32_t to = entry.first.second;
+                Ptr<PtopLinkQueueTracker> tracker = entry.second;
+
+                // 寫入 packets 資料
+                const std::vector<std::tuple<int64_t, int64_t, int64_t>>& log_entries_pkt = tracker->GetIntervalsNumPackets();
+                for (size_t j = 0; j < log_entries_pkt.size(); j++) {
+                    fprintf(file_queue_pkt_csv,
+                            "%d,%d,%" PRId64 ",%" PRId64 ",%" PRId64 "\n",
+                            from, to,
+                            std::get<0>(log_entries_pkt[j]),  // interval start (ns)
+                            std::get<1>(log_entries_pkt[j]),  // interval end (ns)
+                            std::get<2>(log_entries_pkt[j])   // number of packets
+                    );
+                }
+
+                // 寫入 bytes 資料
+                const std::vector<std::tuple<int64_t, int64_t, int64_t>>& log_entries_byte = tracker->GetIntervalsNumBytes();
+                for (size_t j = 0; j < log_entries_byte.size(); j++) {
+                    fprintf(file_queue_byte_csv,
+                            "%d,%d,%" PRId64 ",%" PRId64 ",%" PRId64 "\n",
+                            from, to,
+                            std::get<0>(log_entries_byte[j]),  // interval start (ns)
+                            std::get<1>(log_entries_byte[j]),  // interval end (ns)
+                            std::get<2>(log_entries_byte[j])   // number of bytes
+                    );
+                }
+            }
+
+            // Close CSV files
+            std::cout << "  > Closing ISL queue tracking output files" << std::endl;
+            fclose(file_queue_pkt_csv);
+            std::cout << "    >> Closed: " << filename_pkt << std::endl;
+            fclose(file_queue_byte_csv);
+            std::cout << "    >> Closed: " << filename_byte << std::endl;
+
+            // Register completion
+            std::cout << "  > ISL queue tracking files written successfully" << std::endl;
+            m_basicSimulation->RegisterTimestamp("Write ISL queue tracking files");
+
+        }
+        
+        std::cout << std::endl;
     }
 
     uint32_t TopologySatelliteNetwork::GetNumSatellites() {

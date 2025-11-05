@@ -40,37 +40,6 @@
 #include "ns3/trace-helper.h"
 #include "point-to-point-laser-helper.h"
 
-namespace {
-// 將檔名以 bound 參數傳入，避免使用已被銷毀的 this
-static void QueueLengthTraceToFile(std::string filename, uint32_t oldValue, uint32_t newValue)
-{
-  std::ofstream file(filename, std::ios::app);
-  file << ns3::Simulator::Now().GetSeconds() << ",QUEUE_LENGTH,"
-       << oldValue << "," << newValue << std::endl;
-}
-
-static void EnqueueTraceToFile(std::string filename, ns3::Ptr<const ns3::Packet> packet)
-{
-  std::ofstream file(filename, std::ios::app);
-  file << ns3::Simulator::Now().GetSeconds() << ",ENQUEUE,"
-       << packet->GetUid() << "," << packet->GetSize() << std::endl;
-}
-
-static void DequeueTraceToFile(std::string filename, ns3::Ptr<const ns3::Packet> packet)
-{
-  std::ofstream file(filename, std::ios::app);
-  file << ns3::Simulator::Now().GetSeconds() << ",DEQUEUE,"
-       << packet->GetUid() << "," << packet->GetSize() << std::endl;
-}
-
-static void DropTraceToFile(std::string filename, ns3::Ptr<const ns3::Packet> packet)
-{
-  std::ofstream file(filename, std::ios::app);
-  file << ns3::Simulator::Now().GetSeconds() << ",DROP,"
-       << packet->GetUid() << "," << packet->GetSize() << std::endl;
-}
-} // anonymous namespace
-
 namespace ns3 {
 
 NS_LOG_COMPONENT_DEFINE ("PointToPointLaserHelper");
@@ -97,24 +66,6 @@ PointToPointLaserHelper::SetQueue (std::string type,
   m_queueFactory.Set (n2, v2);
   m_queueFactory.Set (n3, v3);
   m_queueFactory.Set (n4, v4);
-}
-
-void
-PointToPointLaserHelper::SetQueueTraceFile(std::string filename)
-{
-  m_enableQueueTraces = true;
-  m_queueTraceFile = filename;
-
-  // 正確地建立/覆寫檔案，必要時也可寫表頭
-  std::ofstream file(m_queueTraceFile, std::ios::trunc);
-  if (!file.is_open())
-  {
-    NS_ABORT_MSG("    >> Error: Create queue trace file failed!");
-  }
-  std::cout << "    >> Create trace file: " << m_queueTraceFile << std::endl;
-  // 可選：寫表頭
-  // file << "time,event,arg1,arg2\n";
-  file.close();
 }
 
 void 
@@ -171,32 +122,6 @@ PointToPointLaserHelper::Install (Ptr<Node> a, Ptr<Node> b)
   Ptr<NetDeviceQueueInterface> ndqiB = CreateObject<NetDeviceQueueInterface> ();
   ndqiB->GetTxQueue (0)->ConnectQueueTraces (queueB);
   devB->AggregateObject (ndqiB);
-
-  if (m_enableQueueTraces) {
-    // 隊列長度變化追蹤
-    queueA->TraceConnectWithoutContext("PacketsInQueue", 
-      MakeBoundCallback(&QueueLengthTraceToFile, m_queueTraceFile));
-    queueB->TraceConnectWithoutContext("PacketsInQueue",
-      MakeBoundCallback(&QueueLengthTraceToFile, m_queueTraceFile));
-    
-    // 封包入隊追蹤
-    queueA->TraceConnectWithoutContext("Enqueue",
-      MakeBoundCallback(&EnqueueTraceToFile, m_queueTraceFile));
-    queueB->TraceConnectWithoutContext("Enqueue",
-      MakeBoundCallback(&EnqueueTraceToFile, m_queueTraceFile));
-    
-    // 封包出隊追蹤
-    queueA->TraceConnectWithoutContext("Dequeue",
-      MakeBoundCallback(&DequeueTraceToFile, m_queueTraceFile));
-    queueB->TraceConnectWithoutContext("Dequeue",
-      MakeBoundCallback(&DequeueTraceToFile, m_queueTraceFile));
-    
-    // 封包丟棄追蹤
-    queueA->TraceConnectWithoutContext("Drop",
-      MakeBoundCallback(&DropTraceToFile, m_queueTraceFile));
-    queueB->TraceConnectWithoutContext("Drop",
-      MakeBoundCallback(&DropTraceToFile, m_queueTraceFile));
-  }
 
   // Distributed mode
   NS_ABORT_MSG_IF(MpiInterface::IsEnabled(), "Distributed mode is not currently supported for point-to-point lasers.");

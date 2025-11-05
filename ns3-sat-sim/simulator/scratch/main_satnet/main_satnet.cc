@@ -72,7 +72,7 @@ int main(int argc, char *argv[]) {
     Ptr<TopologySatelliteNetwork> topology = CreateObject<TopologySatelliteNetwork>(basicSimulation, Ipv4ArbiterRoutingHelper());
     ArbiterSingleForwardHelper arbiterHelper(basicSimulation, topology->GetNodes());
     GslIfBandwidthHelper gslIfBandwidthHelper(basicSimulation, topology->GetNodes());
-
+    
     // Schedule flows
     TcpFlowScheduler tcpFlowScheduler(basicSimulation, topology); // Requires enable_tcp_flow_scheduler=true
 
@@ -97,13 +97,11 @@ int main(int argc, char *argv[]) {
     // Collect utilization statistics
     topology->CollectUtilizationStatistics();
 
+    // Write ISL queue tracking results
+    topology->WriteISLQueueTrackingResults();
+
     // Finalize the simulation
     basicSimulation->Finalize();
-
-    QueueAnalyzer analyzer;
-    std::string isl_queue_trace_file = run_dir + "/logs_ns3/isl_queue_traces.csv";
-    analyzer.ProcessTraceFile(isl_queue_trace_file);
-    analyzer.PrintStatistics();
 
     return 0;
 
