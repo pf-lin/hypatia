@@ -31,6 +31,7 @@ from .algorithm_paired_many_only_over_isls import algorithm_paired_many_only_ove
 from .algorithm_paired_one_only_over_isls import algorithm_paired_one_only_over_isls
 from .algorithm_free_gs_one_sat_many_only_over_isls import algorithm_free_gs_one_sat_many_only_over_isls
 from .algorithm_lohi import algorithm_lohi_routing
+from .algorithm_queue_aware_over_isls import algorithm_queue_aware_over_isls
 
 
 def generate_dynamic_state(
@@ -99,7 +100,10 @@ def generate_dynamic_state_at(
         prev_output,
         enable_verbose_logs,
         num_orbits=None,
-        num_sats_per_orbit=None
+        num_sats_per_orbit=None,
+        queue_stats_file=None,  # for queue-aware algorithm
+        alpha=0.7,              # weight for distance
+        beta=0.3                # weight for queue delay
 ):
     if enable_verbose_logs:
         print("FORWARDING STATE AT T = " + (str(time_since_epoch_ns))
@@ -142,6 +146,9 @@ def generate_dynamic_state_at(
     total_num_isls = 0
     num_isls_per_sat = [0] * len(satellites)
     sat_neighbor_to_if = {}
+
+    isl_distances = []
+
     for (a, b) in list_isls:
 
         # ISLs are not permitted to exceed their maximum distance
@@ -149,6 +156,7 @@ def generate_dynamic_state_at(
         # TODO: but practically, defining a permanent ISL between two satellites which
         # TODO: can go out of distance is generally unwanted
         sat_distance_m = distance_m_between_satellites(satellites[a], satellites[b], str(epoch), str(time))
+        isl_distances.append(sat_distance_m)
         if sat_distance_m > max_isl_length_m:
             raise ValueError(
                 "The distance between two satellites (%d and %d) "
@@ -167,6 +175,42 @@ def generate_dynamic_state_at(
         num_isls_per_sat[a] += 1
         num_isls_per_sat[b] += 1
         total_num_isls += 1
+    
+    # 計算並顯示距離統計
+    if len(isl_distances) > 0:
+        min_distance = np.min(isl_distances)
+        max_distance = np.max(isl_distances)
+        avg_distance = np.mean(isl_distances)
+        median_distance = np.median(isl_distances)
+        std_distance = np.std(isl_distances)
+        
+        if enable_verbose_logs:
+            print("\n  ISL DISTANCE STATISTICS:")
+            print(f"  > Min. distance.......... {min_distance:.2f} m ({min_distance/1000:.2f} km)")
+            print(f"  > Max. distance.......... {max_distance:.2f} m ({max_distance/1000:.2f} km)")
+            print(f"  > Average distance....... {avg_distance:.2f} m ({avg_distance/1000:.2f} km)")
+            print(f"  > Median distance........ {median_distance:.2f} m ({median_distance/1000:.2f} km)")
+            print(f"  > Std. deviation......... {std_distance:.2f} m ({std_distance/1000:.2f} km)")
+        
+        # 保存距離統計到檔案
+        distance_stats_file = output_dynamic_state_dir + "/isl_distance_stats_" + str(time_since_epoch_ns) + ".txt"
+        with open(distance_stats_file, "w+") as f_stats:
+            f_stats.write("ISL Distance Statistics\n")
+            f_stats.write("=" * 60 + "\n")
+            f_stats.write(f"Time: {time_since_epoch_ns} ns ({time_since_epoch_ns / 1e9} seconds)\n")
+            f_stats.write(f"Total ISLs: {len(list_isls)}\n")
+            f_stats.write(f"Min distance: {min_distance:.2f} m ({min_distance/1000:.2f} km)\n")
+            f_stats.write(f"Max distance: {max_distance:.2f} m ({max_distance/1000:.2f} km)\n")
+            f_stats.write(f"Average distance: {avg_distance:.2f} m ({avg_distance/1000:.2f} km)\n")
+            f_stats.write(f"Median distance: {median_distance:.2f} m ({median_distance/1000:.2f} km)\n")
+            f_stats.write(f"Std deviation: {std_distance:.2f} m ({std_distance/1000:.2f} km)\n")
+            f_stats.write("\nDetailed ISL distances:\n")
+            for i, (a, b) in enumerate(list_isls):
+                f_stats.write(f"ISL {a:3d}-{b:3d}: {isl_distances[i]:10.2f} m ({isl_distances[i]/1000:8.2f} km)\n")
+    
+    else:
+        if enable_verbose_logs:
+            print("  > Total ISLs............. 0 (no ISLs defined)")
 
     if enable_verbose_logs:
         print("  > Total ISLs............. " + str(len(list_isls)))
@@ -325,6 +369,25 @@ def generate_dynamic_state_at(
             enable_verbose_logs,
             num_orbits,
             num_sats_per_orbit
+        )
+    
+    elif dynamic_state_algorithm == "algorithm_queue_aware_over_isls":
+        
+        return algorithm_queue_aware_over_isls(
+            output_dynamic_state_dir,
+            time_since_epoch_ns,
+            satellites,
+            ground_stations,
+            sat_net_graph_only_satellites_with_isls,
+            ground_station_satellites_in_range,
+            num_isls_per_sat,
+            sat_neighbor_to_if,
+            list_gsl_interfaces_info,
+            prev_output,
+            enable_verbose_logs,
+            queue_stats_file,
+            alpha,
+            beta
         )
 
     else:
