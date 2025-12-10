@@ -89,6 +89,8 @@ namespace ns3 {
         void CollectUtilizationStatistics();
         void WriteISLQueueTrackingResults();
 
+        void ResetQueueTrackers();
+
     private:
 
         // Build functions

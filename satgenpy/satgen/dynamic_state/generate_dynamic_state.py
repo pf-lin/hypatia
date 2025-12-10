@@ -175,7 +175,12 @@ def generate_dynamic_state_at(
         num_isls_per_sat[a] += 1
         num_isls_per_sat[b] += 1
         total_num_isls += 1
-    
+
+    if enable_verbose_logs:
+        print("  > Total ISLs............. " + str(len(list_isls)))
+        print("  > Min. ISLs/satellite.... " + str(np.min(num_isls_per_sat)))
+        print("  > Max. ISLs/satellite.... " + str(np.max(num_isls_per_sat)))
+
     # 計算並顯示距離統計
     if len(isl_distances) > 0:
         min_distance = np.min(isl_distances)
@@ -185,7 +190,7 @@ def generate_dynamic_state_at(
         std_distance = np.std(isl_distances)
         
         if enable_verbose_logs:
-            print("\n  ISL DISTANCE STATISTICS:")
+            print("\nISL DISTANCE STATISTICS")
             print(f"  > Min. distance.......... {min_distance:.2f} m ({min_distance/1000:.2f} km)")
             print(f"  > Max. distance.......... {max_distance:.2f} m ({max_distance/1000:.2f} km)")
             print(f"  > Average distance....... {avg_distance:.2f} m ({avg_distance/1000:.2f} km)")
@@ -211,11 +216,6 @@ def generate_dynamic_state_at(
     else:
         if enable_verbose_logs:
             print("  > Total ISLs............. 0 (no ISLs defined)")
-
-    if enable_verbose_logs:
-        print("  > Total ISLs............. " + str(len(list_isls)))
-        print("  > Min. ISLs/satellite.... " + str(np.min(num_isls_per_sat)))
-        print("  > Max. ISLs/satellite.... " + str(np.max(num_isls_per_sat)))
 
     #################################
 

@@ -3,7 +3,7 @@ import csv
 import os
 
 
-def load_queue_statistics(queue_stats_file, num_satellites):
+def load_queue_statistics(queue_stats_file, num_satellites, enable_verbose_logs):
     """
     從 NS-3 輸出的 queue 統計檔案讀取數據
     
@@ -31,10 +31,21 @@ def load_queue_statistics(queue_stats_file, num_satellites):
                 # 實際可以更精確地計算排隊延遲
                 queue_delays[(sat_from, sat_to)] = packet_sum
     
-    print("  > Loaded queue statistics:")
-    print(f"    >> Total links with queue data: {len(queue_delays)}")
-    for (link, q_delay) in queue_delays.items():
-        print(f"      >> Link {link[0]:3d}-{link[1]:3d}: queue_delay = {q_delay}")
+    # 統計雙向連接
+    unique_links = set()
+    directional_flows_with_traffic = 0
+    for (a, b), packets in queue_delays.items():
+        link = tuple(sorted([a, b]))  # 將 (0,1) 和 (1,0) 統一為 (0,1)
+        unique_links.add(link)
+        if packets > 0:
+            directional_flows_with_traffic += 1
+    
+    if enable_verbose_logs:
+        print("  > Queue statistics loaded:")
+        print(f"    >> Total directional flows: {len(queue_delays)}")
+        print(f"    >> Directional flows with traffic: {directional_flows_with_traffic}")
+        print(f"    >> Unique physical ISL links: {len(unique_links)}")
+    
     return queue_delays
 
 
@@ -97,16 +108,28 @@ def algorithm_queue_aware_over_isls(
     # 載入隊列統計數據
     queue_delays = {}
     if queue_stats_file and time_since_epoch_ns > 0:
-        queue_delays = load_queue_statistics(queue_stats_file, len(satellites))
-        if enable_verbose_logs:
-            print(f"  > Loaded queue statistics for {len(queue_delays)} links")
+        queue_delays = load_queue_statistics(queue_stats_file, len(satellites), enable_verbose_logs)
     
     # 更新圖的權重
     updated_graph = sat_net_graph_only_satellites_with_isls.copy()
     
+    # 統計有多少條鏈路被更新
+    links_updated = 0
+    links_with_queue_data = 0
+    
     for (a, b) in updated_graph.edges():
         original_distance = updated_graph.edges[(a, b)]["weight"]
-        queue_delay = queue_delays.get((a, b), 0)
+        
+        # 獲取兩個方向的隊列延遲
+        # 注意：NetworkX 無向圖的邊是標準化的（a < b），但 queue 數據可能是任一方向
+        queue_delay_a_to_b = queue_delays.get((a, b), 0)
+        queue_delay_b_to_a = queue_delays.get((b, a), 0)
+        
+        # 使用兩個方向的最大值（保守策略，避開擁塞）
+        queue_delay = max(queue_delay_a_to_b, queue_delay_b_to_a)
+        
+        # 或者使用平均值（較溫和的策略）
+        # queue_delay = (queue_delay_a_to_b + queue_delay_b_to_a) / 2.0
         
         # 計算新權重
         new_weight = calculate_link_weight(
@@ -117,10 +140,29 @@ def algorithm_queue_aware_over_isls(
         )
         
         updated_graph.edges[(a, b)]["weight"] = new_weight
+        links_updated += 1
         
-        if enable_verbose_logs and queue_delay > 0:
-            print(f"  > Link {a:3d}-{b:3d}: distance = {original_distance:7.0f} m, "
-                  f"queue ={queue_delay:3d}, new_weight = {new_weight:7.0f}")
+        if queue_delay_a_to_b > 0 or queue_delay_b_to_a > 0:
+            links_with_queue_data += 1
+            
+            if enable_verbose_logs:
+                direction_info = ""
+                if queue_delay_a_to_b > 0 and queue_delay_b_to_a > 0:
+                    direction_info = (f"queue({a:3d}->{b:3d})={queue_delay_a_to_b:3d}, "
+                                    f"queue({b:3d}->{a:3d})={queue_delay_b_to_a:3d}, "
+                                    f"max={queue_delay:3d}")
+                elif queue_delay_a_to_b > 0:
+                    direction_info = f"queue({a:3d}->{b:3d})={queue_delay_a_to_b:3d}"
+                else:
+                    direction_info = f"queue({b:3d}->{a:3d})={queue_delay_b_to_a:3d}"
+                
+                print(f"      >>> Link {a:3d}-{b:3d}: distance={original_distance:7.0f}m, "
+                      f"{direction_info}, new_weight={new_weight:7.0f}")
+    
+    if enable_verbose_logs:
+        print(f"    >> Total links updated: {links_updated}")
+        print(f"    >> Links with queue data: {links_with_queue_data}")
+        print(f"    >> Links without queue data: {links_updated - links_with_queue_data}")
     
     # GSL interface bandwidth 狀態
     output_filename = output_dynamic_state_dir + "/gsl_if_bandwidth_" + str(time_since_epoch_ns) + ".txt"

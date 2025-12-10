@@ -600,6 +600,26 @@ namespace ns3 {
         std::cout << std::endl;
     }
 
+    void TopologySatelliteNetwork::ResetQueueTrackers() {
+        if (!m_enable_queue_traces) {
+            return;
+        }
+        
+        std::cout << "  > Resetting " << m_isl_queue_trackers.size() << " ISL queue trackers..." << std::endl;
+        
+        // 遍歷所有 queue trackers 並重置
+        for (auto& entry : m_isl_queue_trackers) {
+            Ptr<PtopLinkQueueTracker> tracker = entry.second;
+            
+            if (tracker != nullptr) {
+                // 重置 tracker 的內部狀態
+                tracker->Reset();
+            }
+        }
+        
+        std::cout << "  > Queue trackers reset completed" << std::endl;
+    }
+
     uint32_t TopologySatelliteNetwork::GetNumSatellites() {
         return m_satelliteNodes.GetN();
     }

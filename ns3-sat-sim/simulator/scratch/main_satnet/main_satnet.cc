@@ -29,6 +29,7 @@
 #include <unistd.h>
 #include <chrono>
 #include <stdexcept>
+#include <cstdlib> // for system()
 
 #include "ns3/basic-simulation.h"
 #include "ns3/tcp-flow-scheduler.h"
@@ -82,23 +83,140 @@ int main(int argc, char *argv[]) {
     // Schedule pings
     PingmeshScheduler pingmeshScheduler(basicSimulation, topology); // Requires enable_pingmesh_scheduler=true
 
-    // Run simulation
-    basicSimulation->Run();
+    // ========== 動態閉環控制：分步執行模擬 ==========
+    
+    std::cout << "\n========================================" << std::endl;
+    std::cout << "DYNAMIC CLOSED-LOOP CONTROL MODE" << std::endl;
+    std::cout << "========================================\n" << std::endl;
+
+    // 讀取配置參數
+    int64_t simulation_end_time_ns = basicSimulation->GetSimulationEndTimeNs();
+    int64_t dynamic_state_update_interval_ns = 
+        parse_positive_int64(basicSimulation->GetConfigParamOrFail("dynamic_state_update_interval_ns"));
+    
+    // 步長（以秒為單位）
+    double step_size_s = dynamic_state_update_interval_ns / 1e9;
+    
+    std::cout << "Simulation parameters:" << std::endl;
+    std::cout << "  > Total duration......... " << (simulation_end_time_ns / 1e9) << " s" << std::endl;
+    std::cout << "  > Step size.............. " << step_size_s << " s (" 
+              << (dynamic_state_update_interval_ns / 1e6) << " ms)" << std::endl;
+    std::cout << "  > Total steps............ " 
+              << (simulation_end_time_ns / dynamic_state_update_interval_ns) << std::endl;
+    std::cout << std::endl;
+
+    // 獲取 Python 腳本路徑（假設在 run_dir 的上層）
+    std::string python_script_path = "/home/pflin/research/hypatia-pf/paper/lohi_replication/a_b/calculate_routes.py";
+    
+    // 迭代計數器
+    int64_t current_time_ns = 0;
+    int iteration = 0;
+    
+    // 主迴圈：分步執行模擬
+    while (current_time_ns < simulation_end_time_ns) {
+        
+        std::cout << "========================================" << std::endl;
+        std::cout << "Iteration " << iteration << ": t = " << (current_time_ns / 1e9) << " s" << std::endl;
+        std::cout << "========================================" << std::endl;
+        
+        // 計算下一個時間點
+        int64_t next_time_ns = current_time_ns + dynamic_state_update_interval_ns;
+        if (next_time_ns > simulation_end_time_ns) {
+            next_time_ns = simulation_end_time_ns;
+        }
+        
+        // ===== 步驟 1: 執行一個時間步的模擬 =====
+        std::cout << "\n[Step 1] Running simulation from " 
+                  << (current_time_ns / 1e9) << "s to " 
+                  << (next_time_ns / 1e9) << "s..." << std::endl;
+        
+        // 設定停止時間（覆蓋之前的設定）
+        Simulator::Stop(NanoSeconds(dynamic_state_update_interval_ns - 1));
+        
+        // 執行模擬
+        Simulator::Run();
+        
+        std::cout << "  > Simulation step completed at " 
+                  << (Simulator::Now().GetNanoSeconds() / 1e9) << "s" << std::endl;
+        
+        // ===== 步驟 2: 輸出 Queue 統計數據 =====
+        std::cout << "\n[Step 2] Writing ISL queue tracking results..." << std::endl;
+        topology->WriteISLQueueTrackingResults();
+        std::cout << "  > Queue data written to logs_ns3/isl_queue_pkt.csv" << std::endl;
+        
+        // ===== 步驟 3: 重置 Queue Trackers =====
+        std::cout << "\n[Step 3] Resetting queue trackers for next iteration..." << std::endl;
+        topology->ResetQueueTrackers();
+        std::cout << "  > Queue trackers reset" << std::endl;
+        
+        // 更新當前時間
+        current_time_ns = next_time_ns;
+        
+        // ===== 步驟 4: 如果還沒結束，呼叫 Python 計算下一個路由 =====
+        if (current_time_ns < simulation_end_time_ns) {
+            std::cout << "\n[Step 4] Calling Python script to calculate next routing..." << std::endl;
+            
+            // 構建 Python 命令
+            std::ostringstream python_cmd;
+            python_cmd << "cd " << run_dir << " && ";
+            python_cmd << "python " << python_script_path;
+            python_cmd << " --run_dir " << ".";
+            python_cmd << " --current_time_ns " << current_time_ns;
+            python_cmd << " --iteration " << iteration;
+            
+            std::string cmd_str = python_cmd.str();
+            std::cout << "  > Executing: " << cmd_str << std::endl;
+            
+            // 執行 Python 腳本
+            int ret = std::system(cmd_str.c_str());
+            
+            if (ret != 0) {
+                std::cerr << "ERROR: Python script failed with return code " << ret << std::endl;
+                // 可以選擇繼續或中止
+                // throw std::runtime_error("Python routing calculation failed");
+            } else {
+                std::cout << "Python script finished without errors" << std::endl;
+                std::cout << "New fstate file should be ready: fstate_" 
+                          << current_time_ns << ".txt" << std::endl;
+            }
+            
+            // 注意：ArbiterSingleForwardHelper 已經有排程事件會自動讀取新的 fstate
+            // 所以這裡不需要手動觸發更新
+            
+        } else {
+            std::cout << "\n[Final] Reached simulation end time, skipping route calculation" << std::endl;
+        }
+        
+        iteration++;
+        std::cout << "\nIteration " << (iteration - 1) << " completed!\n" << std::endl;
+    }
+    
+    std::cout << "========================================" << std::endl;
+    std::cout << "ALL ITERATIONS COMPLETED" << std::endl;
+    std::cout << "========================================\n" << std::endl;
+    
+    // ===== 最終結果輸出 =====
+
+    std::cout << "WRITING FINAL RESULTS" << std::endl;
 
     // Write flow results
+    std::cout << "  > Writing TCP flow results..." << std::endl;
     tcpFlowScheduler.WriteResults();
 
     // Write UDP burst results
+    std::cout << "  > Writing UDP burst results..." << std::endl;
     udpBurstScheduler.WriteResults();
 
     // Write pingmesh results
+    std::cout << "  > Writing pingmesh results..." << std::endl;
     pingmeshScheduler.WriteResults();
 
     // Collect utilization statistics
+    std::cout << "  > Collecting utilization statistics..." << std::endl;
     topology->CollectUtilizationStatistics();
 
-    // Write ISL queue tracking results
-    topology->WriteISLQueueTrackingResults();
+    std::cout << "  > All results written" << std::endl;
+    std::cout << std::endl;
 
     // Finalize the simulation
     basicSimulation->Finalize();
