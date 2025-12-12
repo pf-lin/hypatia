@@ -1,6 +1,7 @@
 import sys
 import os
 import subprocess
+import pickle
 sys.path.append("/home/pflin/research/hypatia-pf/satgenpy")
 from satgen.dynamic_state.generate_dynamic_state import generate_dynamic_state_at
 from satgen.isls import read_isls
@@ -64,7 +65,6 @@ def generate_single_fstate(
         lines = f.readlines()
         max_gsl_length_m = float(lines[0].split('=')[1].strip())
         max_isl_length_m = float(lines[1].split('=')[1].strip())
-
     
     output = generate_dynamic_state_at(
         dynamic_state_dir,
@@ -105,9 +105,12 @@ def main():
     os.makedirs(dynamic_state_dir, exist_ok=True)
     os.makedirs(os.path.join(run_dir, "logs_ns3"), exist_ok=True)
     os.makedirs(os.path.join(run_dir, "queue_stats"), exist_ok=True)
+
+    # 新增：創建 prev_output_cache 目錄
+    prev_output_dir = os.path.join(run_dir, "prev_output_cache")
+    os.makedirs(prev_output_dir, exist_ok=True)
     
     current_time_ns = 0
-
     prev_output = None
     queue_stats_file = None
     
@@ -119,6 +122,13 @@ def main():
         prev_output,
         queue_stats_file
     )
+
+    # 新增：保存初始的 prev_output
+    if prev_output:
+        pickle_file = os.path.join(prev_output_dir, f"prev_output_0.pkl")
+        with open(pickle_file, 'wb') as f:
+            pickle.dump(prev_output, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"Saved initial prev_output to: {pickle_file}\n")
     
     print("Starting dynamic routing and NS-3 simulation loop...") 
     run_ns3_simulation(run_dir)

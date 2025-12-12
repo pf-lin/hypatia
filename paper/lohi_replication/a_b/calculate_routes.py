@@ -2,6 +2,7 @@ import sys
 import os
 import argparse
 import pandas as pd
+import pickle
 sys.path.append("/home/pflin/research/hypatia-pf/satgenpy")
 from satgen.dynamic_state.generate_dynamic_state import generate_dynamic_state_at
 from satgen.isls import read_isls
@@ -18,7 +19,7 @@ def process_queue_statistics(logs_dir, output_file):
     
     if not os.path.exists(isl_queue_file):
         print(f"Warning: {isl_queue_file} not found")
-        return
+        return None
     
     # 讀取 CSV（無 header）
     df = pd.read_csv(isl_queue_file, header=None, 
@@ -42,6 +43,63 @@ def process_queue_statistics(logs_dir, output_file):
     
     print(f"  > Processed {len(result)} active links")
     print(f"  > Saved to: {output_file}")
+
+    return output_file
+
+
+def save_prev_output(prev_output, output_dir, time_ns):
+    """
+    將當前的輸出保存為 pickle 檔案，供下次使用
+    
+    Args:
+        prev_output: 包含 fstate 的字典
+        output_dir: 輸出目錄
+        time_ns: 當前時間戳（納秒）
+    """
+    if prev_output is None:
+        return
+    
+    pickle_file = os.path.join(output_dir, f"prev_output_{time_ns}.pkl")
+    
+    try:
+        with open(pickle_file, 'wb') as f:
+            pickle.dump(prev_output, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"  > Saved prev_output to: {pickle_file}")
+    except Exception as e:
+        print(f"  > Warning: Failed to save prev_output: {e}")
+
+
+def load_prev_output(output_dir, prev_time_ns):
+    """
+    從 pickle 檔案載入上一次的輸出
+    
+    Args:
+        output_dir: 輸出目錄
+        prev_time_ns: 上一個時間戳（納秒）
+    
+    Returns:
+        prev_output 字典，如果不存在則返回 None
+    """
+    pickle_file = os.path.join(output_dir, f"prev_output_{prev_time_ns}.pkl")
+    
+    if not os.path.exists(pickle_file):
+        print(f"  > No previous output found at: {pickle_file}")
+        return None
+    
+    try:
+        with open(pickle_file, 'rb') as f:
+            prev_output = pickle.load(f)
+        print(f"  > Loaded prev_output from: {pickle_file}")
+        
+        # 統計 fstate 大小
+        if prev_output and 'fstate' in prev_output:
+            fstate_size = len(prev_output['fstate'])
+            print(f"    >> Previous fstate contains {fstate_size} entries")
+        
+        return prev_output
+    except Exception as e:
+        print(f"  > Warning: Failed to load prev_output: {e}")
+        return None
 
 
 def generate_single_fstate(
@@ -78,7 +136,6 @@ def generate_single_fstate(
         lines = f.readlines()
         max_gsl_length_m = float(lines[0].split('=')[1].strip())
         max_isl_length_m = float(lines[1].split('=')[1].strip())
-
     
     output = generate_dynamic_state_at(
         dynamic_state_dir,
@@ -121,6 +178,7 @@ def main():
     run_dir = args.run_dir
     current_time_ns = args.current_time_ns
     time_step_ns = 100 * 1000 * 1000  # 100 ms
+    prev_time_ns = current_time_ns - time_step_ns
     
     satellite_network_dir = os.path.join(
         "/home/pflin/research/hypatia-pf/paper/satellite_networks_state/gen_data",
@@ -128,35 +186,73 @@ def main():
     )
     
     dynamic_state_dir = os.path.join(run_dir, "dynamic_state")
+    
+    # 創建 prev_output 目錄（如果不存在）
+    prev_output_dir = os.path.join(run_dir, "prev_output_cache")
+    os.makedirs(prev_output_dir, exist_ok=True)
 
-    # 步驟 1: 處理 queue 統計
+    # ===== 步驟 1: 處理 queue 統計 =====
     print("Step 1: Processing queue statistics...")
     queue_stats_file = os.path.join(
-        run_dir, "queue_stats", f"queue_stats_{current_time_ns - time_step_ns}.csv"
+        run_dir, "queue_stats", f"queue_stats_{prev_time_ns}.csv"
     )
-    process_queue_statistics(
+    queue_file = process_queue_statistics(
         os.path.join(run_dir, "logs_ns3"),
         queue_stats_file
     )
     
-    # 步驟 2: 生成新的 fstate
-    print(f"\nStep 2: Generating fstate for t={current_time_ns}ns...")
+    # ===== 步驟 2: 載入上一次的 fstate（作為 prev_fstate）=====
+    print(f"\nStep 2: Loading previous forwarding state...")
+    prev_output = load_prev_output(prev_output_dir, prev_time_ns)
     
-    # 讀取前一個輸出（如果有的話）
-    prev_output = None
+    if prev_output is None:
+        print("  > This is the first iteration or prev_output not found")
+        print("  > Will write complete forwarding state")
+    else:
+        print("  > Will write only changed forwarding entries")
+    
+    # ===== 步驟 3: 生成新的 fstate =====
+    print(f"\nStep 3: Generating fstate for t={current_time_ns}ns...")
     
     output = generate_single_fstate(
         satellite_network_dir,
         dynamic_state_dir,
         current_time_ns,
-        prev_output,
-        queue_stats_file,
+        prev_output,  # 傳入上一次的輸出
+        queue_file,
         args.alpha,
         args.beta
     )
     
-    print(f"Route calculation completed successfully")
-    print(f"New fstate file: {dynamic_state_dir}/fstate_{current_time_ns}.txt\n")
+    # ===== 步驟 4: 保存當前的 output 供下次使用 =====
+    print(f"Step 4: Saving current output for next iteration...")
+    save_prev_output(output, prev_output_dir, current_time_ns)
+    
+    # ===== 步驟 5: 清理舊的 pickle 檔案（可選，節省空間）=====
+    # 只保留最近兩次的 pickle 檔案
+    if prev_time_ns > 0:
+        old_pickle_file = os.path.join(prev_output_dir, f"prev_output_{prev_time_ns - time_step_ns}.pkl")
+        if os.path.exists(old_pickle_file):
+            try:
+                os.remove(old_pickle_file)
+                print(f"  > Cleaned up old pickle file: {old_pickle_file}")
+            except Exception as e:
+                print(f"  > Warning: Failed to remove old pickle file: {e}")
+    
+    print(f"\nRoute calculation completed successfully!")
+    print(f"New fstate file: {dynamic_state_dir}/fstate_{current_time_ns}.txt")
+    
+    # 統計寫入的條目數（從檔案大小估計）
+    fstate_file = os.path.join(dynamic_state_dir, f"fstate_{current_time_ns}.txt")
+    if os.path.exists(fstate_file):
+        with open(fstate_file, 'r') as f:
+            num_entries = sum(1 for _ in f)
+        print(f"  > Written {num_entries} forwarding entries")
+        
+        if prev_output is not None:
+            print(f"  > (Only changed entries were written)")
+    
+    print()
 
 
 if __name__ == "__main__":
