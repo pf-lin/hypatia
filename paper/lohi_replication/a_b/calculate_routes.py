@@ -106,6 +106,7 @@ def generate_single_fstate(
         satellite_network_dir,
         dynamic_state_dir,
         time_ns,
+        dynamic_state_algorithm,
         prev_output,
         queue_stats_file=None,
         alpha=0.7,
@@ -147,7 +148,7 @@ def generate_single_fstate(
         list_gsl_interfaces_info,
         max_gsl_length_m,
         max_isl_length_m,
-        "algorithm_queue_aware_over_isls",
+        dynamic_state_algorithm,
         prev_output,
         True,  # enable_verbose_logs
         None,  # num_orbits
@@ -163,6 +164,7 @@ def generate_single_fstate(
 def main():
     parser = argparse.ArgumentParser(description='Dynamic routing calculation')
     parser.add_argument('--run_dir', required=True, help='Run directory')
+    parser.add_argument('--fstate_calculation_algorithm', required=True, help='Fstate calculation algorithm')
     parser.add_argument('--current_time_ns', type=int, required=True, help='Current simulation time in ns')
     parser.add_argument('--iteration', type=int, required=True, help='Iteration number')
     parser.add_argument('--alpha', type=float, default=0.7, help='Distance weight')
@@ -176,6 +178,7 @@ def main():
     print(f"{'='*60}\n")
 
     run_dir = args.run_dir
+    fstate_calculation_algorithm = args.fstate_calculation_algorithm
     current_time_ns = args.current_time_ns
     time_step_ns = 100 * 1000 * 1000  # 100 ms
     prev_time_ns = current_time_ns - time_step_ns
@@ -218,6 +221,7 @@ def main():
         satellite_network_dir,
         dynamic_state_dir,
         current_time_ns,
+        fstate_calculation_algorithm,
         prev_output,  # 傳入上一次的輸出
         queue_file,
         args.alpha,

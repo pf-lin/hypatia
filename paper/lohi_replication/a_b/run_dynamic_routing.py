@@ -35,6 +35,7 @@ def generate_single_fstate(
         satellite_network_dir,
         dynamic_state_dir,
         time_ns,
+        dynamic_state_algorithm,
         prev_output,
         queue_stats_file=None,
         alpha=0.7,
@@ -76,7 +77,7 @@ def generate_single_fstate(
         list_gsl_interfaces_info,
         max_gsl_length_m,
         max_isl_length_m,
-        "algorithm_queue_aware_over_isls",
+        dynamic_state_algorithm,
         prev_output,
         True,  # enable_verbose_logs
         None,  # num_orbits
@@ -91,8 +92,10 @@ def generate_single_fstate(
 
 def main():
     # 配置參數
-    run_name = "oneweb_1200_isls_757_to_736_with_TcpNewReno_at_10_Mbps_dynamic"
-    run_dir = f"runs/{run_name}"
+    # fstate_calculation_algorithm = "algorithm_queue_aware_over_isls"
+    fstate_calculation_algorithm = "algorithm_tlr"
+    run_name = f"oneweb_1200_isls_757_to_736_with_TcpNewReno_at_10_Mbps_dynamic"
+    run_dir = f"runs/{run_name}/{fstate_calculation_algorithm}"
     
     satellite_network_dir = os.path.join(
         "/home/pflin/research/hypatia-pf/paper/satellite_networks_state/gen_data",
@@ -119,6 +122,7 @@ def main():
         satellite_network_dir,
         dynamic_state_dir,
         current_time_ns,
+        fstate_calculation_algorithm,
         prev_output,
         queue_stats_file
     )

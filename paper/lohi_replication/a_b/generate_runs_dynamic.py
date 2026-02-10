@@ -30,23 +30,23 @@ except (ImportError, SystemError):
 local_shell = exputil.LocalShell()
 
 # local_shell.remove_force_recursive("runs")
-# local_shell.remove_force_recursive("runs/oneweb_1200_isls_757_to_807_with_TcpNewReno_at_10_Mbps_dynamic")
-local_shell.remove_force_recursive("runs/oneweb_1200_isls_757_to_736_with_TcpNewReno_at_10_Mbps_dynamic")
 
 # TCP runs
 for run in get_tcp_dynamic_run_list():
 
     # Prepare run directory
-    run_dir = "runs/" + run["name"]
+    run_dir = "runs/" + run["name"] + "/" + run["dynamic_state_algorithm"]
     local_shell.remove_force_recursive(run_dir)
     local_shell.make_full_dir(run_dir)
 
     # config_ns3.properties
     local_shell.copy_file("templates/template_tcp_a_b_config_ns3.properties", run_dir + "/config_ns3.properties")
     local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties",
-                                          "../../../../satellite_networks_state/gen_data/[SATELLITE-NETWORK]/[DYNAMIC-STATE]", str(run["dynamic_state"]))
+                                          "../../../../../satellite_networks_state/gen_data/[SATELLITE-NETWORK]/[DYNAMIC-STATE]", str(run["dynamic_state"]))
     local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties",
                                           "[SATELLITE-NETWORK]", str(run["satellite_network"]))
+    local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties",
+                                          "[DYNAMIC-STATE-ALGORITHM]", str(run["dynamic_state_algorithm"]))
     local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties",
                                           "[DYNAMIC-STATE-UPDATE-INTERVAL-NS]", str(run["dynamic_state_update_interval_ns"]))
     local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties",
@@ -84,16 +84,18 @@ for run in get_tcp_dynamic_run_list():
 for run in get_pings_dynamic_run_list():
 
     # Prepare run directory
-    run_dir = "runs/" + run["name"]
+    run_dir = "runs/" + run["name"] + "/" + run["dynamic_state_algorithm"]
     local_shell.remove_force_recursive(run_dir)
     local_shell.make_full_dir(run_dir)
 
     # config_ns3.properties
     local_shell.copy_file("templates/template_pings_a_b_config_ns3.properties", run_dir + "/config_ns3.properties")
     local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties",
-                                          "../../../../satellite_networks_state/gen_data/[SATELLITE-NETWORK]/[DYNAMIC-STATE]", str(run["dynamic_state"]))
+                                          "../../../../../satellite_networks_state/gen_data/[SATELLITE-NETWORK]/[DYNAMIC-STATE]", str(run["dynamic_state"]))
     local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties",
                                           "[SATELLITE-NETWORK]", str(run["satellite_network"]))
+    local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties",
+                                          "[DYNAMIC-STATE-ALGORITHM]", str(run["dynamic_state_algorithm"]))
     local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties",
                                           "[DYNAMIC-STATE-UPDATE-INTERVAL-NS]", str(run["dynamic_state_update_interval_ns"]))
     local_shell.sed_replace_in_file_plain(run_dir + "/config_ns3.properties",

@@ -107,7 +107,11 @@ int main(int argc, char *argv[]) {
 
     // 獲取 Python 腳本路徑（假設在 run_dir 的上層）
     std::string python_script_path = "/home/pflin/research/hypatia-pf/paper/lohi_replication/a_b/calculate_routes.py";
-    
+
+    // 獲取動態狀態算法名稱
+    std::string dynamic_state_algorithm = basicSimulation->GetConfigParamOrFail("dynamic_state_algorithm");
+    std::cout << "Using dynamic state calculation algorithm: " << dynamic_state_algorithm << std::endl << std::endl;
+
     // 迭代計數器
     int64_t current_time_ns = 0;
     int iteration = 0;
@@ -161,6 +165,7 @@ int main(int argc, char *argv[]) {
             python_cmd << "cd " << run_dir << " && ";
             python_cmd << "python " << python_script_path;
             python_cmd << " --run_dir " << ".";
+            python_cmd << " --fstate_calculation_algorithm " << dynamic_state_algorithm;
             python_cmd << " --current_time_ns " << current_time_ns;
             python_cmd << " --iteration " << iteration;
             
