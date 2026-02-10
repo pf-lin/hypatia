@@ -122,15 +122,40 @@ def compute_path_length_without_graph(path, epoch, time_since_epoch_ns, satellit
 
 def get_path(src, dst, forward_state):
 
+    if (src, dst) not in forward_state:
+        return None
+    
     if forward_state[(src, dst)] == -1:  # No path exists
         return None
 
     curr = src
     path = [src]
+    visited = set([src])  # ← 新增：追蹤已訪問節點
+    max_hops = 1000  # ← 新增：最大跳數限制
+    
     while curr != dst:
+        if len(path) > max_hops:  # ← 檢查最大跳數
+            print(f"Warning: Path from {src} to {dst} exceeds {max_hops} hops (likely a loop)")
+            return None
+        
+        if (curr, dst) not in forward_state:  # ← 檢查轉發表項目是否存在
+            print(f"Warning: No forwarding entry for ({curr}, {dst})")
+            return None
+        
         next_hop = forward_state[(curr, dst)]
+        
+        if next_hop == -1:  # ← 路徑中斷
+            print(f"Warning: Path from {src} to {dst} is broken at node {curr}")
+            return None
+        
+        if next_hop in visited:  # ← 檢測環路
+            print(f"Warning: Routing loop detected! Path: {path} -> {next_hop}")
+            return None
+        
         path.append(next_hop)
+        visited.add(next_hop)
         curr = next_hop
+    
     return path
 
 
