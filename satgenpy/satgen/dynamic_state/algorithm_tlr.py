@@ -142,91 +142,10 @@ def get_final_color(u, v, traffic_states):
 
 # ========== 4. Fast Next Hop Calculation (Reverse Dijkstra) ==========
 
-def calculate_next_hops_optimized(graph, num_satellites, ground_stations, enable_verbose_logs):
-    """
-    Optimized BR and SBR calculation using Reverse Dijkstra.
-    Instead of calculating paths for every pair (N*M), 
-    we calculate Single-Source Shortest Path from every Destination (M).
-    
-    Returns:
-        dict: { (src_id, dst_id): {'br': next_hop_id, 'sbr': next_hop_id} }
-    """
-    if enable_verbose_logs:
-        print("\n  === Calculating Next Hops (Optimized) ===")
-    
-    next_hops = {}
-    
-    # We only care about routes TO ground stations (Downlink/Feeder) 
-    # and routes TO other Ground Stations (if applicable).
-    # Since GS are destinations, we iterate over them.
-    
-    # List of all destination nodes (Ground Stations)
-    # Note: If Sat-to-Sat communication is a destination, add them here.
-    # Assuming primary traffic is towards Ground Stations.
-    destinations = [num_satellites + gs['gid'] for gs in ground_stations]
-    
-    for dst_node in destinations:
-        # 1. Run Dijkstra from this Destination to ALL other nodes
-        # Since graph is undirected, distance(u, dst) == distance(dst, u)
-        try:
-            lengths, _ = nx.single_source_dijkstra(graph, source=dst_node, weight='weight')
-        except nx.NetworkXNoPath:
-            continue # Disconnected destination
-            
-        # 2. For every Satellite, determine optimal next hop towards this dst_node
-        for src_node in range(num_satellites):
-            if src_node not in lengths:
-                continue # Unreachable
-                
-            # Check all neighbors of src_node
-            neighbors = list(graph.neighbors(src_node))
-            if not neighbors:
-                continue
-                
-            # Calculate cost through each neighbor
-            # Cost = Weight(Src, Neighbor) + Distance(Neighbor, Dst)
-            candidates = []
-            for nbr in neighbors:
-                if nbr in lengths:
-                    cost = graph[src_node][nbr]['weight'] + lengths[nbr]
-                    candidates.append((cost, nbr))
-            
-            if not candidates:
-                continue
-                
-            # Sort by cost (ascending)
-            # #1 is BR, #2 is SBR
-            candidates.sort(key=lambda x: x[0])
-            
-            br_hop = candidates[0][1]
-            sbr_hop = candidates[1][1] if len(candidates) > 1 else None
-            
-            next_hops[(src_node, dst_node)] = {'br': br_hop, 'sbr': sbr_hop}
-
-    # Handle GS-to-GS if needed (Optional, usually minor traffic)
-    # We can use the same logic if we treat GS as sources too.
-    for src_gid in range(len(ground_stations)):
-        src_node = num_satellites + src_gid
-        for dst_node in destinations:
-            if src_node == dst_node: continue
-            
-            # Same logic for GS source
-            neighbors = list(graph.neighbors(src_node))
-            candidates = []
-            for nbr in neighbors:
-                # GS usually only connects to satellites, check if nbr can reach dst
-                if nbr in lengths: # lengths from the current dst_node loop
-                     # Note: lengths is mostly valid if graph is connected. 
-                     # But we are outside the loop of dst_node here? 
-                     # ERROR: We need to do this INSIDE the dst_node loop.
-                     pass 
-    
-    return next_hops
-
-
 def calculate_next_hops_optimized_complete(graph, num_satellites, ground_stations, enable_verbose_logs):
     """
     Correct implementation including GS sources.
+    Calculate next hops with loop prevention
     """
     if enable_verbose_logs:
         print("  > Running Reverse Dijkstra for all destinations...")
@@ -237,7 +156,7 @@ def calculate_next_hops_optimized_complete(graph, num_satellites, ground_station
     for dst_node in destinations:
         try:
             # Dijkstra from DST to everywhere
-            lengths, _ = nx.single_source_dijkstra(graph, source=dst_node, weight='weight')
+            lengths, paths = nx.single_source_dijkstra(graph, source=dst_node, weight='weight')
         except nx.NetworkXNoPath:
             continue
 
@@ -252,23 +171,59 @@ def calculate_next_hops_optimized_complete(graph, num_satellites, ground_station
             
             neighbors = list(graph.neighbors(src_node))
             candidates = []
+
+            # ========== 關鍵修改：找出最短路徑上的前一跳 ==========
+            # paths[src_node] = [dst_node, ..., prev_node, src_node]
+            # 我們要的是 src_node 往 dst_node 的下一跳，也就是倒數第二個節點
+            shortest_path = paths[src_node]
+            br_next_hop = shortest_path[-2] if len(shortest_path) > 1 else None
             
             for nbr in neighbors:
                 if nbr in lengths:
-                    # Weight might vary per link
                     w = graph[src_node][nbr].get('weight', 1.0)
                     dist = lengths[nbr]
                     total_cost = w + dist
                     candidates.append((total_cost, nbr))
             
-            if candidates:
-                # Sort: Lowest cost first
-                candidates.sort(key=lambda x: x[0])
+            if not candidates:
+                next_hops[(src_node, dst_node)] = {'br': None, 'sbr': None}
+                continue
+            
+            # Sort: Lowest cost first
+            candidates.sort(key=lambda x: x[0])
+            
+            # BR: Always use the shortest path next hop
+            br = br_next_hop if br_next_hop else candidates[0][1]
+            
+            # ========== SBR 選擇邏輯（防環路）==========
+            sbr = None
+            sbr_cost = float('inf')
+            
+            for cost, nbr in candidates:
+                # 1. 排除 BR
+                if nbr == br:
+                    continue
                 
-                br = candidates[0][1]
-                sbr = candidates[1][1] if len(candidates) > 1 else None
+                # 2. ========== 修正：檢查 nbr 的 BR 是否指向 src_node ==========
+                # 如果 nbr 在最短路徑上的下一跳是 src_node，則會形成環路
+                if nbr in paths:
+                    nbr_path = paths[nbr]
+                    # nbr_path = [dst_node, ..., nbr_next_hop, nbr]
+                    # nbr 的下一跳是 nbr_path[-2]
+                    if len(nbr_path) > 1:
+                        nbr_next_hop = nbr_path[-2]
+                        if nbr_next_hop == src_node:
+                            # nbr 的 BR 指向 src_node → 會形成環路
+                            # if enable_verbose_logs:
+                            #     print(f"    >> Skipping SBR {src_node}->{nbr} (would create loop: {nbr}->{src_node})")
+                            continue
                 
-                next_hops[(src_node, dst_node)] = {'br': br, 'sbr': sbr}
+                # 3. 接受這個 SBR（如果成本合理）
+                if cost < sbr_cost and cost < lengths[src_node] * 1.5:
+                    sbr = nbr
+                    sbr_cost = cost
+            
+            next_hops[(src_node, dst_node)] = {'br': br, 'sbr': sbr}
                 
     return next_hops
 
