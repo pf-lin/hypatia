@@ -70,8 +70,21 @@ def generate_sat_obj_list(
     """
     sat_objs = [None] * (num_orbit * num_sats_per_orbit)
     counter = 0
+
+    # Determine constellation type based on inclination
+    # Polar: inclination > 80° and < 100°
+    # Delta: all other inclinations
+    constellation_type = "polar" if inclination > 80.0 and inclination < 100.0 else "delta"
+
     for orb in range(0, num_orbit):
-        raan = orb * 360 / num_orbit
+        # RAAN calculation depends on constellation type
+        # Polar: only need 180° coverage (orbit * 180 / num_orbit)
+        # Delta: need full 360° coverage (orbit * 360 / num_orbit)
+        if constellation_type == "polar":
+            raan = orb * 180.0 / num_orbit
+        else:
+            raan = orb * 360.0 / num_orbit
+
         orbit_wise_shift = 0
         if orb % 2 == 1:
             if phase_diff:
