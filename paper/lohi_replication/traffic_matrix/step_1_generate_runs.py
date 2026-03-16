@@ -23,11 +23,6 @@ from satgen.post_analysis.graph_tools import get_path
 
 local_shell = exputil.LocalShell()
 
-# Clean-up for a fresh run
-local_shell.remove_force_recursive("runs")
-local_shell.remove_force_recursive("pdf")
-local_shell.remove_force_recursive("data")
-
 # [修改] 將原本的兩個函式合併為一個統一的函式：
 # 1. 先算出所有 time step 的 fstate（只跑一次，所有 pair 共用）
 # 2. 從中找出 focus pair 的衝突衛星集合

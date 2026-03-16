@@ -31,17 +31,18 @@ def process_queue_statistics(logs_dir, output_file):
     # 因為在單一 100ms 時間窗內，每個 (from, to) 可能有多筆記錄
     result = (
         df.groupby(['from', 'to'])['num_packets']
-        .sum()
-        .reset_index(name='packet_sum')
+        .max()
+        .reset_index(name='packet_max')
     )
 
-    # 只保留 packet_sum > 0 的記錄
-    result = result[result['packet_sum'] > 0]
+    # 只保留 packet_max > 0 的記錄
+    result = result[result['packet_max'] > 0]
     
     # 寫入輸出（供下一次路由計算使用）
     result.to_csv(output_file, index=False)
     
     print(f"  > Processed {len(result)} active links")
+    print(f"  > Max queue size: {result['packet_max'].max() if len(result) > 0 else 0}")
     print(f"  > Saved to: {output_file}")
 
     return output_file

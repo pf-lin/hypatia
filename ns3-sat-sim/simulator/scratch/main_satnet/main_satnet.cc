@@ -105,8 +105,8 @@ int main(int argc, char *argv[]) {
               << (simulation_end_time_ns / dynamic_state_update_interval_ns) << std::endl;
     std::cout << std::endl;
 
-    // 獲取 Python 腳本路徑（假設在 run_dir 的上層）
-    std::string python_script_path = "/home/pflin/research/hypatia-pf/paper/lohi_replication/a_b/calculate_routes.py";
+    // 獲取 Python 腳本路徑
+    std::string python_script_path = "../../../calculate_routes.py";
 
     // 獲取動態狀態算法名稱
     std::string dynamic_state_algorithm = basicSimulation->GetConfigParamOrFail("dynamic_state_algorithm");

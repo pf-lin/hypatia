@@ -25,11 +25,11 @@ def load_queue_statistics(queue_stats_file, num_satellites, enable_verbose_logs)
             # 只處理衛星之間的 ISL
             if sat_from < num_satellites and sat_to < num_satellites:
                 # 計算平均隊列延遲 (可以用封包數或位元組數)
-                packet_sum = int(row['packet_sum'])
+                queue_len = int(row['packet_max'])
                 
-                # 簡化計算: packet_sum 越大代表越擁塞
+                # 簡化計算: packet_max 越大代表越擁塞
                 # 實際可以更精確地計算排隊延遲
-                queue_delays[(sat_from, sat_to)] = packet_sum
+                queue_delays[(sat_from, sat_to)] = queue_len
     
     # 統計雙向連接
     unique_links = set()

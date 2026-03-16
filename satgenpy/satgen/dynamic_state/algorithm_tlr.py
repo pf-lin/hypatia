@@ -60,7 +60,7 @@ def load_queue_and_calculate_states(queue_stats_file, num_satellites, config, en
                 
                 # Only care about Satellite-to-Satellite or Satellite-to-GS queues
                 # (Assuming GS-to-Sat queues don't affect routing DECISIONS on satellites)
-                queue_len = int(row['packet_sum'])
+                queue_len = int(row['packet_max'])
                 link_queue_len[(sat_from, sat_to)] = queue_len
     
     # === Step 2: Calculate QOR for each link (Current Hop State) ===
