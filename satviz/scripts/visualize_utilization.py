@@ -61,6 +61,7 @@ NUM_SATS_PER_ORB = 22
 INCLINATION_DEGREE = 53
 """
 
+"""
 # KUIPER 630
 NAME = "kuiper_630"
 
@@ -77,6 +78,24 @@ MAX_ISL_LENGTH_M = 2 * math.sqrt(math.pow(EARTH_RADIUS + ALTITUDE_M, 2) - math.p
 NUM_ORBS = 34
 NUM_SATS_PER_ORB = 34
 INCLINATION_DEGREE = 51.9
+"""
+
+# ONEWEB 1200
+NAME = "oneweb_1200"
+
+################################################################
+# The below constants are taken from OneWeb's FCC filing as below:
+# [1]: https://fcc.report/IBFS/SAT-LOI-20160428-00041/1134939.pdf
+################################################################
+
+MEAN_MOTION_REV_PER_DAY = 13.0   # Altitude ~1200 km
+ALTITUDE_M = 1200000  # Altitude ~1200 km
+SATELLITE_CONE_RADIUS_M = ALTITUDE_M / math.tan(math.radians(55.0))  # Considering an elevation angle of 55 degrees; OneWeb typically uses 55-85 degrees
+MAX_GSL_LENGTH_M = math.sqrt(math.pow(SATELLITE_CONE_RADIUS_M, 2) + math.pow(ALTITUDE_M, 2))
+MAX_ISL_LENGTH_M = 2 * math.sqrt(math.pow(EARTH_RADIUS + ALTITUDE_M, 2) - math.pow(EARTH_RADIUS + 80000, 2))  # ISLs are not allowed to dip below 80 km altitude in order to avoid weather conditions
+NUM_ORBS = 18
+NUM_SATS_PER_ORB = 40
+INCLINATION_DEGREE = 87.9
 
 
 # General files needed to generate visualizations; Do not change for different simulations
@@ -88,7 +107,7 @@ city_detail_file = "../../paper/satellite_networks_state/input_data/ground_stati
 GEN_TIME=100000  #ms
 
 # Input utilization data file; Generated during simulation
-IN_UTIL_FILE = "../../paper/ns3_experiments/traffic_matrix/runs/run_general_tm_pairing_kuiper_isls_moving/logs_ns3/isl_utilization.csv"
+IN_UTIL_FILE = "../../paper/lohi_replication/traffic_matrix/runs/run_general_tm_pairing_oneweb_isls_moving_dynamic/algorithm_tlr/logs_ns3/isl_utilization.csv"
 
 # Output directory for creating visualization html files
 OUT_DIR = "../viz_output/"
@@ -114,7 +133,7 @@ def generate_link_util_at_time():
         end_ms = round(int(val[3]) / 1000000)
         utilization = float(val[4])
         if utilization > 1.0:
-            SystemError("Util exceeded 1.0")
+            raise ValueError("Util exceeded 1.0")
         interval = 0  # millisecond
         while interval < end_ms - start_ms:
             time_wise_util[src, dst, start_ms + interval, start_ms + interval + UTIL_INTERVAL] = utilization
@@ -134,7 +153,7 @@ def generate_link_util_at_time():
                       + "material : Cesium.Color.BLACK.withAlpha(1),}});\n"
 
     # find link_wise util
-    grid_links = util.find_grid_links(sat_objs, NUM_ORBS, NUM_SATS_PER_ORB)
+    grid_links = util.find_grid_links(sat_objs, NUM_ORBS, NUM_SATS_PER_ORB, inclination_degree=INCLINATION_DEGREE, isl_shift=0)
     for key in grid_links:
         sat1 = grid_links[key]["sat1"]
         sat2 = grid_links[key]["sat2"]

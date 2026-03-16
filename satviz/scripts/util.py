@@ -165,9 +165,11 @@ def find_orbit_links(sat_positions, num_orbit, num_sats_per_orbit):
     return orbit_links
 
 
-def find_grid_links(sat_positions, num_orbit, num_sats_per_orbit):
+def find_grid_links(sat_positions, num_orbit, num_sats_per_orbit, inclination_degree=None, isl_shift=0):
     """
-    Generates +Grid connectivity between satellites
+    Generates +Grid connectivity between satellites.
+    For polar constellations, seam links (last orbit -> first orbit)
+    follow split reverse mapping to match generate_plus_grid_isls.py.
     :param sat_positions: List of satellite objects
     :param num_orbit: Number of orbits
     :param num_sats_per_orbit: Number of satellites per orbit
@@ -175,26 +177,51 @@ def find_grid_links(sat_positions, num_orbit, num_sats_per_orbit):
     """
     grid_links = {}
     cntr = 0
-    for i in range(0, len(sat_positions)):
-        sel_sat_id = get_neighbor_satellite(sat_positions[i]["orb_id"], sat_positions[i]["orb_sat_id"],
-                                                 0, 1, sat_positions,
-                                                 num_orbit, num_sats_per_orbit)
-        grid_links[cntr] = {
-            "sat1": i,
-            "sat2": sel_sat_id,
-            "dist": -1.0
-        }
+    # Build lookup: (orbit_id, orbit_sat_id) -> absolute satellite id
+    sat_id_map = {}
+    for idx, sat in enumerate(sat_positions):
+        sat_id_map[(sat["orb_id"], sat["orb_sat_id"])] = idx
+
+    constellation_type = "delta"
+    if inclination_degree is not None and 80.0 < inclination_degree < 100.0:
+        constellation_type = "polar"
+
+    half = num_sats_per_orbit // 2
+
+    for sat in sat_positions:
+        orb = sat["orb_id"]
+        rel = sat["orb_sat_id"]
+        sat_id = sat_id_map[(orb, rel)]
+
+        # Same-orbit link: (j -> j+1)
+        same_orb = orb
+        same_rel = (rel + 1) % num_sats_per_orbit
+        same_id = sat_id_map[(same_orb, same_rel)]
+        grid_links[cntr] = {"sat1": sat_id, "sat2": same_id, "dist": -1.0}
         cntr += 1
-        sel_sat_id = get_neighbor_satellite(sat_positions[i]["orb_id"], sat_positions[i]["orb_sat_id"],
-                                                 1, 0, sat_positions,
-                                                 num_orbit, num_sats_per_orbit)
-        grid_links[cntr] = {
-            "sat1": i,
-            "sat2": sel_sat_id,
-            "dist": -1.0
-        }
+
+        # Adjacent-orbit link
+        if constellation_type == "delta":
+            next_orb = (orb + 1) % num_orbit
+            next_rel = (rel + isl_shift) % num_sats_per_orbit
+        else:
+            # polar
+            if orb < num_orbit - 1:
+                next_orb = orb + 1
+                next_rel = (rel + isl_shift) % num_sats_per_orbit
+            else:
+                # seam: last orbit wraps to first with split reverse mapping
+                next_orb = 0
+                if rel < half:
+                    base_idx = half - rel - 1
+                else:
+                    base_idx = num_sats_per_orbit + half - rel - 1
+                next_rel = (base_idx + isl_shift) % num_sats_per_orbit
+
+        adj_id = sat_id_map[(next_orb, next_rel)]
+        grid_links[cntr] = {"sat1": sat_id, "sat2": adj_id, "dist": -1.0}
         cntr += 1
-    #print("num links:", cntr)
+
     return grid_links
 
 
