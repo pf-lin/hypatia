@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import numpy as np
+from datetime import datetime
 
 # [新增] 導入繪圖所需套件
 import numpy as np
@@ -25,6 +26,38 @@ sys.path.append(os.path.join(os.path.dirname(__file__)))
 from dynamic_run_list import get_tm_dynamic_run_list
 
 import exputil
+
+# ---------------------------------------------------------------------------
+# Logging helper: write stdout/stderr to both terminal and file
+# ---------------------------------------------------------------------------
+class TeeLogger:
+    def __init__(self, original_stream, log_fp):
+        self.original_stream = original_stream
+        self.log_fp = log_fp
+
+    def write(self, data):
+        self.original_stream.write(data)
+        self.log_fp.write(data)
+
+    def flush(self):
+        self.original_stream.flush()
+        self.log_fp.flush()
+
+
+def setup_logging(log_file_path):
+    os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
+    log_fp = open(log_file_path, "w", buffering=1)  # line-buffered
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    sys.stdout = TeeLogger(original_stdout, log_fp)
+    sys.stderr = TeeLogger(original_stderr, log_fp)
+    return original_stdout, original_stderr, log_fp
+
+
+def restore_logging(original_stdout, original_stderr, log_fp):
+    sys.stdout = original_stdout
+    sys.stderr = original_stderr
+    log_fp.close()
 
 # ---------------------------------------------------------------------------
 # gnuplot template (same style as lohi_replication/a_b/analysis_dynamic_result.py)
@@ -142,6 +175,7 @@ def generate_networkx_path_and_rtt(
     fstate = {}
     current_path = []
     rtt_ns_list = []
+    path_change = 0
 
     print("  > [networkx] Iterating fstate files t=0 to t=%d ns..." % simulation_end_time_ns)
 
@@ -187,6 +221,9 @@ def generate_networkx_path_and_rtt(
                 f_path.write("%d,%s\n" % (t, path_str))
                 print("    Path change at t=%.1f s → %s  (RTT=%.2f ms)" % (
                     t / 1e9, path_str, rtt_ns / 1e6))
+                path_change += 1
+    
+    print("  > [networkx] Total path changes: %d" % path_change)
 
     # 寫入 RTT 資料
     with open(rtt_filename, "w") as f_rtt:
@@ -274,6 +311,10 @@ def generate_graphical_routes(
 
     dynamic_state_dir = os.path.join(algorithm_run_dir, "dynamic_state")
 
+    # [新增] 在 pdf/[run_name]/[dynamic_state_algorithm] 底下建立專用資料夾
+    graphics_dir = os.path.join(pdf_dir, "graphical_routes")
+    os.makedirs(graphics_dir, exist_ok=True)
+
     # 顏色常數（與 analysis_dynamic_result.py 相同）
     GS_USED_COLOR        = "#3b3b3b"
     GS_UNUSED_COLOR      = "black"
@@ -327,7 +368,7 @@ def generate_graphical_routes(
             t / 1e9, rtt_ns / 1e6))
 
         pdf_filename = os.path.join(
-            pdf_dir,
+            graphics_dir,  # [修改] 改寫到子資料夾
             "graphics_%d_to_%d_time_%dms.pdf" % (
                 src_node_id, dst_node_id, int(t / 1_000_000))
         )
@@ -458,8 +499,8 @@ def analyze_pair_path_utilization(run_dir, dynamic_state_algorithm,
     dynamic_state_dir = os.path.join(algorithm_run_dir, "dynamic_state")
 
     run_short = os.path.basename(run_dir)
-    data_dir = "data/%s" % run_short
-    pdf_dir = "pdf/%s" % run_short
+    data_dir = os.path.join("data", run_short, dynamic_state_algorithm)
+    pdf_dir = os.path.join("pdf", run_short, dynamic_state_algorithm)
     os.makedirs(data_dir, exist_ok=True)
     os.makedirs(pdf_dir, exist_ok=True)
 
@@ -522,17 +563,14 @@ def analyze_pair_path_utilization(run_dir, dynamic_state_algorithm,
     # ------------------------------------------------------------------
     # 3. Compute max utilization per 100 ms interval
     # ------------------------------------------------------------------
-    run_short = os.path.basename(run_dir)
-    os.makedirs("data/%s" % run_short, exist_ok=True)
-    os.makedirs("pdf/%s" % run_short, exist_ok=True)
-
     number_of_intervals_total = 0
     number_of_intervals_with_a_path = 0
     number_of_intervals_with_at_least_a_third_unused = 0
     all_intervals = []
 
-    data_100ms = "data/%s/pair_path_utilization_at_100ms_%d_to_%d.txt" % (
-        run_short, src_node_id, dst_node_id)
+    data_100ms = os.path.join(
+        data_dir, "pair_path_utilization_at_100ms_%d_to_%d.txt" % (src_node_id, dst_node_id)
+    )
 
     with open(data_100ms, "w") as f_out:
         # Walk the path timeline to know current path at each t
@@ -568,8 +606,9 @@ def analyze_pair_path_utilization(run_dir, dynamic_state_algorithm,
     # ------------------------------------------------------------------
     # 4. Print / save statistics
     # ------------------------------------------------------------------
-    stat_file = "data/%s/utilization_information_%d_to_%d.txt" % (
-        run_short, src_node_id, dst_node_id)
+    stat_file = os.path.join(
+        data_dir, "utilization_information_%d_to_%d.txt" % (src_node_id, dst_node_id)
+    )
     with open(stat_file, "w") as f_out:
         for s in [
             "Total intervals.............................. %d" % number_of_intervals_total,
@@ -587,8 +626,9 @@ def analyze_pair_path_utilization(run_dir, dynamic_state_algorithm,
     # ------------------------------------------------------------------
     # 5. Aggregate to 1-second granularity
     # ------------------------------------------------------------------
-    data_1s = "data/%s/pair_path_utilization_at_1s_%d_to_%d.txt" % (
-        run_short, src_node_id, dst_node_id)
+    data_1s = os.path.join(
+        data_dir, "pair_path_utilization_at_1s_%d_to_%d.txt" % (src_node_id, dst_node_id)
+    )
     with open(data_1s, "w") as f_1s:
         acc = 0.0
         for i, (t, u) in enumerate(all_intervals, start=1):
@@ -600,8 +640,9 @@ def analyze_pair_path_utilization(run_dir, dynamic_state_algorithm,
     # ------------------------------------------------------------------
     # 6. Plot
     # ------------------------------------------------------------------
-    pdf_out = "pdf/%s/pair_available_bandwidth_%d_to_%d.pdf" % (
-        run_short, src_node_id, dst_node_id)
+    pdf_out = os.path.join(
+        pdf_dir, "pair_available_bandwidth_%d_to_%d.pdf" % (src_node_id, dst_node_id)
+    )
     script = PLOT_TEMPLATE.replace("[DATA-FILE]", data_1s).replace("[OUTPUT-FILE]", pdf_out)
     _run_gnuplot(script)
     print("  > PDF → %s" % pdf_out)
@@ -662,23 +703,47 @@ def main():
     os.makedirs("data", exist_ok=True)
     os.makedirs("pdf", exist_ok=True)
 
-    for run in get_tm_dynamic_run_list():
-        run_name = run["name"]
-        algorithm = run["dynamic_state_algorithm"]
-        run_dir = os.path.join("runs", run_name)
+    # [新增] 每次執行 step_3 都寫一份獨立 log
+    runs = get_tm_dynamic_run_list()
+    algo = runs[0]["dynamic_state_algorithm"] if runs else "unknown_algo"
+    script_dir = os.path.abspath(os.path.dirname(__file__))
+    logs_dir = os.path.join(script_dir, "logs")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # [修改] 檔名加上 dynamic_state_algorithm
+    log_file_path = os.path.join(
+        logs_dir,
+        f"step_3_generate_plots_{algo}_{ts}.log"
+    )
 
-        print("\n" + "=" * 60)
-        print("Analyzing: %s / %s" % (run_name, algorithm))
-        print("=" * 60)
+    original_stdout, original_stderr, log_fp = setup_logging(log_file_path)
+    try:
+        print("============================================================")
+        print("step_3_generate_plots.py started")
+        print("Log file: %s" % log_file_path)
+        print("============================================================")
 
-        analyze_pair_path_utilization(
-            run_dir=run_dir,
-            dynamic_state_algorithm=algorithm,
-            src_node_id=run["src_node_id"],
-            dst_node_id=run["dst_node_id"],
-            dynamic_state_update_interval_ns=run["dynamic_state_update_interval_ns"],
-            simulation_end_time_ns=run["simulation_end_time_ns"],
-        )
+        for run in runs:
+            run_name = run["name"]
+            algorithm = run["dynamic_state_algorithm"]
+            run_dir = os.path.join("runs", run_name)
+
+            print("\n" + "=" * 60)
+            print("Analyzing: %s / %s" % (run_name, algorithm))
+            print("=" * 60)
+
+            analyze_pair_path_utilization(
+                run_dir=run_dir,
+                dynamic_state_algorithm=algorithm,
+                src_node_id=run["src_node_id"],
+                dst_node_id=run["dst_node_id"],
+                dynamic_state_update_interval_ns=run["dynamic_state_update_interval_ns"],
+                simulation_end_time_ns=run["simulation_end_time_ns"],
+            )
+
+        print("\nstep_3_generate_plots.py finished successfully")
+    finally:
+        restore_logging(original_stdout, original_stderr, log_fp)
 
 
 if __name__ == "__main__":
