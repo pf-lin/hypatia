@@ -106,12 +106,15 @@ city_detail_file = "../../paper/satellite_networks_state/input_data/ground_stati
 # Time in ms for which visualization will be generated
 GEN_TIME=100000  #ms
 
+RUN_NAME = "run_general_tm_pairing_oneweb_isls_moving_dynamic"
+ALGORITHM_NAME = "algorithm_queue_aware_over_isls"
+
 # Input utilization data file; Generated during simulation
-IN_UTIL_FILE = "../../paper/lohi_replication/traffic_matrix/runs/run_general_tm_pairing_oneweb_isls_moving_dynamic/algorithm_tlr/logs_ns3/isl_utilization.csv"
+IN_UTIL_FILE = "../../paper/lohi_replication/traffic_matrix/runs/%s/%s/logs_ns3/isl_utilization.csv" % (RUN_NAME, ALGORITHM_NAME)
 
 # Output directory for creating visualization html files
 OUT_DIR = "../viz_output/"
-OUT_HTML_FILE = OUT_DIR + NAME + "_util_" + str(GEN_TIME) + ".html"
+OUT_HTML_FILE = OUT_DIR + NAME + "_util_" + ALGORITHM_NAME + str(GEN_TIME) + ".html"
 
 sat_objs = []
 time_wise_util = {}
