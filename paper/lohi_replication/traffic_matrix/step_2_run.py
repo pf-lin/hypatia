@@ -33,7 +33,7 @@ CALCULATE_ROUTES_SCRIPT = (
 
 def generate_single_fstate(satellite_network_dir, dynamic_state_dir, time_ns,
                             dynamic_state_algorithm, prev_output,
-                            queue_stats_file=None, alpha=0.7, beta=0.3):
+                            queue_stats_file=None, alpha=0.7, beta=0.3, time_step_ns=None):
     ground_stations = read_ground_stations_extended(
         os.path.join(satellite_network_dir, "ground_stations.txt"))
     tles = read_tles(os.path.join(satellite_network_dir, "tles.txt"))
@@ -53,14 +53,14 @@ def generate_single_fstate(satellite_network_dir, dynamic_state_dir, time_ns,
         dynamic_state_dir, epoch, time_ns, satellites, ground_stations,
         list_isls, list_gsl_interfaces_info, max_gsl_length_m, max_isl_length_m,
         dynamic_state_algorithm, prev_output, True, None, None,
-        queue_stats_file, alpha, beta)
+        queue_stats_file, alpha, beta, time_step_ns)
 
 
 def run_ns3_simulation(run_dir_relative):
     """Execute the NS-3 main_satnet binary for the given run directory."""
     cmd = (
         "cd ../../../ns3-sat-sim/simulator; "
-        "./waf --run=\"main_satnet "
+        "python3.10 ./waf --run=\"main_satnet "
         "--run_dir='../../paper/lohi_replication/traffic_matrix/%s'\" "
         "2>&1 | tee '../../paper/lohi_replication/traffic_matrix/%s/logs_ns3/console.txt'"
         % (run_dir_relative, run_dir_relative)
@@ -92,9 +92,10 @@ for run in get_tm_dynamic_run_list():
     # Step 1: Generate fstate_0.txt  (t = 0)
     # ------------------------------------------------------------------
     print("\n[Step 1] Generating initial fstate (t=0)...")
+    time_step_ns = 100 * 1000 * 1000  # 100 ms
     prev_output = generate_single_fstate(
         satellite_network_dir, dynamic_state_dir,
-        0, algorithm, None)
+        0, algorithm, None, time_step_ns=time_step_ns)
 
     # Persist so calculate_routes.py can load it as prev_output at t=100ms
     if prev_output:

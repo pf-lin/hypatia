@@ -67,7 +67,7 @@ def compute_all_fstates(satellite_network_dir, simulation_end_time_ns,
                 list_isls, list_gsl_interfaces_info,
                 max_gsl_length_m, max_isl_length_m,
                 algorithm, prev_output,
-                True, None, None, None, 0.7, 0.3
+                True, None, None, None, 0.7, 0.3, dynamic_state_update_interval_ns
             )
             prev_output = output
 

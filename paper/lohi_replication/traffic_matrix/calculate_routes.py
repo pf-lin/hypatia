@@ -71,7 +71,7 @@ def load_prev_output(output_dir, prev_time_ns):
 
 def generate_single_fstate(satellite_network_dir, dynamic_state_dir, time_ns,
                             dynamic_state_algorithm, prev_output,
-                            queue_stats_file=None, alpha=0.7, beta=0.3):
+                            queue_stats_file=None, alpha=0.7, beta=0.3, time_step_ns=None):
     ground_stations = read_ground_stations_extended(
         os.path.join(satellite_network_dir, "ground_stations.txt"))
     tles = read_tles(os.path.join(satellite_network_dir, "tles.txt"))
@@ -91,7 +91,7 @@ def generate_single_fstate(satellite_network_dir, dynamic_state_dir, time_ns,
         dynamic_state_dir, epoch, time_ns, satellites, ground_stations,
         list_isls, list_gsl_interfaces_info, max_gsl_length_m, max_isl_length_m,
         dynamic_state_algorithm, prev_output, True, None, None,
-        queue_stats_file, alpha, beta)
+        queue_stats_file, alpha, beta, time_step_ns)
 
 
 def main():
@@ -134,7 +134,7 @@ def main():
     print("\nStep 3: Generating fstate for t=%d ns..." % current_time_ns)
     output = generate_single_fstate(
         SATELLITE_NETWORK_DIR, dynamic_state_dir, current_time_ns,
-        algorithm, prev_output, queue_file, args.alpha, args.beta)
+        algorithm, prev_output, queue_file, args.alpha, args.beta, time_step_ns)
 
     # Step 4 – persist for next iteration
     print("Step 4: Saving current output for next iteration...")

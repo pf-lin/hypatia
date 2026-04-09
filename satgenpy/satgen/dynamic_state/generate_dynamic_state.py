@@ -33,6 +33,7 @@ from .algorithm_free_gs_one_sat_many_only_over_isls import algorithm_free_gs_one
 from .algorithm_lohi import algorithm_lohi_routing
 from .algorithm_queue_aware_over_isls import algorithm_queue_aware_over_isls
 from .algorithm_tlr import algorithm_tlr
+from .algorithm_lhtr import algorithm_lhtr, init as lhtr_init
 
 
 def generate_dynamic_state(
@@ -104,7 +105,8 @@ def generate_dynamic_state_at(
         num_sats_per_orbit=None,
         queue_stats_file=None,  # for queue-aware algorithm
         alpha=0.7,              # weight for distance
-        beta=0.3                # weight for queue delay
+        beta=0.3,               # weight for queue delay
+        time_step_ns=None       # time step for dynamic algorithms
 ):
     if enable_verbose_logs:
         print("FORWARDING STATE AT T = " + (str(time_since_epoch_ns))
@@ -406,6 +408,33 @@ def generate_dynamic_state_at(
             prev_output,
             enable_verbose_logs,
             queue_stats_file  # Pass queue stats file
+        )
+
+    elif dynamic_state_algorithm == "algorithm_lhtr":
+        # Initialize LHTR once if not already initialized
+        # 檢查是否已初始化，避免每次呼叫都重新初始化
+        from .algorithm_lhtr import _ROUTER as lhtr_router
+        if lhtr_router is None:
+            lhtr_init()
+        
+        # Default time_step_ns to 100ms if not provided
+        if time_step_ns is None:
+            time_step_ns = 100 * 1000 * 1000  # 100 ms
+        
+        return algorithm_lhtr(
+            output_dynamic_state_dir,
+            time_since_epoch_ns,
+            satellites,
+            ground_stations,
+            sat_net_graph_only_satellites_with_isls,
+            ground_station_satellites_in_range,
+            num_isls_per_sat,
+            sat_neighbor_to_if,
+            list_gsl_interfaces_info,
+            prev_output,
+            enable_verbose_logs,
+            queue_stats_file,
+            time_step_ns=time_step_ns
         )
 
     else:
