@@ -104,6 +104,12 @@ for run in get_tm_dynamic_run_list():
             pickle.dump(prev_output, f, protocol=pickle.HIGHEST_PROTOCOL)
         print("  > Saved initial prev_output → %s" % pkl)
 
+    # Persist LHTR internal state after t=0 so calculate_routes.py can restore it
+    if algorithm == "algorithm_lhtr":
+        from satgen.dynamic_state.algorithm_lhtr import save_lhtr_state
+        lhtr_pkl = os.path.join(prev_output_dir, "lhtr_state_0.pkl")
+        save_lhtr_state(lhtr_pkl)
+
     # ------------------------------------------------------------------
     # Step 2: Launch dynamic closed-loop NS-3 simulation
     # ------------------------------------------------------------------

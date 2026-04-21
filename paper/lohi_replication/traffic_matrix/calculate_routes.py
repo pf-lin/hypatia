@@ -130,6 +130,13 @@ def main():
     print("\nStep 2: Loading previous forwarding state...")
     prev_output = load_prev_output(prev_output_dir, prev_time_ns)
 
+    # Step 2.5 – restore LHTR internal state (only for algorithm_lhtr)
+    if algorithm == "algorithm_lhtr":
+        from satgen.dynamic_state.algorithm_lhtr import load_lhtr_state, save_lhtr_state
+        lhtr_state_file = os.path.join(prev_output_dir, "lhtr_state_%d.pkl" % prev_time_ns)
+        if not load_lhtr_state(lhtr_state_file):
+            print("  > [LHTR] Will initialize fresh state (first snapshot or fallback)")
+
     # Step 3 – generate new fstate
     print("\nStep 3: Generating fstate for t=%d ns..." % current_time_ns)
     output = generate_single_fstate(
@@ -139,6 +146,16 @@ def main():
     # Step 4 – persist for next iteration
     print("Step 4: Saving current output for next iteration...")
     save_prev_output(output, prev_output_dir, current_time_ns)
+
+    # Step 4.5 – persist LHTR internal state (only for algorithm_lhtr)
+    if algorithm == "algorithm_lhtr":
+        lhtr_state_cur = os.path.join(prev_output_dir, "lhtr_state_%d.pkl" % current_time_ns)
+        save_lhtr_state(lhtr_state_cur)
+        # Clean up old LHTR state file
+        old_lhtr_state = os.path.join(prev_output_dir, "lhtr_state_%d.pkl" % (prev_time_ns - time_step_ns))
+        if prev_time_ns > 0 and os.path.exists(old_lhtr_state):
+            os.remove(old_lhtr_state)
+            print("  > [LHTR] Cleaned up: %s" % old_lhtr_state)
 
     # Step 5 – clean up old pickle
     old_pkl = os.path.join(prev_output_dir, "prev_output_%d.pkl" % (prev_time_ns - time_step_ns))

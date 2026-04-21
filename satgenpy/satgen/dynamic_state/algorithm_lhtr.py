@@ -20,6 +20,7 @@ LHTR (Load-aware Hierarchical Traffic Routing) Algorithm
 """
 from dataclasses import dataclass
 from typing import Dict, Set, Tuple, List, Optional, Callable, Any
+from collections import Counter, defaultdict
 import csv
 import datetime as _dt
 import heapq
@@ -282,6 +283,62 @@ def _get_process_local_stats():
 
 def get_lhtr_signaling_stats():
     return _get_process_local_stats().to_json()
+
+
+def _dump_pid_snapshot(
+    snapshot_idx: int,
+    step_ms: int,
+    router: "VirtualPIDRouterPlaneBlock",
+    gplanner: "GroupPlanner",
+    sat_to_pid: Dict[int, int],
+    reason_counters: Optional[Dict[str, int]] = None,
+    missing_reason_counts: Optional[Dict[str, int]] = None,
+) -> None:
+    """Debug dump for PID/grouping and fstate missing reasons per timestamp."""
+    print(f"=== Timestamp: {snapshot_idx * step_ms} ms (snapshot={snapshot_idx}) ===")
+    print("=== PID Summary ===")
+    print(f"pid_count={len(router.pid_members)}")
+    print("pid_member_count=", {pid: len(mem) for pid, mem in sorted(router.pid_members.items())})
+    print("pid_key=", {pid: router.pid_key_map.get(pid) for pid in sorted(router.pid_members.keys())})
+    print("pid_mgmt_sat=", {pid: router.pid_mgmt_sat.get(pid) for pid in sorted(router.pid_members.keys())})
+
+    print("=== Connected Components ===")
+    pid_comp_counts = {}
+    pid_comp_node_counts = {}
+    sat_to_comp = {}
+    for pid in sorted(router.pid_members.keys()):
+        comp_map = router.pid_sat_comp.get(pid, {})
+        inv = defaultdict(list)
+        for sat, cid in comp_map.items():
+            inv[cid].append(sat)
+            sat_to_comp[sat] = (pid, cid)
+        for cid in inv:
+            inv[cid].sort()
+        pid_comp_counts[pid] = len(inv)
+        pid_comp_node_counts[pid] = {cid: len(nodes) for cid, nodes in sorted(inv.items())}
+    print("pid_component_count=", pid_comp_counts)
+    print("pid_component_node_count=", pid_comp_node_counts)
+
+    print("=== Sat Mappings ===")
+    print("sat_to_pid=", dict(sorted(sat_to_pid.items())))
+    print("sat_to_component=", dict(sorted(sat_to_comp.items())))
+
+    print("=== Planner Edge Meta (key fields) ===")
+    edge_meta_key = {}
+    for (a, b), meta in sorted(gplanner.edge_meta.items()):
+        edge_meta_key[(a, b)] = {
+            "pid_id": meta.get("pid_id"),
+            "weight": meta.get("weight"),
+            "isl_pairs_count": len(meta.get("isl_pairs", [])),
+        }
+    print("edge_meta=", edge_meta_key)
+
+    if reason_counters is not None:
+        print("=== Reason Counters ===")
+        print(dict(sorted(reason_counters.items())))
+    if missing_reason_counts is not None:
+        print("=== Missing Fstate Analysis ===")
+        print(dict(sorted(missing_reason_counts.items())))
 
 
 # ==========================
@@ -911,7 +968,9 @@ def _route_direct_in_subgraph(src: int, dst: int, pid: int,
         if cache_key in intra_tree_cache:
             next_hop_map = intra_tree_cache[cache_key]
             if src in next_hop_map:
-                return next_hop_map[src]
+                nh = next_hop_map[src]
+                if G_sat.has_edge(src, nh):
+                    return nh
     
     # 快取未命中，回退到原有邏輯（勢能場路由）
     
@@ -1120,7 +1179,13 @@ def build_fstate_lhtr(
     prev_src_sat_map: Optional[Dict[int,int]] = None,
     prev_fstate: Optional[Dict[Tuple[int,int], Tuple[int,int,int]]] = None,
     queue_packets: Optional[Dict[Tuple[int,int], int]] = None,
-) -> Tuple[Dict[Tuple[int,int], Tuple[int,int,int]], Dict[int,int], Dict[int,int]]:
+) -> Tuple[
+    Dict[Tuple[int,int], Tuple[int,int,int]],
+    Dict[int,int],
+    Dict[int,int],
+    Dict[str, int],
+    Dict[str, int],
+]:
     """
     QUEUE-AWARE: 產生 fstate（第一跳）：(u,dst) -> (next_hop, my_if, next_if)
     
@@ -1134,6 +1199,18 @@ def build_fstate_lhtr(
 
     # 應用 ECMP 擾動
     _add_ecmp_perturbation(G_sat, eps=1e-8)
+
+    reason = Counter()
+    missing_reason: Dict[Tuple[int, int], str] = {}
+
+    def _record_missing(src: int, dst: int, why: str) -> None:
+        reason[why] += 1
+        missing_reason[(src, dst)] = why
+
+    def _record_write(src: int, dst: int, decision: Tuple[int, int, int], why: str = "written_successfully") -> None:
+        fstate[(src, dst)] = decision
+        reason[why] += 1
+        missing_reason.pop((src, dst), None)
 
     # 目的集合：將每個 GS 投影到其候選可視衛星所在 PID
     dst_pid_map: Dict[int,int] = {}
@@ -1151,18 +1228,21 @@ def build_fstate_lhtr(
                 if fallback_sat in sat_pid:
                     dst_pid_map[gs_node] = sat_pid[fallback_sat]
                     dst_sat_map[gs_node] = fallback_sat
+                    reason["dst_projection_prev"] += 1
                     continue
             
             fallback_sat = gid0 % num_sats
             if fallback_sat in sat_pid:
                 dst_pid_map[gs_node] = sat_pid[fallback_sat]
                 dst_sat_map[gs_node] = fallback_sat
+                reason["dst_projection_gid_mod"] += 1
             continue
         
         sat_candidate = candidates[0][1] if isinstance(candidates[0], (list,tuple)) and len(candidates[0])>1 else candidates[0]
         if sat_candidate in sat_pid:
             dst_pid_map[num_sats + gid0] = sat_pid[sat_candidate]
             dst_sat_map[num_sats + gid0] = sat_candidate
+            reason["dst_projection_visible"] += 1
 
     # 嘗試取得鄰接介面索引查表
     global _SAT_NEI_TO_IF
@@ -1201,6 +1281,7 @@ def build_fstate_lhtr(
     for gid in range(num_gs):
         dst_node = num_sats + gid
         if dst_node not in dst_pid_map:
+            reason["dst_pid_missing"] += 1
             continue
         
         dst_pid = dst_pid_map[dst_node]
@@ -1223,6 +1304,7 @@ def build_fstate_lhtr(
         
         Gp = router.pid_subgraphs.get(dst_pid)
         if not Gp or not Gp.has_node(dst_sat):
+            reason["intra_tree_missing"] += 1
             continue
         
         try:
@@ -1233,7 +1315,8 @@ def build_fstate_lhtr(
                 if src_node == dst_sat:
                     continue
                 if len(path) >= 2:
-                    next_hop_map[src_node] = path[1]
+                    # path is [dst_sat, ..., src_node] from single_source_dijkstra(dst_sat)
+                    next_hop_map[src_node] = path[-2]
             
             intra_group_tree_cache[cache_key] = next_hop_map
         except (nx.NetworkXNoPath, nx.NodeNotFound, nx.NetworkXError):
@@ -1243,23 +1326,26 @@ def build_fstate_lhtr(
     for u in range(num_sats):
         src_pid = sat_pid.get(u)
         if src_pid is None:
+            reason["src_pid_none"] += 1
             continue
         
         for gid in range(num_gs):
             dst_node = num_sats + gid
             if dst_node not in dst_sat_map:
+                _record_missing(u, dst_node, "dst_sat_missing")
                 continue
             
             dst_sat = dst_sat_map[dst_node]
             dst_pid = sat_pid.get(dst_sat)
             if dst_pid is None:
+                _record_missing(u, dst_node, "dst_pid_none")
                 continue
             
             # 特殊情況：已經在目標衛星
             if u == dst_sat:
                 gsl_if_idx = gid_to_sat_gsl_if_idx[gid] if gid_to_sat_gsl_if_idx and gid < len(gid_to_sat_gsl_if_idx) else 0
                 my_if = num_isls_per_sat[u] + gsl_if_idx if num_isls_per_sat and u < len(num_isls_per_sat) else gsl_if_idx
-                fstate[(u, dst_node)] = (dst_node, my_if, 0)
+                _record_write(u, dst_node, (dst_node, my_if, 0), "written_same_sat_to_gs")
                 continue
             
             # 情況 A: 同群路由
@@ -1290,7 +1376,11 @@ def build_fstate_lhtr(
                 # ISL驗證
                 if next_hop is not None and G_sat.has_edge(u, next_hop):
                     my_if, next_if = _isl_if_idxs(u, next_hop)
-                    fstate[(u, dst_node)] = (next_hop, my_if, next_if)
+                    _record_write(u, dst_node, (next_hop, my_if, next_if), "written_successfully")
+                elif next_hop is None:
+                    _record_missing(u, dst_node, "route_none")
+                else:
+                    _record_missing(u, dst_node, "fallback_failed")
                 continue
             
             # 情況 B: 跨群路由
@@ -1298,6 +1388,7 @@ def build_fstate_lhtr(
             next_pid = prev.get(src_pid)
             
             if next_pid is None:
+                _record_missing(u, dst_node, "next_pid_none")
                 continue
             
             # QUEUE-AWARE: 邊界衛星對選擇（傳入 queue_packets）
@@ -1307,6 +1398,7 @@ def build_fstate_lhtr(
             )
             
             if not border_pair:
+                _record_missing(u, dst_node, "border_none")
                 continue
             
             u_border, v_border = border_pair
@@ -1317,20 +1409,20 @@ def build_fstate_lhtr(
                 # 1. 嘗試主邊界
                 if G_sat.has_edge(u_border, v_border):
                     my_if, next_if = _isl_if_idxs(u_border, v_border)
-                    fstate[(u, dst_node)] = (v_border, my_if, next_if)
+                    _record_write(u, dst_node, (v_border, my_if, next_if), "written_successfully")
                     continue
                 
                 # 2. 嘗試次佳邊界
                 if u_border2 and v_border2:
                     if u == u_border2 and G_sat.has_edge(u_border2, v_border2):
                         my_if, next_if = _isl_if_idxs(u_border2, v_border2)
-                        fstate[(u, dst_node)] = (v_border2, my_if, next_if)
+                        _record_write(u, dst_node, (v_border2, my_if, next_if), "written_successfully")
                         continue
                     else:
                         next_hop = _route_direct_in_subgraph(u, u_border2, src_pid, router, G_sat, intra_group_tree_cache)
                         if next_hop and G_sat.has_edge(u, next_hop):
                             my_if, next_if = _isl_if_idxs(u, next_hop)
-                            fstate[(u, dst_node)] = (next_hop, my_if, next_if)
+                            _record_write(u, dst_node, (next_hop, my_if, next_if), "written_successfully")
                             continue
                 
                 # 3. 嘗試管理中繼
@@ -1341,7 +1433,7 @@ def build_fstate_lhtr(
                         next_hop = _route_direct_in_subgraph(u, mgmt_sat, src_pid, router, G_sat, intra_group_tree_cache)
                         if next_hop and G_sat.has_edge(u, next_hop):
                             my_if, next_if = _isl_if_idxs(u, next_hop)
-                            fstate[(u, dst_node)] = (next_hop, my_if, next_if)
+                            _record_write(u, dst_node, (next_hop, my_if, next_if), "written_successfully")
                             continue
                 
                 # 4. SPF 保底
@@ -1349,7 +1441,7 @@ def build_fstate_lhtr(
                 next_hop = _fallback_spf_one_hop(u, fallback_target, G_sat)
                 if next_hop and G_sat.has_edge(u, next_hop):
                     my_if, next_if = _isl_if_idxs(u, next_hop)
-                    fstate[(u, dst_node)] = (next_hop, my_if, next_if)
+                    _record_write(u, dst_node, (next_hop, my_if, next_if), "written_successfully")
                     continue
                 
                 # 5. 條件式 holdover
@@ -1357,7 +1449,9 @@ def build_fstate_lhtr(
                     prev_entry = prev_fstate[(u, dst_node)]
                     prev_next_hop = prev_entry[0]
                     if G_sat.has_edge(u, prev_next_hop):
-                        fstate[(u, dst_node)] = prev_entry
+                        _record_write(u, dst_node, prev_entry, "holdover")
+                        continue
+                _record_missing(u, dst_node, "fallback_failed")
                 continue
             
             # B2. 資料面：非邊界衛星直接往邊界路由
@@ -1370,7 +1464,11 @@ def build_fstate_lhtr(
             # ISL驗證
             if next_hop is not None and G_sat.has_edge(u, next_hop):
                 my_if, next_if = _isl_if_idxs(u, next_hop)
-                fstate[(u, dst_node)] = (next_hop, my_if, next_if)
+                _record_write(u, dst_node, (next_hop, my_if, next_if), "written_successfully")
+            elif next_hop is None:
+                _record_missing(u, dst_node, "route_none")
+            else:
+                _record_missing(u, dst_node, "fallback_failed")
 
     # Ground stations to ground stations
     for src_gid in range(num_gs):
@@ -1395,15 +1493,36 @@ def build_fstate_lhtr(
             dst_gs_node = num_sats + dst_gid
             my_if = 0
             next_if = num_isls_per_sat[src_sat] + gid_to_sat_gsl_if_idx[src_gid] if num_isls_per_sat else 0
-            fstate[(src_gs_node, dst_gs_node)] = (src_sat, my_if, next_if)
+            _record_write(src_gs_node, dst_gs_node, (src_sat, my_if, next_if), "written_gs_to_gs")
     
     # 2-Cycle 清洗
     def _noop_log(msg):
         pass
     
     fstate = _break_2cycles(fstate, G_sat, sat_pid, router, num_sats, dst_sat_map, _isl_if_idxs, _noop_log, max_iterations=3)
-    
-    return fstate, dst_sat_map, src_sat_map
+
+    # Ensure complete SAT->GS coverage with explicit drop entries.
+    missing_before_fill = 0
+    for u in range(num_sats):
+        for gid in range(num_gs):
+            dst_node = num_sats + gid
+            if (u, dst_node) not in fstate:
+                missing_before_fill += 1
+                _record_write(u, dst_node, (-1, -1, -1), "drop_filled")
+                if (u, dst_node) not in missing_reason:
+                    missing_reason[(u, dst_node)] = "drop_filled"
+
+    reason["missing_before_drop_fill"] = missing_before_fill
+    reason["written_successfully_total"] = len(fstate)
+    reason["written_successfully"] = (
+        reason.get("written_successfully", 0)
+        + reason.get("written_same_sat_to_gs", 0)
+        + reason.get("written_gs_to_gs", 0)
+    )
+    reason["sat_to_gs_expected"] = num_sats * num_gs
+    reason["sat_to_gs_present"] = sum(1 for (src, _dst) in fstate.keys() if src < num_sats)
+
+    return fstate, dst_sat_map, src_sat_map, dict(reason), dict(Counter(missing_reason.values()))
 
 
 # ==========================
@@ -1437,6 +1556,69 @@ def init(config: Optional[dict] = None):
     _get_process_local_stats().reset()
     
     return {'ok': True, 'msg': f'algorithm_lhtr initialized with p={planes_per_group}, s={sats_per_plane}'}
+
+
+# Version guard for pickle compatibility
+_LHTR_STATE_VERSION = 1
+
+
+def save_lhtr_state(filepath: str) -> bool:
+    """Save _ROUTER, _GPLANNER, _PREV_DST_SAT_MAP, _PREV_SRC_SAT_MAP to a pickle file.
+
+    Returns True on success, False on failure.
+    """
+    import pickle as _pkl
+    try:
+        payload = {
+            'version': _LHTR_STATE_VERSION,
+            'router': _ROUTER,
+            'gplanner': _GPLANNER,
+            'prev_dst_sat_map': _PREV_DST_SAT_MAP,
+            'prev_src_sat_map': _PREV_SRC_SAT_MAP,
+        }
+        with open(filepath, 'wb') as f:
+            _pkl.dump(payload, f, protocol=_pkl.HIGHEST_PROTOCOL)
+        print("  > [LHTR] Saved state → %s" % filepath)
+        return True
+    except Exception as e:
+        print("  > [LHTR] WARNING: Failed to save state: %s" % e)
+        return False
+
+
+def load_lhtr_state(filepath: str) -> bool:
+    """Load _ROUTER, _GPLANNER, _PREV_DST_SAT_MAP, _PREV_SRC_SAT_MAP from pickle.
+
+    On success sets the module globals and returns True.
+    On any failure (missing file, version mismatch, unpickle error) returns False
+    and leaves the globals untouched so the caller can fall back to init().
+    """
+    import pickle as _pkl
+    global _ROUTER, _GPLANNER, _PREV_DST_SAT_MAP, _PREV_SRC_SAT_MAP
+
+    if not os.path.exists(filepath):
+        print("  > [LHTR] No state file: %s" % filepath)
+        return False
+    try:
+        with open(filepath, 'rb') as f:
+            payload = _pkl.load(f)
+        if not isinstance(payload, dict) or payload.get('version') != _LHTR_STATE_VERSION:
+            print("  > [LHTR] Version mismatch or corrupt state file, ignoring")
+            return False
+        r = payload.get('router')
+        g = payload.get('gplanner')
+        if not isinstance(r, VirtualPIDRouterPlaneBlock) or not isinstance(g, GroupPlanner):
+            print("  > [LHTR] Invalid object types in state file, ignoring")
+            return False
+        _ROUTER = r
+        _GPLANNER = g
+        _PREV_DST_SAT_MAP = payload.get('prev_dst_sat_map', {})
+        _PREV_SRC_SAT_MAP = payload.get('prev_src_sat_map', {})
+        print("  > [LHTR] Restored state from %s (stable_edges=%d)"
+              % (filepath, len(_GPLANNER.stable_edges)))
+        return True
+    except Exception as e:
+        print("  > [LHTR] WARNING: Failed to load state: %s" % e)
+        return False
 
 
 def algorithm_lhtr(
@@ -1558,7 +1740,7 @@ def algorithm_lhtr(
     _SAT_NEI_TO_IF = sat_neighbor_to_if
     
     # QUEUE-AWARE: 生成 fstate (傳入 queue_packets)
-    fstate, dst_sat_map, src_sat_map = build_fstate_lhtr(
+    fstate, dst_sat_map, src_sat_map, reason_counters, missing_reason_counts = build_fstate_lhtr(
         sat_net_graph_only_satellites_with_isls,
         sat_to_pid,
         _ROUTER,
@@ -1573,6 +1755,16 @@ def algorithm_lhtr(
         prev_fstate=prev_fstate,
         queue_packets=queue_packets,  # QUEUE-AWARE: 傳入 queue 資訊
     )
+    if enable_verbose_logs:
+        _dump_pid_snapshot(
+            snapshot_idx,
+            step_ms,
+            _ROUTER,
+            _GPLANNER,
+            sat_to_pid,
+            reason_counters=reason_counters,
+            missing_reason_counts=missing_reason_counts,
+        )
     
     _PREV_DST_SAT_MAP = dst_sat_map
     _PREV_SRC_SAT_MAP = src_sat_map
@@ -1581,6 +1773,7 @@ def algorithm_lhtr(
     if prev_fstate:
         holdover_count = 0
         holdover_skipped = 0
+        holdover_gsl_skipped = 0
         for (src, dst), decision in list(prev_fstate.items()):
             if (src, dst) not in fstate:
                 next_hop = decision[0]
@@ -1591,11 +1784,29 @@ def algorithm_lhtr(
                     else:
                         holdover_skipped += 1
                 else:
+                    # SAT->GS holdover must still be in current GS visibility set.
+                    if src < num_sats and next_hop >= num_sats:
+                        gid0 = dst - num_sats
+                        if 0 <= gid0 < num_ground_stations:
+                            candidates = gs_map.get(gid0, [])
+                            sat_in_range = False
+                            for cand in candidates:
+                                sat_id = cand[1] if isinstance(cand, (list, tuple)) and len(cand) > 1 else cand
+                                if sat_id == src:
+                                    sat_in_range = True
+                                    break
+                            if not sat_in_range:
+                                holdover_gsl_skipped += 1
+                                continue
                     fstate[(src, dst)] = decision
                     holdover_count += 1
         
+        reason_counters["holdover"] = reason_counters.get("holdover", 0) + holdover_count
+        reason_counters["holdover_skipped_isl"] = reason_counters.get("holdover_skipped_isl", 0) + holdover_skipped
+        reason_counters["holdover_skipped_gsl"] = reason_counters.get("holdover_skipped_gsl", 0) + holdover_gsl_skipped
+
         if enable_verbose_logs and holdover_count > 0:
-            print(f"  > [HOLDOVER] Carried over {holdover_count} entries, skipped {holdover_skipped}")
+            print(f"  > [HOLDOVER] Carried over {holdover_count} entries, skipped {holdover_skipped} ISL + {holdover_gsl_skipped} GSL")
     
     # ==================== 全局 SPF FALLBACK（改進 10 & 12）====================
     # 收集所有缺失的路由（沒有在 build_fstate_lhtr 中填充的）
@@ -1687,6 +1898,9 @@ def algorithm_lhtr(
             except (nx.NetworkXNoPath, nx.NodeNotFound, nx.NetworkXError):
                 pass
 
+    if enable_verbose_logs:
+        reason_counters["global_fallback_missing_routes"] = len(missing_routes)
+
     # ==================== 最終 2-CYCLE 清理 ====================
     if enable_verbose_logs:
         print("  > Final 2-cycle cleanup after Holdover and Global fallback...")
@@ -1731,7 +1945,7 @@ def algorithm_lhtr(
     total_entries = len(fstate)
     
     with open(output_filename, "w+") as f_out:
-        for (src, dst), (nxt, my_if, next_if) in fstate.items():
+        for (src, dst), (nxt, my_if, next_if) in sorted(fstate.items()):
             prev_entry = prev_fstate.get((src, dst)) if prev_fstate else None
             new_entry = (nxt, my_if, next_if)
             

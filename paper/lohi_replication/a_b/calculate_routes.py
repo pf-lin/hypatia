@@ -214,6 +214,13 @@ def main():
         print("  > Will write complete forwarding state")
     else:
         print("  > Will write only changed forwarding entries")
+
+    # Step 2.5 – restore LHTR internal state (only for algorithm_lhtr)
+    if fstate_calculation_algorithm == "algorithm_lhtr":
+        from satgen.dynamic_state.algorithm_lhtr import load_lhtr_state, save_lhtr_state
+        lhtr_state_file = os.path.join(prev_output_dir, "lhtr_state_%d.pkl" % prev_time_ns)
+        if not load_lhtr_state(lhtr_state_file):
+            print("  > [LHTR] Will initialize fresh state (first snapshot or fallback)")
     
     # ===== 步驟 3: 生成新的 fstate =====
     print(f"\nStep 3: Generating fstate for t={current_time_ns}ns...")
@@ -232,6 +239,15 @@ def main():
     # ===== 步驟 4: 保存當前的 output 供下次使用 =====
     print(f"Step 4: Saving current output for next iteration...")
     save_prev_output(output, prev_output_dir, current_time_ns)
+
+    # Step 4.5 – persist LHTR internal state (only for algorithm_lhtr)
+    if fstate_calculation_algorithm == "algorithm_lhtr":
+        lhtr_state_cur = os.path.join(prev_output_dir, "lhtr_state_%d.pkl" % current_time_ns)
+        save_lhtr_state(lhtr_state_cur)
+        old_lhtr_state = os.path.join(prev_output_dir, "lhtr_state_%d.pkl" % (prev_time_ns - time_step_ns))
+        if prev_time_ns > 0 and os.path.exists(old_lhtr_state):
+            os.remove(old_lhtr_state)
+            print("  > [LHTR] Cleaned up: %s" % old_lhtr_state)
     
     # ===== 步驟 5: 清理舊的 pickle 檔案（可選，節省空間）=====
     # 只保留最近兩次的 pickle 檔案
