@@ -501,8 +501,12 @@ def analyze_pair_path_utilization(run_dir, dynamic_state_algorithm,
     run_short = os.path.basename(run_dir)
     data_dir = os.path.join("data", run_short, dynamic_state_algorithm)
     pdf_dir = os.path.join("pdf", run_short, dynamic_state_algorithm)
-    os.makedirs(data_dir, exist_ok=True)
-    os.makedirs(pdf_dir, exist_ok=True)
+    local_shell = exputil.LocalShell()
+    print("  > Clearing output directories: %s and %s" % (data_dir, pdf_dir))
+    local_shell.remove_force_recursive(data_dir)
+    local_shell.make_full_dir(data_dir)
+    local_shell.remove_force_recursive(pdf_dir)
+    local_shell.make_full_dir(pdf_dir)
 
     # ------------------------------------------------------------------
     # [新增] Step 0: 產生 networkx_path 與 networkx_rtt

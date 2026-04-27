@@ -758,110 +758,130 @@ class BorderSelector:
                          sat_pid: Dict[int, int],
                          src_sat: Optional[int] = None,
                          router: Optional['VirtualPIDRouterPlaneBlock'] = None,
-                         queue_packets: Optional[Dict[Tuple[int,int], int]] = None) -> Optional[Tuple[int,int]]:
+                         queue_packets: Optional[Dict[Tuple[int,int], int]] = None,
+                         dst_sat: Optional[int] = None,
+                         dst_pid: Optional[int] = None) -> Optional[Tuple[int,int]]:
         """
-        QUEUE-AWARE: 選擇邊界對，優先考慮：
-        1. 與來源衛星同分量（src_comp_id）
-        2. 與目標 PID 管理衛星同分量
-        3. QUEUE-AWARE: queue 狀態（優先選擇低 queue 的邊界）
-        4. 最短地理距離
-        
-        Args:
-            queue_packets: (u,v) -> queue packets (新增參數，預設 None)
+        全路徑感知邊界對選擇：
+        cost = dist(src → u_border)          [src_pid 子圖內]
+             + calculate_link_queue_cost(geo_len_m, queue)
+             + dist(v_border → ref_node)     [next_pid 子圖內]
+
+        ref_node:
+            - next_pid == dst_pid  → dst_sat（最精確）
+            - next_pid != dst_pid  → pid_mgmt_sat[next_pid]（中繼代理）
+
+        候選無效條件：
+            - src_sat 到 u_border 不可達（src_pid 內不連通）
+            - v_border 到 ref_node 不可達（next_pid 內不連通）
         """
         meta = gplanner.get_edge_meta(src_pid, next_pid)
         if not meta:
             return None
-        
+
+        # ── src 側分量 ID（快速過濾不連通候選）──────────────────────
         src_comp_id = None
         if src_sat is not None and router is not None:
-            pid_comp_map = router.pid_sat_comp.get(src_pid, {})
-            src_comp_id = pid_comp_map.get(src_sat)
-        
-        next_mgmt_sat = router.pid_mgmt_sat.get(next_pid) if router else None
-        next_mgmt_comp_id = None
-        if next_mgmt_sat is not None and router is not None:
-            next_pid_comp_map = router.pid_sat_comp.get(next_pid, {})
-            next_mgmt_comp_id = next_pid_comp_map.get(next_mgmt_sat)
-        
-        candidates_same_cc = []
-        candidates_all = []
-        
+            src_comp_id = router.pid_sat_comp.get(src_pid, {}).get(src_sat)
+
+        # ── 預計算 src-side 距離（一次 Dijkstra 覆蓋所有候選 u）──────
+        src_side_dists: Dict[int, float] = {}
+        if src_sat is not None and router is not None:
+            src_pid_nodes = set(router.pid_members.get(src_pid, []))
+            if src_sat in src_pid_nodes:
+                try:
+                    src_side_dists = nx.single_source_dijkstra_path_length(
+                        G_sat.subgraph(src_pid_nodes), src_sat, weight='weight'
+                    )
+                except Exception:
+                    pass
+
+        # ── 決定 ref_node 並預計算 dst-side 距離（一次 Dijkstra）──────
+        ref_node: Optional[int] = None
+        if router is not None:
+            if dst_pid is not None and next_pid == dst_pid:
+                ref_node = dst_sat
+            else:
+                ref_node = router.pid_mgmt_sat.get(next_pid)
+
+        dst_side_dists: Dict[int, float] = {}
+        if ref_node is not None and router is not None:
+            next_pid_nodes = set(router.pid_members.get(next_pid, []))
+            if ref_node in next_pid_nodes:
+                try:
+                    dst_side_dists = nx.single_source_dijkstra_path_length(
+                        G_sat.subgraph(next_pid_nodes), ref_node, weight='weight'
+                    )
+                except Exception:
+                    pass
+
+        # ── 候選評分 ────────────────────────────────────────────────
+        candidates: List[Tuple[float, int, int]] = []
+
         for (u, v) in meta.get('isl_pairs', []):
+            # 確保 u ∈ src_pid, v ∈ next_pid
             if sat_pid.get(u) == next_pid and sat_pid.get(v) == src_pid:
                 u, v = v, u
-            
-            # 分量感知（來源側）
+
+            # 分量過濾（快速：不連通直接跳過）
             if src_comp_id is not None and router is not None:
-                pid_comp_map = router.pid_sat_comp.get(src_pid, {})
-                u_comp_id = pid_comp_map.get(u)
-                if u_comp_id != src_comp_id:
+                u_comp = router.pid_sat_comp.get(src_pid, {}).get(u)
+                if u_comp != src_comp_id:
                     continue
-            
+
+            # src-side cost
+            if src_side_dists:
+                src_cost = src_side_dists.get(u, float('inf'))
+                if src_cost == float('inf'):
+                    continue  # u 不可達，候選無效
+            else:
+                src_cost = 0.0
+
+            # ISL cost（保留 queue-aware）
             d = G_sat.get_edge_data(u, v, default={})
             geo_dist = float(d.get('geo_len_m', d.get('weight', 1.0)))
-            
-            # QUEUE-AWARE: 獲取 queue 狀態
-            q_packets = 0
+            q_pkts = 0
             if queue_packets:
-                q_packets = queue_packets.get((u, v), queue_packets.get((v, u), 0))
-            
-            # 計算綜合成本 (距離 + queue 懲罰)
-            total_cost = calculate_link_queue_cost(
-                geo_dist, q_packets,
+                q_pkts = queue_packets.get((u, v), queue_packets.get((v, u), 0))
+            isl_cost = calculate_link_queue_cost(
+                geo_dist, q_pkts,
                 alpha_dist=ALPHA_DISTANCE,
                 alpha_queue=ALPHA_QUEUE,
                 queue_norm_max=QUEUE_NORMALIZE_MAX_PACKETS,
                 queue_max_penalty_m=QUEUE_MAX_PENALTY_M
             )
-            
-            # 分量感知（目標側）
-            v_same_cc_as_mgmt = False
-            if next_mgmt_comp_id is not None and router is not None:
-                next_pid_comp_map = router.pid_sat_comp.get(next_pid, {})
-                v_comp_id = next_pid_comp_map.get(v)
-                if v_comp_id == next_mgmt_comp_id:
-                    v_same_cc_as_mgmt = True
-            
-            if v_same_cc_as_mgmt:
-                candidates_same_cc.append((total_cost, u, v))
-            candidates_all.append((total_cost, u, v))
-        
-        # 優先從同 CC 候選中選擇
-        if candidates_same_cc:
-            candidates_same_cc.sort()
-            _, u, v = candidates_same_cc[0]
-            return (u, v)
-        elif candidates_all:
-            candidates_all.sort()
-            _, u, v = candidates_all[0]
-            return (u, v)
-        
-        return None
+
+            # dst-side cost
+            if dst_side_dists:
+                dst_cost = dst_side_dists.get(v, float('inf'))
+                if dst_cost == float('inf'):
+                    continue  # v 無法到達 ref_node，候選無效
+            else:
+                dst_cost = 0.0
+
+            total_cost = src_cost + isl_cost + dst_cost
+            candidates.append((total_cost, u, v))
+
+        if not candidates:
+            return None
+
+        candidates.sort()
+        _, best_u, best_v = candidates[0]
+        return (best_u, best_v)
 
 
 # ==========================
 # 端到端 fstate 拼接 - Helper Functions
 # ==========================
 
-def _add_ecmp_perturbation(G: nx.Graph, eps: float = 1e-8) -> None:
-    """為圖的所有邊添加極小擾動，消除 ECMP 平手問題"""
-    for u, v, data in G.edges(data=True):
-        edge_id = (min(u, v), max(u, v))
-        random.seed(hash(edge_id) % (2**32))
-        perturbation = random.random() * eps
-        original_weight = data.get('weight', 1.0)
-        data['weight_eff'] = original_weight + perturbation
-
-
-def _build_potential_field(targets: List[int], G: nx.Graph, weight: str = 'weight_eff') -> Dict[int, float]:
+def _build_potential_field(targets: List[int], G: nx.Graph, weight: str = 'weight') -> Dict[int, float]:
     """
     建立勢能場：以目標節點為 source 計算到所有節點的最短距離
     
     Args:
         targets: 目標節點列表 (可能多個)
         G: NetworkX 圖
-        weight: 邊權重屬性名稱 (預設 'weight_eff' 使用 ECMP 擾動後的權重)
+        weight: 邊權重屬性名稱 (預設 'weight' 使用 ISL 幾何距離)
     
     Returns:
         dist: {node_id: distance_to_nearest_target}
@@ -991,8 +1011,8 @@ def _route_direct_in_subgraph(src: int, dst: int, pid: int,
     # 創建臨時子圖視圖（只包含該 PID 的節點）
     subgraph = G_sat.subgraph(pid_nodes)
     
-    # 使用勢能場選擇下一跳（tolerance 對齊 ECMP 擾動）
-    potential = _build_potential_field([dst], subgraph, weight='weight_eff')
+    # 使用勢能場選擇下一跳
+    potential = _build_potential_field([dst], subgraph, weight='weight')
     neighbors = list(G_sat.neighbors(src))  # 使用 G_sat 的鄰居（確保是當前拓撲）
     
     # 只考慮在同一 PID 內的鄰居
@@ -1023,7 +1043,7 @@ def _fallback_spf_one_hop(src: int, dst: int, G_sat: nx.Graph) -> Optional[int]:
     try:
         # 計算從 dst 到所有節點的距離（反向 Dijkstra）
         distances = nx.single_source_dijkstra_path_length(
-            G_sat, dst, weight='weight_eff'
+            G_sat, dst, weight='weight'
         )
         
         if src not in distances:
@@ -1040,7 +1060,7 @@ def _fallback_spf_one_hop(src: int, dst: int, G_sat: nx.Graph) -> Optional[int]:
         for neighbor in neighbors:
             if neighbor in distances:
                 neighbor_dist = distances[neighbor]
-                edge_weight = G_sat[src][neighbor].get('weight_eff', 1.0)
+                edge_weight = G_sat[src][neighbor].get('weight', 1.0)
                 # 檢查是否在最短路徑上
                 if abs(src_dist - edge_weight - neighbor_dist) < 1e-6:
                     candidates.append(neighbor)
@@ -1134,7 +1154,7 @@ def _break_2cycles(
                 continue
             
             subgraph = G_sat.subgraph(pid_nodes)
-            potential_dist = _build_potential_field([dst_sat], subgraph, weight='weight_eff')
+            potential_dist = _build_potential_field([dst_sat], subgraph, weight='weight')
             
             # ★ 改進：先嘗試同 PID 鄰居，若無法修復則允許任何鄰居
             neighbors_in_pid = [n for n in G_sat.neighbors(large_id) if n != small_id and n in pid_nodes]
@@ -1142,7 +1162,7 @@ def _break_2cycles(
             
             # 若同 PID 無法修復，使用全局勢能場嘗試任意鄰居
             if new_hop is None:
-                global_potential_dist = _build_potential_field([dst_sat], G_sat, weight='weight_eff')
+                global_potential_dist = _build_potential_field([dst_sat], G_sat, weight='weight')
                 all_neighbors = [n for n in G_sat.neighbors(large_id) if n != small_id]
                 new_hop = _select_potential_descent_neighbor(large_id, all_neighbors, global_potential_dist, tolerance=1e-6)
             
@@ -1197,9 +1217,6 @@ def build_fstate_lhtr(
     num_sats = len(satellites) if not isinstance(satellites,int) else satellites
     num_gs = len(ground_stations) if not isinstance(ground_stations,int) else ground_stations
 
-    # 應用 ECMP 擾動
-    _add_ecmp_perturbation(G_sat, eps=1e-8)
-
     reason = Counter()
     missing_reason: Dict[Tuple[int, int], str] = {}
 
@@ -1238,7 +1255,11 @@ def build_fstate_lhtr(
                 reason["dst_projection_gid_mod"] += 1
             continue
         
-        sat_candidate = candidates[0][1] if isinstance(candidates[0], (list,tuple)) and len(candidates[0])>1 else candidates[0]
+        # 選距離最近的可見衛星，而非 sid 最小的（穩定 dst_sat 選擇）
+        if isinstance(candidates[0], (list, tuple)) and len(candidates[0]) > 1:
+            sat_candidate = min(candidates, key=lambda x: x[0])[1]
+        else:
+            sat_candidate = candidates[0]
         if sat_candidate in sat_pid:
             dst_pid_map[num_sats + gid0] = sat_pid[sat_candidate]
             dst_sat_map[num_sats + gid0] = sat_candidate
@@ -1391,10 +1412,11 @@ def build_fstate_lhtr(
                 _record_missing(u, dst_node, "next_pid_none")
                 continue
             
-            # QUEUE-AWARE: 邊界衛星對選擇（傳入 queue_packets）
+            # QUEUE-AWARE: 邊界衛星對選擇（傳入 queue_packets、dst 資訊）
             border_pair = BorderSelector.pick_border_pair(
                 G_sat, gplanner, src_pid, next_pid, sat_pid,
-                src_sat=u, router=router, queue_packets=queue_packets
+                src_sat=u, router=router, queue_packets=queue_packets,
+                dst_sat=dst_sat, dst_pid=dst_pid
             )
             
             if not border_pair:
@@ -1808,102 +1830,9 @@ def algorithm_lhtr(
         if enable_verbose_logs and holdover_count > 0:
             print(f"  > [HOLDOVER] Carried over {holdover_count} entries, skipped {holdover_skipped} ISL + {holdover_gsl_skipped} GSL")
     
-    # ==================== 全局 SPF FALLBACK（改進 10 & 12）====================
-    # 收集所有缺失的路由（沒有在 build_fstate_lhtr 中填充的）
-    missing_routes = []
-    for u in range(num_sats):
-        for gid0 in range(num_ground_stations):
-            dst_node = num_sats + gid0
-            if (u, dst_node) not in fstate:
-                missing_routes.append((u, dst_node, gid0))
-    
-    if enable_verbose_logs and len(missing_routes) > 0:
-        print(f"  > Global fallback: {len(missing_routes)} missing routes (out of {num_sats * num_ground_stations} total)")
-    
-    if missing_routes:
-        # 批次 SPF - 每個目標衛星只計算一次
-        target_sats = {}
-        
-        for u, dst_node, gid0 in missing_routes:
-            # 找到目標 GS 的可視衛星
-            if dst_node in dst_sat_map:
-                dst_sat = dst_sat_map[dst_node]
-            elif gid0 in gs_map:
-                candidates = gs_map[gid0]
-                if candidates:
-                    dst_sat = candidates[0][1] if isinstance(candidates[0], (list, tuple)) else candidates[0]
-                else:
-                    continue
-            else:
-                continue
-            
-            if dst_sat not in target_sats:
-                target_sats[dst_sat] = []
-            target_sats[dst_sat].append((u, dst_node, gid0))
-        
-        # 使用正確的接口索引計算
-        def simple_isl_if_idx(u, v, G):
-            """使用 sat_neighbor_to_if 確保接口 ID 正確"""
-            if sat_neighbor_to_if is not None:
-                try:
-                    return int(sat_neighbor_to_if[(u, v)]), int(sat_neighbor_to_if[(v, u)])
-                except Exception:
-                    pass
-            # Fallback: 從圖的邊屬性讀取
-            if not G.has_edge(u, v):
-                return 0, 0
-            d = G.get_edge_data(u, v, default={}) or {}
-            cand_u = d.get('if_u', d.get('if_idx_u', d.get('if_idx_src')))
-            cand_v = d.get('if_v', d.get('if_idx_v', d.get('if_idx_dst')))
-            mu = int(cand_u) if cand_u is not None else 0
-            mv = int(cand_v) if cand_v is not None else 0
-            if num_isls_per_sat and len(num_isls_per_sat) > u and num_isls_per_sat[u] > 0:
-                mu %= num_isls_per_sat[u]
-            if num_isls_per_sat and len(num_isls_per_sat) > v and num_isls_per_sat[v] > 0:
-                mv %= num_isls_per_sat[v]
-            return mu, mv
-        
-        # 對每個目標衛星執行一次 single_source_dijkstra
-        if enable_verbose_logs:
-            print(f"  > Computing global SPF for {len(target_sats)} unique target satellites...")
-        
-        for dst_sat, routes in target_sats.items():
-            if not sat_net_graph_only_satellites_with_isls.has_node(dst_sat):
-                continue
-            
-            try:
-                lengths, paths = nx.single_source_dijkstra(
-                    sat_net_graph_only_satellites_with_isls, 
-                    dst_sat, 
-                    weight='weight'
-                )
-                
-                skipped_due_to_no_isl = 0
-                filled_count = 0
-                for u, dst_node, gid0 in routes:
-                    if u in paths:
-                        path = paths[u]
-                        if len(path) >= 2:
-                            next_hop = path[-2]
-                            if sat_net_graph_only_satellites_with_isls.has_edge(u, next_hop):
-                                my_if, next_if = simple_isl_if_idx(u, next_hop, sat_net_graph_only_satellites_with_isls)
-                                fstate[(u, dst_node)] = (next_hop, my_if, next_if)
-                                filled_count += 1
-                            else:
-                                skipped_due_to_no_isl += 1
-                
-                if enable_verbose_logs and skipped_due_to_no_isl > 0:
-                    print(f"    [WARN] Skipped {skipped_due_to_no_isl} routes for dst_sat={dst_sat} (no ISL). Filled: {filled_count}")
-                
-            except (nx.NetworkXNoPath, nx.NodeNotFound, nx.NetworkXError):
-                pass
-
-    if enable_verbose_logs:
-        reason_counters["global_fallback_missing_routes"] = len(missing_routes)
-
     # ==================== 最終 2-CYCLE 清理 ====================
     if enable_verbose_logs:
-        print("  > Final 2-cycle cleanup after Holdover and Global fallback...")
+        print("  > Final 2-cycle cleanup...")
     
     def final_isl_if_idxs(u: int, v: int) -> tuple:
         """使用 sat_neighbor_to_if 確保接口 ID 正確"""
@@ -1936,7 +1865,7 @@ def algorithm_lhtr(
         dst_sat_map, 
         final_isl_if_idxs,
         lambda *args, **kwargs: None,
-        max_iterations=20
+        max_iterations=3
     )
     
     # 寫入 fstate
