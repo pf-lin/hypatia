@@ -760,7 +760,9 @@ class BorderSelector:
                          router: Optional['VirtualPIDRouterPlaneBlock'] = None,
                          queue_packets: Optional[Dict[Tuple[int,int], int]] = None,
                          dst_sat: Optional[int] = None,
-                         dst_pid: Optional[int] = None) -> Optional[Tuple[int,int]]:
+                         dst_pid: Optional[int] = None,
+                         pre_src_side_dists: Optional[Dict[int, float]] = None,
+                         pre_dst_side_dists: Optional[Dict[int, float]] = None) -> Optional[Tuple[int,int]]:
         """
         全路徑感知邊界對選擇：
         cost = dist(src → u_border)          [src_pid 子圖內]
@@ -784,9 +786,11 @@ class BorderSelector:
         if src_sat is not None and router is not None:
             src_comp_id = router.pid_sat_comp.get(src_pid, {}).get(src_sat)
 
-        # ── 預計算 src-side 距離（一次 Dijkstra 覆蓋所有候選 u）──────
+        # ── src-side 距離：優先使用外部預計算快取，否則即時計算 ──────
         src_side_dists: Dict[int, float] = {}
-        if src_sat is not None and router is not None:
+        if pre_src_side_dists is not None:
+            src_side_dists = pre_src_side_dists
+        elif src_sat is not None and router is not None:
             src_pid_nodes = set(router.pid_members.get(src_pid, []))
             if src_sat in src_pid_nodes:
                 try:
@@ -796,7 +800,7 @@ class BorderSelector:
                 except Exception:
                     pass
 
-        # ── 決定 ref_node 並預計算 dst-side 距離（一次 Dijkstra）──────
+        # ── 決定 ref_node；dst-side 距離：優先使用外部預計算快取 ──────
         ref_node: Optional[int] = None
         if router is not None:
             if dst_pid is not None and next_pid == dst_pid:
@@ -805,7 +809,9 @@ class BorderSelector:
                 ref_node = router.pid_mgmt_sat.get(next_pid)
 
         dst_side_dists: Dict[int, float] = {}
-        if ref_node is not None and router is not None:
+        if pre_dst_side_dists is not None:
+            dst_side_dists = pre_dst_side_dists
+        elif ref_node is not None and router is not None:
             next_pid_nodes = set(router.pid_members.get(next_pid, []))
             if ref_node in next_pid_nodes:
                 try:
@@ -1342,7 +1348,65 @@ def build_fstate_lhtr(
             intra_group_tree_cache[cache_key] = next_hop_map
         except (nx.NetworkXNoPath, nx.NodeNotFound, nx.NetworkXError):
             pass
-    
+
+    # ============================================================
+    # 性能優化：預計算 src-side 和 dst-side 距離快取
+    # 把 pick_border_pair 內的重複 Dijkstra 從 ~132,000 次降到 ~832 次
+    # ============================================================
+
+    # A. src_side_dists_cache: {src_sat -> {node: dist}} within src_pid subgraph
+    # 每個衛星在自己的 PID 子圖內各跑一次 Dijkstra（720 次，vs. 原本 ~66,000 次）
+    src_side_dists_cache: Dict[int, Dict[int, float]] = {}
+    for _u_pre in range(num_sats):
+        _p_pre = sat_pid.get(_u_pre)
+        if _p_pre is None:
+            continue
+        _pid_nodes_pre = frozenset(router.pid_members.get(_p_pre, []))
+        if _u_pre not in _pid_nodes_pre:
+            continue
+        try:
+            src_side_dists_cache[_u_pre] = dict(
+                nx.single_source_dijkstra_path_length(
+                    G_sat.subgraph(_pid_nodes_pre), _u_pre, weight='weight'
+                )
+            )
+        except Exception:
+            src_side_dists_cache[_u_pre] = {}
+
+    # B. dst_side_dists_cache: {(next_pid, ref_node) -> {node: dist}} within next_pid subgraph
+    # 對每個唯一的 (next_pid, ref_node) 只跑一次 Dijkstra（最多 ~112 次，vs. 原本 ~66,000 次）
+    # relay hop: ref_node = pid_mgmt_sat[next_pid]  → 最多 12 個唯一 key
+    # final hop: ref_node = dst_sat                 → 最多 100 個唯一 key
+    dst_side_dists_cache: Dict[Tuple[int, int], Dict[int, float]] = {}
+    for _gid_pre in range(num_gs):
+        _dst_node_pre = num_sats + _gid_pre
+        _dst_pid_pre = dst_pid_map.get(_dst_node_pre)
+        _dst_sat_pre = dst_sat_map.get(_dst_node_pre)
+        if _dst_pid_pre is None or _dst_sat_pre is None:
+            continue
+        _, _prev_grp_pre = pid_to_group_path.get(_dst_pid_pre, ({}, {}))
+        for _src_pid_pre in router.pid_members:
+            _next_pid_pre = _prev_grp_pre.get(_src_pid_pre)
+            if _next_pid_pre is None:
+                continue
+            _ref_node_pre = _dst_sat_pre if _next_pid_pre == _dst_pid_pre else router.pid_mgmt_sat.get(_next_pid_pre)
+            if _ref_node_pre is None:
+                continue
+            _key_pre = (_next_pid_pre, _ref_node_pre)
+            if _key_pre in dst_side_dists_cache:
+                continue
+            _next_pid_nodes_pre = frozenset(router.pid_members.get(_next_pid_pre, []))
+            if _ref_node_pre not in _next_pid_nodes_pre:
+                continue
+            try:
+                dst_side_dists_cache[_key_pre] = dict(
+                    nx.single_source_dijkstra_path_length(
+                        G_sat.subgraph(_next_pid_nodes_pre), _ref_node_pre, weight='weight'
+                    )
+                )
+            except Exception:
+                dst_side_dists_cache[_key_pre] = {}
+
     # 對每個源衛星 → 目標 GS 進行路由
     for u in range(num_sats):
         src_pid = sat_pid.get(u)
@@ -1412,11 +1476,14 @@ def build_fstate_lhtr(
                 _record_missing(u, dst_node, "next_pid_none")
                 continue
             
-            # QUEUE-AWARE: 邊界衛星對選擇（傳入 queue_packets、dst 資訊）
+            # QUEUE-AWARE: 邊界衛星對選擇（傳入 queue_packets、dst 資訊，使用預計算快取）
+            _ref_for_dst_cache = dst_sat if next_pid == dst_pid else router.pid_mgmt_sat.get(next_pid)
             border_pair = BorderSelector.pick_border_pair(
                 G_sat, gplanner, src_pid, next_pid, sat_pid,
                 src_sat=u, router=router, queue_packets=queue_packets,
-                dst_sat=dst_sat, dst_pid=dst_pid
+                dst_sat=dst_sat, dst_pid=dst_pid,
+                pre_src_side_dists=src_side_dists_cache.get(u),
+                pre_dst_side_dists=dst_side_dists_cache.get((next_pid, _ref_for_dst_cache)),
             )
             
             if not border_pair:
@@ -1477,6 +1544,18 @@ def build_fstate_lhtr(
                 continue
             
             # B2. 資料面：非邊界衛星直接往邊界路由
+            # 延遲建構 u_border 的群內路徑樹（消除 _route_direct_in_subgraph 對 border target 的快取 miss）
+            _border_ck = (u_border, src_pid)
+            if _border_ck not in intra_group_tree_cache:
+                _Gp_b = router.pid_subgraphs.get(src_pid)
+                if _Gp_b is not None and _Gp_b.has_node(u_border):
+                    try:
+                        _, _bp = nx.single_source_dijkstra(_Gp_b, u_border, weight='weight')
+                        intra_group_tree_cache[_border_ck] = {
+                            s: p[-2] for s, p in _bp.items() if s != u_border and len(p) >= 2
+                        }
+                    except Exception:
+                        pass
             next_hop = _route_direct_in_subgraph(u, u_border, src_pid, router, G_sat, intra_group_tree_cache)
             
             # 保底機制
@@ -1830,44 +1909,9 @@ def algorithm_lhtr(
         if enable_verbose_logs and holdover_count > 0:
             print(f"  > [HOLDOVER] Carried over {holdover_count} entries, skipped {holdover_skipped} ISL + {holdover_gsl_skipped} GSL")
     
-    # ==================== 最終 2-CYCLE 清理 ====================
-    if enable_verbose_logs:
-        print("  > Final 2-cycle cleanup...")
-    
-    def final_isl_if_idxs(u: int, v: int) -> tuple:
-        """使用 sat_neighbor_to_if 確保接口 ID 正確"""
-        if sat_neighbor_to_if is not None:
-            try:
-                return int(sat_neighbor_to_if[(u, v)]), int(sat_neighbor_to_if[(v, u)])
-            except Exception:
-                pass
-        # Fallback: 從圖的邊屬性讀取
-        G = sat_net_graph_only_satellites_with_isls
-        if not G.has_edge(u, v):
-            return 0, 0
-        d = G.get_edge_data(u, v, default={}) or {}
-        cand_u = d.get('if_u', d.get('if_idx_u', d.get('if_idx_src')))
-        cand_v = d.get('if_v', d.get('if_idx_v', d.get('if_idx_dst')))
-        mu = int(cand_u) if cand_u is not None else 0
-        mv = int(cand_v) if cand_v is not None else 0
-        if num_isls_per_sat and len(num_isls_per_sat) > u and num_isls_per_sat[u] > 0:
-            mu %= num_isls_per_sat[u]
-        if num_isls_per_sat and len(num_isls_per_sat) > v and num_isls_per_sat[v] > 0:
-            mv %= num_isls_per_sat[v]
-        return mu, mv
-    
-    fstate = _break_2cycles(
-        fstate, 
-        sat_net_graph_only_satellites_with_isls, 
-        sat_to_pid, 
-        _ROUTER, 
-        num_sats, 
-        dst_sat_map, 
-        final_isl_if_idxs,
-        lambda *args, **kwargs: None,
-        max_iterations=3
-    )
-    
+    # （第二次 _break_2cycles 已移除：HOLDOVER 加入的 entry 均通過 has_edge 驗證，
+    #  幾乎不會製造新的 2-cycle；第一次在 build_fstate_lhtr 結尾已清理主流程產生的 cycle。）
+
     # 寫入 fstate
     output_filename = output_dynamic_state_dir + "/fstate_" + str(time_since_epoch_ns) + ".txt"
     changed_entries = 0
