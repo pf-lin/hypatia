@@ -1150,7 +1150,7 @@ def _break_2cycles(
                 continue
             
             # 獲取目標衛星
-            dst_sat = dst if dst < num_sats else dst_sat_map.get(dst)
+            dst_sat = dst if dst < num_sats else dst_sat_map.get((large_id, dst), dst_sat_map.get(dst))
             if dst_sat is None:
                 continue
             
@@ -1186,6 +1186,70 @@ def _break_2cycles(
         # log_debug_func(f"  2-Cycle 清洗第 {iteration+1} 輪：發現 {len(cycles_found)} 個，修復 {fixes_applied} 個")
     
     return fstate
+
+
+def _normalize_gs_visible_candidates(candidates) -> List[Tuple[float, int]]:
+    best_by_sat: Dict[int, float] = {}
+
+    for item in candidates or []:
+        if isinstance(item, (list, tuple)) and len(item) > 1:
+            try:
+                gsl_distance = float(item[0])
+                sat_id = int(item[1])
+            except (TypeError, ValueError):
+                continue
+        else:
+            try:
+                gsl_distance = 0.0
+                sat_id = int(item)
+            except (TypeError, ValueError):
+                continue
+
+        prev_distance = best_by_sat.get(sat_id)
+        if prev_distance is None or gsl_distance < prev_distance:
+            best_by_sat[sat_id] = gsl_distance
+
+    normalized = [(gsl_distance, sat_id) for sat_id, gsl_distance in best_by_sat.items()]
+    normalized.sort(key=lambda item: (item[0], item[1]))
+    return normalized
+
+
+def _build_ground_station_attachment_cache(
+    G_sat: nx.Graph,
+    candidates: List[Tuple[float, int]],
+) -> Tuple[Dict[int, float], Dict[int, int]]:
+    best_state: Dict[int, Tuple[float, float, int]] = {}
+    heap: List[Tuple[float, float, int, int]] = []
+
+    for gsl_distance, sat_id in candidates:
+        if not G_sat.has_node(sat_id):
+            continue
+
+        state = (float(gsl_distance), float(gsl_distance), int(sat_id))
+        current = best_state.get(sat_id)
+        if current is None or state < current:
+            best_state[sat_id] = state
+            heapq.heappush(heap, (state[0], state[1], state[2], sat_id))
+
+    while heap:
+        total_cost, attach_gsl_distance, attach_sat, node = heapq.heappop(heap)
+        if best_state.get(node) != (total_cost, attach_gsl_distance, attach_sat):
+            continue
+
+        for neighbor in G_sat.neighbors(node):
+            edge_weight = float(G_sat[node][neighbor].get('weight', 1.0))
+            candidate_state = (total_cost + edge_weight, attach_gsl_distance, attach_sat)
+            current = best_state.get(neighbor)
+            if current is None or candidate_state < current:
+                best_state[neighbor] = candidate_state
+                heapq.heappush(
+                    heap,
+                    (candidate_state[0], candidate_state[1], candidate_state[2], neighbor),
+                )
+
+    total_costs = {node: state[0] for node, state in best_state.items()}
+    attachment_sats = {node: state[2] for node, state in best_state.items()}
+    return total_costs, attachment_sats
 
 
 # ==========================
@@ -1235,17 +1299,23 @@ def build_fstate_lhtr(
         reason[why] += 1
         missing_reason.pop((src, dst), None)
 
-    # 目的集合：將每個 GS 投影到其候選可視衛星所在 PID
+    # 目的集合：為每個 GS 建立 cost-aware 的 visible-satellite 選擇快取
     dst_pid_map: Dict[int,int] = {}
     dst_sat_map: Dict[int,int] = {}
     src_sat_map: Dict[int,int] = {}
+    route_dst_sat_map: Dict[Tuple[int, int], int] = {}
+    normalized_gs_candidates: Dict[int, List[Tuple[float, int]]] = {}
+    dst_total_cost_cache: Dict[int, Dict[int, float]] = {}
+    dst_attach_sat_cache: Dict[int, Dict[int, int]] = {}
+    all_candidate_dst_pids: Set[int] = set()
     
     for gid0 in range(num_gs):
-        candidates = ground_station_satellites_in_range.get(gid0, []) if isinstance(ground_station_satellites_in_range, dict) else []
+        gs_node = num_sats + gid0
+        raw_candidates = ground_station_satellites_in_range.get(gid0, []) if isinstance(ground_station_satellites_in_range, dict) else []
+        candidates = _normalize_gs_visible_candidates(raw_candidates)
         
         if not candidates:
             # GS 視線 fallback
-            gs_node = num_sats + gid0
             if prev_dst_sat_map and gs_node in prev_dst_sat_map:
                 fallback_sat = prev_dst_sat_map[gs_node]
                 if fallback_sat in sat_pid:
@@ -1260,16 +1330,23 @@ def build_fstate_lhtr(
                 dst_sat_map[gs_node] = fallback_sat
                 reason["dst_projection_gid_mod"] += 1
             continue
-        
-        # 選距離最近的可見衛星，而非 sid 最小的（穩定 dst_sat 選擇）
-        if isinstance(candidates[0], (list, tuple)) and len(candidates[0]) > 1:
-            sat_candidate = min(candidates, key=lambda x: x[0])[1]
-        else:
-            sat_candidate = candidates[0]
+
+        normalized_gs_candidates[gs_node] = candidates
+        dst_total_cost_cache[gs_node], dst_attach_sat_cache[gs_node] = _build_ground_station_attachment_cache(
+            G_sat,
+            candidates,
+        )
+
+        sat_candidate = min(candidates, key=lambda item: (item[0], item[1]))[1]
         if sat_candidate in sat_pid:
-            dst_pid_map[num_sats + gid0] = sat_pid[sat_candidate]
-            dst_sat_map[num_sats + gid0] = sat_candidate
+            dst_pid_map[gs_node] = sat_pid[sat_candidate]
+            dst_sat_map[gs_node] = sat_candidate
             reason["dst_projection_visible"] += 1
+
+        for _, visible_sat in candidates:
+            visible_pid = sat_pid.get(visible_sat)
+            if visible_pid is not None:
+                all_candidate_dst_pids.add(visible_pid)
 
     # 嘗試取得鄰接介面索引查表
     global _SAT_NEI_TO_IF
@@ -1305,24 +1382,23 @@ def build_fstate_lhtr(
     # 控制面職責 1️⃣：群間路由決策（Group-level SPF）
     pid_to_group_path = {}
     
-    for gid in range(num_gs):
-        dst_node = num_sats + gid
-        if dst_node not in dst_pid_map:
-            reason["dst_pid_missing"] += 1
-            continue
-        
-        dst_pid = dst_pid_map[dst_node]
-        
+    for dst_pid in sorted(all_candidate_dst_pids.union(set(dst_pid_map.values()))):
         if dst_pid not in pid_to_group_path:
             dist, prev = gplanner.distances_to(dst_pid)
             pid_to_group_path[dst_pid] = (dist, prev)
     
     # 🚀 性能優化：預計算群內路徑樹（避免重複 SPF）
     unique_dst_targets = {}
-    for dst_node, dst_sat in dst_sat_map.items():
+    for dst_sat in dst_sat_map.values():
         dst_pid = sat_pid.get(dst_sat)
         if dst_pid is not None:
             unique_dst_targets[dst_sat] = dst_pid
+
+    for candidates in normalized_gs_candidates.values():
+        for _, dst_sat in candidates:
+            dst_pid = sat_pid.get(dst_sat)
+            if dst_pid is not None:
+                unique_dst_targets[dst_sat] = dst_pid
     
     for dst_sat, dst_pid in unique_dst_targets.items():
         cache_key = (dst_sat, dst_pid)
@@ -1378,12 +1454,7 @@ def build_fstate_lhtr(
     # relay hop: ref_node = pid_mgmt_sat[next_pid]  → 最多 12 個唯一 key
     # final hop: ref_node = dst_sat                 → 最多 100 個唯一 key
     dst_side_dists_cache: Dict[Tuple[int, int], Dict[int, float]] = {}
-    for _gid_pre in range(num_gs):
-        _dst_node_pre = num_sats + _gid_pre
-        _dst_pid_pre = dst_pid_map.get(_dst_node_pre)
-        _dst_sat_pre = dst_sat_map.get(_dst_node_pre)
-        if _dst_pid_pre is None or _dst_sat_pre is None:
-            continue
+    for _dst_sat_pre, _dst_pid_pre in unique_dst_targets.items():
         _, _prev_grp_pre = pid_to_group_path.get(_dst_pid_pre, ({}, {}))
         for _src_pid_pre in router.pid_members:
             _next_pid_pre = _prev_grp_pre.get(_src_pid_pre)
@@ -1416,15 +1487,23 @@ def build_fstate_lhtr(
         
         for gid in range(num_gs):
             dst_node = num_sats + gid
-            if dst_node not in dst_sat_map:
-                _record_missing(u, dst_node, "dst_sat_missing")
-                continue
-            
-            dst_sat = dst_sat_map[dst_node]
+            if dst_node in dst_attach_sat_cache:
+                dst_sat = dst_attach_sat_cache[dst_node].get(u)
+                if dst_sat is None:
+                    _record_missing(u, dst_node, "dst_attach_unreachable")
+                    continue
+            else:
+                dst_sat = dst_sat_map.get(dst_node)
+                if dst_sat is None:
+                    _record_missing(u, dst_node, "dst_sat_missing")
+                    continue
+
             dst_pid = sat_pid.get(dst_sat)
             if dst_pid is None:
                 _record_missing(u, dst_node, "dst_pid_none")
                 continue
+
+            route_dst_sat_map[(u, dst_node)] = dst_sat
             
             # 特殊情況：已經在目標衛星
             if u == dst_sat:
@@ -1574,24 +1653,43 @@ def build_fstate_lhtr(
     # Ground stations to ground stations
     for src_gid in range(num_gs):
         src_gs_node = num_sats + src_gid
-        
-        src_candidates = ground_station_satellites_in_range.get(src_gid, []) if isinstance(ground_station_satellites_in_range, dict) else []
-        
+        src_candidates = normalized_gs_candidates.get(src_gs_node, [])
+
         if src_candidates:
-            src_sat = src_candidates[0][1] if isinstance(src_candidates[0], (list,tuple)) and len(src_candidates[0])>1 else src_candidates[0]
+            sticky_src_sat = min(src_candidates, key=lambda item: (item[0], item[1]))[1]
         elif prev_src_sat_map and src_gs_node in prev_src_sat_map:
-            src_sat = prev_src_sat_map[src_gs_node]
-            if src_sat not in sat_pid:
-                src_sat = src_gid % num_sats
+            sticky_src_sat = prev_src_sat_map[src_gs_node]
+            if sticky_src_sat not in sat_pid:
+                sticky_src_sat = src_gid % num_sats
         else:
-            src_sat = src_gid % num_sats
-        
-        src_sat_map[src_gs_node] = src_sat
+            sticky_src_sat = src_gid % num_sats
+
+        src_sat_map[src_gs_node] = sticky_src_sat
         
         for dst_gid in range(num_gs):
             if src_gid == dst_gid:
                 continue
             dst_gs_node = num_sats + dst_gid
+
+            if src_candidates and dst_gs_node in dst_total_cost_cache:
+                best_src_choice = None
+                dst_costs = dst_total_cost_cache[dst_gs_node]
+                for src_gsl_dist, candidate_sat in src_candidates:
+                    sat_to_dst_cost = dst_costs.get(candidate_sat, float('inf'))
+                    if math.isinf(sat_to_dst_cost):
+                        continue
+                    choice = (src_gsl_dist + sat_to_dst_cost, src_gsl_dist, candidate_sat)
+                    if best_src_choice is None or choice < best_src_choice:
+                        best_src_choice = choice
+
+                if best_src_choice is None:
+                    _record_write(src_gs_node, dst_gs_node, (-1, -1, -1), "written_gs_to_gs_drop")
+                    continue
+
+                src_sat = best_src_choice[2]
+            else:
+                src_sat = sticky_src_sat
+
             my_if = 0
             next_if = num_isls_per_sat[src_sat] + gid_to_sat_gsl_if_idx[src_gid] if num_isls_per_sat else 0
             _record_write(src_gs_node, dst_gs_node, (src_sat, my_if, next_if), "written_gs_to_gs")
@@ -1600,7 +1698,9 @@ def build_fstate_lhtr(
     def _noop_log(msg):
         pass
     
-    fstate = _break_2cycles(fstate, G_sat, sat_pid, router, num_sats, dst_sat_map, _isl_if_idxs, _noop_log, max_iterations=3)
+    cycle_dst_sat_map = dict(dst_sat_map)
+    cycle_dst_sat_map.update(route_dst_sat_map)
+    fstate = _break_2cycles(fstate, G_sat, sat_pid, router, num_sats, cycle_dst_sat_map, _isl_if_idxs, _noop_log, max_iterations=3)
 
     # Ensure complete SAT->GS coverage with explicit drop entries.
     missing_before_fill = 0
