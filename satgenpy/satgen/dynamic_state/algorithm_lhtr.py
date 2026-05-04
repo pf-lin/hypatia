@@ -396,6 +396,56 @@ class VirtualPIDRouterPlaneBlock:
                     pass
         return plane, pos
 
+    @staticmethod
+    def _pid_center_edge_weight(_u: int, _v: int, edge_data: dict) -> float:
+        try:
+            return float(edge_data.get('geo_len_m', edge_data.get('weight', 1.0)))
+        except Exception:
+            return 1.0
+
+    def _select_pid_management_satellite(self, G_sat: nx.Graph, members: Set[int]) -> Optional[int]:
+        if not members:
+            return None
+
+        Gp = G_sat.subgraph(members)
+        if len(Gp) == 0:
+            return None
+
+        best_choice = None
+        for component_nodes in nx.connected_components(Gp):
+            component = Gp.subgraph(component_nodes)
+            component_size = len(component)
+            try:
+                path_lengths = dict(
+                    nx.all_pairs_dijkstra_path_length(
+                        component,
+                        weight=self._pid_center_edge_weight,
+                    )
+                )
+            except Exception:
+                path_lengths = {}
+
+            for node in component.nodes():
+                lengths = path_lengths.get(node)
+                if lengths is None or len(lengths) != component_size:
+                    total_distance = float('inf')
+                    eccentricity = float('inf')
+                else:
+                    total_distance = sum(lengths.values())
+                    eccentricity = max(lengths.values()) if lengths else 0.0
+
+                score = (
+                    -component_size,
+                    total_distance,
+                    eccentricity,
+                    -component.degree(node),
+                    node,
+                )
+                if best_choice is None or score < best_choice[0]:
+                    best_choice = (score, node)
+
+        return best_choice[1] if best_choice is not None else min(members)
+
     def _build_pid_from_plane_blocks(self, G_sat: nx.Graph) -> None:
         """依 p×s 分群"""
         pid_counter = 0
@@ -429,14 +479,10 @@ class VirtualPIDRouterPlaneBlock:
         for pid, mem in list(self.pid_members.items()):
             if not mem:
                 continue
-            Gp = G_sat.subgraph(mem)
-            if len(Gp) == 0:
-                continue
             try:
-                degs = Gp.degree()
-                max_deg = max(d for _, d in degs)
-                cands = [n for n, d in Gp.degree() if d == max_deg]
-                self.pid_mgmt_sat[pid] = min(cands)
+                mgmt_sat = self._select_pid_management_satellite(G_sat, mem)
+                if mgmt_sat is not None:
+                    self.pid_mgmt_sat[pid] = mgmt_sat
             except Exception:
                 self.pid_mgmt_sat[pid] = min(mem)
 
