@@ -14,7 +14,7 @@ dynamic_state = "dynamic_state"
 full_satellite_network_isls = "oneweb_1200_isls_plus_grid_ground_stations_top_100_algorithm_free_one_only_over_isls"
 
 # Routing algorithm (same as lohi_replication/a_b)
-# algorithm_queue_aware_over_isls / algorithm_tlr / algorithm_lhtr
+# algorithm_queue_aware_over_isls / algorithm_tlr / algorithm_lohi / algorithm_lhtr
 routing_algorithm = "algorithm_lhtr"
 
 # Traffic modes and movement modes (mirrors ns3_experiments/traffic_matrix)

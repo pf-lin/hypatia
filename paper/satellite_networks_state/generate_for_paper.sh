@@ -101,35 +101,35 @@ fi
 
 # OneWeb-1200 with ISLs
 if [ "${id}" = "15" ]; then
-  python main_oneweb_1200.py 200 50 isls_plus_grid ground_stations_top_100 algorithm_lohi_routing ${num_threads}
+  python main_oneweb_1200.py 200 50 isls_plus_grid ground_stations_top_100 algorithm_lohi ${num_threads}
 fi
 if [ "${id}" = "16" ]; then
-  python main_oneweb_1200.py 200 100 isls_plus_grid ground_stations_top_100 algorithm_lohi_routing ${num_threads}
+  python main_oneweb_1200.py 200 100 isls_plus_grid ground_stations_top_100 algorithm_lohi ${num_threads}
 fi
 if [ "${id}" = "17" ]; then
-  python main_oneweb_1200.py 200 1000 isls_plus_grid ground_stations_top_100 algorithm_lohi_routing ${num_threads}
+  python main_oneweb_1200.py 200 1000 isls_plus_grid ground_stations_top_100 algorithm_lohi ${num_threads}
 fi
 
 # 6x18 with ISLs (6 orbits, 18 satellites per orbit)
 if [ "${id}" = "18" ]; then
-  python main_6x18.py 200 50 isls_plus_grid ground_stations_top_100 algorithm_lohi_routing ${num_threads}
+  python main_6x18.py 200 50 isls_plus_grid ground_stations_top_100 algorithm_lohi ${num_threads}
 fi
 if [ "${id}" = "19" ]; then
-  python main_6x18.py 200 100 isls_plus_grid ground_stations_top_100 algorithm_lohi_routing ${num_threads}
+  python main_6x18.py 200 100 isls_plus_grid ground_stations_top_100 algorithm_lohi ${num_threads}
 fi
 if [ "${id}" = "20" ]; then
-  python main_6x18.py 200 1000 isls_plus_grid ground_stations_top_100 algorithm_lohi_routing ${num_threads}
+  python main_6x18.py 200 1000 isls_plus_grid ground_stations_top_100 algorithm_lohi ${num_threads}
 fi
 
 # 6x12 with ISLs (6 orbits, 12 satellites per orbit)
 if [ "${id}" = "21" ]; then
-  python main_6x12.py 200 50 isls_plus_grid ground_stations_top_100 algorithm_lohi_routing ${num_threads}
+  python main_6x12.py 200 50 isls_plus_grid ground_stations_top_100 algorithm_lohi ${num_threads}
 fi
 if [ "${id}" = "22" ]; then
-  python main_6x12.py 200 100 isls_plus_grid ground_stations_top_100 algorithm_lohi_routing ${num_threads}
+  python main_6x12.py 200 100 isls_plus_grid ground_stations_top_100 algorithm_lohi ${num_threads}
 fi
 if [ "${id}" = "23" ]; then
-  python main_6x12.py 200 1000 isls_plus_grid ground_stations_top_100 algorithm_lohi_routing ${num_threads}
+  python main_6x12.py 200 1000 isls_plus_grid ground_stations_top_100 algorithm_lohi ${num_threads}
 fi
 
 # 6X12 with ISLs (6 orbits, 12 satellites per orbit) with algorithm_free_one_only_over_isls

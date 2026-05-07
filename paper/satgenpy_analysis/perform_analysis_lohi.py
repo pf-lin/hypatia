@@ -86,7 +86,7 @@ commands_to_run = []
 # commands_to_run.append(
 #     "cd ../../satgenpy; python -m satgen.post_analysis.main_print_routes_and_rtt "
 #     "../paper/satgenpy_analysis/lohi_data ../paper/satellite_networks_state/gen_data/"
-#     "6x12_isls_plus_grid_ground_stations_top_100_algorithm_lohi_routing "
+#     "6x12_isls_plus_grid_ground_stations_top_100_algorithm_lohi "
 #     "100 200 108 109 "
 #     "> ../paper/satgenpy_analysis/lohi_data/command_logs/manual_6x12_lohi_108_to_109.log 2>&1"
 # )
@@ -94,7 +94,7 @@ commands_to_run = []
 # commands_to_run.append(
 #     "cd ../../satgenpy; python -m satgen.post_analysis.main_print_graphical_routes_and_rtt "
 #     "../paper/satgenpy_analysis/lohi_data ../paper/satellite_networks_state/gen_data/"
-#     "6x12_isls_plus_grid_ground_stations_top_100_algorithm_lohi_routing "
+#     "6x12_isls_plus_grid_ground_stations_top_100_algorithm_lohi "
 #     "100 200 108 109 "
 #     "> ../paper/satgenpy_analysis/lohi_data/command_logs/manual_graphical_6x12_lohi_108_to_109.log 2>&1"
 # )
@@ -103,7 +103,7 @@ commands_to_run = []
 # commands_to_run.append(
 #     "cd ../../satgenpy; python -m satgen.post_analysis.main_print_routes_and_rtt "
 #     "../paper/satgenpy_analysis/lohi_data ../paper/satellite_networks_state/gen_data/"
-#     "6x12_isls_plus_grid_ground_stations_top_100_algorithm_lohi_routing "
+#     "6x12_isls_plus_grid_ground_stations_top_100_algorithm_lohi "
 #     "100 200 110 115 "
 #     "> ../paper/satgenpy_analysis/lohi_data/command_logs/manual_6x12_lohi_110_to_115.log 2>&1"
 # )
@@ -111,7 +111,7 @@ commands_to_run = []
 # commands_to_run.append(
 #     "cd ../../satgenpy; python -m satgen.post_analysis.main_print_graphical_routes_and_rtt "
 #     "../paper/satgenpy_analysis/lohi_data ../paper/satellite_networks_state/gen_data/"
-#     "6x12_isls_plus_grid_ground_stations_top_100_algorithm_lohi_routing "
+#     "6x12_isls_plus_grid_ground_stations_top_100_algorithm_lohi "
 #     "100 200 110 115 "
 #     "> ../paper/satgenpy_analysis/lohi_data/command_logs/manual_graphical_6x12_lohi_110_to_115.log 2>&1"
 # )
@@ -123,7 +123,7 @@ commands_to_run = []
 # commands_to_run.append(
 #     "cd ../../satgenpy; python -m satgen.post_analysis.main_print_routes_and_rtt "
 #     "../paper/satgenpy_analysis/lohi_data ../paper/satellite_networks_state/gen_data/"
-#     "6x18_isls_plus_grid_ground_stations_top_100_algorithm_lohi_routing "
+#     "6x18_isls_plus_grid_ground_stations_top_100_algorithm_lohi "
 #     "100 200 108 109 "
 #     "> ../paper/satgenpy_analysis/lohi_data/command_logs/manual_6x18_lohi_108_to_109.log 2>&1"
 # )
@@ -131,7 +131,7 @@ commands_to_run = []
 # commands_to_run.append(
 #     "cd ../../satgenpy; python -m satgen.post_analysis.main_print_graphical_routes_and_rtt "
 #     "../paper/satgenpy_analysis/lohi_data ../paper/satellite_networks_state/gen_data/"
-#     "6x18_isls_plus_grid_ground_stations_top_100_algorithm_lohi_routing "
+#     "6x18_isls_plus_grid_ground_stations_top_100_algorithm_lohi "
 #     "100 200 108 109 "
 #     "> ../paper/satgenpy_analysis/lohi_data/command_logs/manual_graphical_6x18_lohi_108_to_109.log 2>&1"
 # )
@@ -140,7 +140,7 @@ commands_to_run = []
 # commands_to_run.append(
 #     "cd ../../satgenpy; python -m satgen.post_analysis.main_print_routes_and_rtt "
 #     "../paper/satgenpy_analysis/lohi_data ../paper/satellite_networks_state/gen_data/"
-#     "6x18_isls_plus_grid_ground_stations_top_100_algorithm_lohi_routing "
+#     "6x18_isls_plus_grid_ground_stations_top_100_algorithm_lohi "
 #     "100 200 110 115 "
 #     "> ../paper/satgenpy_analysis/lohi_data/command_logs/manual_6x18_lohi_110_to_115.log 2>&1"
 # )
@@ -148,7 +148,7 @@ commands_to_run = []
 # commands_to_run.append(
 #     "cd ../../satgenpy; python -m satgen.post_analysis.main_print_graphical_routes_and_rtt "
 #     "../paper/satgenpy_analysis/lohi_data ../paper/satellite_networks_state/gen_data/"
-#     "6x18_isls_plus_grid_ground_stations_top_100_algorithm_lohi_routing "
+#     "6x18_isls_plus_grid_ground_stations_top_100_algorithm_lohi "
 #     "100 200 110 115 "
 #     "> ../paper/satgenpy_analysis/lohi_data/command_logs/manual_graphical_6x18_lohi_110_to_115.log 2>&1"
 # )
@@ -161,7 +161,7 @@ commands_to_run = []
 # commands_to_run.append(
 #     "cd ../../satgenpy; python -m satgen.post_analysis.main_print_routes_and_rtt "
 #     "../paper/satgenpy_analysis/lohi_data ../paper/satellite_networks_state/gen_data/"
-#     "oneweb_1200_isls_plus_grid_ground_stations_top_100_algorithm_lohi_routing "
+#     "oneweb_1200_isls_plus_grid_ground_stations_top_100_algorithm_lohi "
 #     "100 200 744 741 "
 #     "> ../paper/satgenpy_analysis/lohi_data/command_logs/manual_oneweb_lohi_744_to_741.log 2>&1"
 # )
@@ -169,7 +169,7 @@ commands_to_run = []
 # commands_to_run.append(
 #     "cd ../../satgenpy; python -m satgen.post_analysis.main_print_graphical_routes_and_rtt "
 #     "../paper/satgenpy_analysis/lohi_data ../paper/satellite_networks_state/gen_data/"
-#     "oneweb_1200_isls_plus_grid_ground_stations_top_100_algorithm_lohi_routing "
+#     "oneweb_1200_isls_plus_grid_ground_stations_top_100_algorithm_lohi "
 #     "100 200 744 741 "
 #     "> ../paper/satgenpy_analysis/lohi_data/command_logs/manual_graphical_oneweb_lohi_744_to_741.log 2>&1"
 # )
@@ -178,7 +178,7 @@ commands_to_run = []
 # commands_to_run.append(
 #     "cd ../../satgenpy; python -m satgen.post_analysis.main_print_routes_and_rtt "
 #     "../paper/satgenpy_analysis/lohi_data ../paper/satellite_networks_state/gen_data/"
-#     "oneweb_1200_isls_plus_grid_ground_stations_top_100_algorithm_lohi_routing "
+#     "oneweb_1200_isls_plus_grid_ground_stations_top_100_algorithm_lohi "
 #     "100 200 757 807 "
 #     "> ../paper/satgenpy_analysis/lohi_data/command_logs/manual_oneweb_lohi_757_to_807.log 2>&1"
 # )
@@ -186,7 +186,7 @@ commands_to_run = []
 # commands_to_run.append(
 #     "cd ../../satgenpy; python -m satgen.post_analysis.main_print_graphical_routes_and_rtt "
 #     "../paper/satgenpy_analysis/lohi_data ../paper/satellite_networks_state/gen_data/"
-#     "oneweb_1200_isls_plus_grid_ground_stations_top_100_algorithm_lohi_routing "
+#     "oneweb_1200_isls_plus_grid_ground_stations_top_100_algorithm_lohi "
 #     "100 200 757 807 "
 #     "> ../paper/satgenpy_analysis/lohi_data/command_logs/manual_graphical_oneweb_lohi_757_to_807.log 2>&1"
 # )
@@ -339,11 +339,11 @@ commands_to_run.append(
 print("Generating commands for constellation comparison...")
 for satgenpy_generated_constellation in [
     # "6x12_isls_plus_grid_ground_stations_top_100_algorithm_free_one_only_over_isls",
-    # "6x12_isls_plus_grid_ground_stations_top_100_algorithm_lohi_routing",
-    # "6x18_isls_plus_grid_ground_stations_top_100_algorithm_lohi_routing",
+    # "6x12_isls_plus_grid_ground_stations_top_100_algorithm_lohi",
+    # "6x18_isls_plus_grid_ground_stations_top_100_algorithm_lohi",
     "oneweb_1200_isls_plus_grid_ground_stations_top_100_algorithm_free_one_only_over_isls",
     # "oneweb_1200_isls_plus_grid_ground_stations_top_100_algorithm_paired_one_only_over_isls",
-    # "oneweb_1200_isls_plus_grid_ground_stations_top_100_algorithm_lohi_routing",
+    # "oneweb_1200_isls_plus_grid_ground_stations_top_100_algorithm_lohi",
 ]:
     for duration_s in [200]:
         list_update_interval_ms = [50, 100, 1000]

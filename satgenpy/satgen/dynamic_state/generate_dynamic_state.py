@@ -30,7 +30,7 @@ from .algorithm_free_one_only_over_isls import algorithm_free_one_only_over_isls
 from .algorithm_paired_many_only_over_isls import algorithm_paired_many_only_over_isls
 from .algorithm_paired_one_only_over_isls import algorithm_paired_one_only_over_isls
 from .algorithm_free_gs_one_sat_many_only_over_isls import algorithm_free_gs_one_sat_many_only_over_isls
-from .algorithm_lohi import algorithm_lohi_routing
+from .algorithm_lohi import algorithm_lohi, init as lohi_init
 from .algorithm_queue_aware_over_isls import algorithm_queue_aware_over_isls
 from .algorithm_tlr import algorithm_tlr
 from .algorithm_lhtr import algorithm_lhtr, init as lhtr_init
@@ -53,7 +53,10 @@ def generate_dynamic_state(
                                   # "algorithm_free_one_only_over_isls"
                                   # "algorithm_paired_many_only_over_isls"
                                   # "algorithm_paired_one_only_over_isls"
-                                  # "algorithm_lohi_routing"
+                                  # "algorithm_queue_aware_over_isls"
+                                  # "algorithm_tlr"
+                                  # "algorithm_lohi"
+                                  # "algorithm_lhtr"
         enable_verbose_logs,
         num_orbits=None,
         num_sats_per_orbit=None
@@ -356,24 +359,6 @@ def generate_dynamic_state_at(
             enable_verbose_logs
         )
 
-    elif dynamic_state_algorithm == "algorithm_lohi_routing":
-
-        return algorithm_lohi_routing(
-            output_dynamic_state_dir,
-            time_since_epoch_ns,
-            satellites,
-            ground_stations,
-            sat_net_graph_only_satellites_with_isls,
-            ground_station_satellites_in_range,
-            num_isls_per_sat,
-            sat_neighbor_to_if,
-            list_gsl_interfaces_info,
-            prev_output,
-            enable_verbose_logs,
-            num_orbits,
-            num_sats_per_orbit
-        )
-    
     elif dynamic_state_algorithm == "algorithm_queue_aware_over_isls":
         
         return algorithm_queue_aware_over_isls(
@@ -408,6 +393,32 @@ def generate_dynamic_state_at(
             prev_output,
             enable_verbose_logs,
             queue_stats_file  # Pass queue stats file
+        )
+
+    elif dynamic_state_algorithm == "algorithm_lohi":
+        # Initialize LoHi once if not already initialized
+        from .algorithm_lohi import _ROUTER as lohi_router
+        if lohi_router is None:
+            lohi_init()
+
+        # Default time_step_ns to 100ms if not provided
+        if time_step_ns is None:
+            time_step_ns = 100 * 1000 * 1000  # 100 ms
+
+        return algorithm_lohi(
+            output_dynamic_state_dir,
+            time_since_epoch_ns,
+            satellites,
+            ground_stations,
+            sat_net_graph_only_satellites_with_isls,
+            ground_station_satellites_in_range,
+            num_isls_per_sat,
+            sat_neighbor_to_if,
+            list_gsl_interfaces_info,
+            prev_output,
+            enable_verbose_logs,
+            queue_stats_file,
+            time_step_ns=time_step_ns
         )
 
     elif dynamic_state_algorithm == "algorithm_lhtr":

@@ -138,7 +138,10 @@ class MainHelper:
         if dynamic_state_algorithm == "algorithm_free_one_only_gs_relays" \
                 or dynamic_state_algorithm == "algorithm_free_one_only_over_isls" \
                 or dynamic_state_algorithm == "algorithm_paired_one_only_over_isls" \
-                or dynamic_state_algorithm == "algorithm_lohi_routing":
+                or dynamic_state_algorithm == "algorithm_queue_aware_over_isls" \
+                or dynamic_state_algorithm == "algorithm_tlr" \
+                or dynamic_state_algorithm == "algorithm_lohi" \
+                or dynamic_state_algorithm == "algorithm_lhtr":
             gsl_interfaces_per_satellite = 1
         elif dynamic_state_algorithm == "algorithm_paired_many_only_over_isls":
             gsl_interfaces_per_satellite = len(ground_stations)

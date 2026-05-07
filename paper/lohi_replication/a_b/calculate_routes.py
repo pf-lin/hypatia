@@ -103,6 +103,47 @@ def load_prev_output(output_dir, prev_time_ns):
         return None
 
 
+def get_algorithm_state_handlers(dynamic_state_algorithm):
+    if dynamic_state_algorithm == "algorithm_lhtr":
+        from satgen.dynamic_state.algorithm_lhtr import load_lhtr_state, save_lhtr_state
+
+        return "LHTR", "lhtr_state", load_lhtr_state, save_lhtr_state
+
+    if dynamic_state_algorithm == "algorithm_lohi":
+        from satgen.dynamic_state.algorithm_lohi import load_lohi_state, save_lohi_state
+
+        return "LoHi", "lohi_state", load_lohi_state, save_lohi_state
+
+    return None
+
+
+def restore_algorithm_state(dynamic_state_algorithm, output_dir, prev_time_ns):
+    handlers = get_algorithm_state_handlers(dynamic_state_algorithm)
+    if handlers is None:
+        return
+
+    label, prefix, load_state, _ = handlers
+    state_file = os.path.join(output_dir, f"{prefix}_{prev_time_ns}.pkl")
+    if not load_state(state_file):
+        print(f"  > [{label}] Will initialize fresh state (first snapshot or fallback)")
+
+
+def persist_algorithm_state(dynamic_state_algorithm, output_dir, current_time_ns, prev_time_ns, time_step_ns):
+    handlers = get_algorithm_state_handlers(dynamic_state_algorithm)
+    if handlers is None:
+        return
+
+    label, prefix, _, save_state = handlers
+    state_cur = os.path.join(output_dir, f"{prefix}_{current_time_ns}.pkl")
+    if not save_state(state_cur):
+        return
+
+    old_state = os.path.join(output_dir, f"{prefix}_{prev_time_ns - time_step_ns}.pkl")
+    if prev_time_ns > 0 and os.path.exists(old_state):
+        os.remove(old_state)
+        print(f"  > [{label}] Cleaned up: {old_state}")
+
+
 def generate_single_fstate(
         satellite_network_dir,
         dynamic_state_dir,
@@ -215,12 +256,8 @@ def main():
     else:
         print("  > Will write only changed forwarding entries")
 
-    # Step 2.5 – restore LHTR internal state (only for algorithm_lhtr)
-    if fstate_calculation_algorithm == "algorithm_lhtr":
-        from satgen.dynamic_state.algorithm_lhtr import load_lhtr_state, save_lhtr_state
-        lhtr_state_file = os.path.join(prev_output_dir, "lhtr_state_%d.pkl" % prev_time_ns)
-        if not load_lhtr_state(lhtr_state_file):
-            print("  > [LHTR] Will initialize fresh state (first snapshot or fallback)")
+    # Step 2.5 – restore algorithm-specific internal state (LoHi/LHTR)
+    restore_algorithm_state(fstate_calculation_algorithm, prev_output_dir, prev_time_ns)
     
     # ===== 步驟 3: 生成新的 fstate =====
     print(f"\nStep 3: Generating fstate for t={current_time_ns}ns...")
@@ -240,14 +277,14 @@ def main():
     print(f"Step 4: Saving current output for next iteration...")
     save_prev_output(output, prev_output_dir, current_time_ns)
 
-    # Step 4.5 – persist LHTR internal state (only for algorithm_lhtr)
-    if fstate_calculation_algorithm == "algorithm_lhtr":
-        lhtr_state_cur = os.path.join(prev_output_dir, "lhtr_state_%d.pkl" % current_time_ns)
-        save_lhtr_state(lhtr_state_cur)
-        old_lhtr_state = os.path.join(prev_output_dir, "lhtr_state_%d.pkl" % (prev_time_ns - time_step_ns))
-        if prev_time_ns > 0 and os.path.exists(old_lhtr_state):
-            os.remove(old_lhtr_state)
-            print("  > [LHTR] Cleaned up: %s" % old_lhtr_state)
+    # Step 4.5 – persist algorithm-specific internal state (LoHi/LHTR)
+    persist_algorithm_state(
+        fstate_calculation_algorithm,
+        prev_output_dir,
+        current_time_ns,
+        prev_time_ns,
+        time_step_ns,
+    )
     
     # ===== 步驟 5: 清理舊的 pickle 檔案（可選，節省空間）=====
     # 只保留最近兩次的 pickle 檔案

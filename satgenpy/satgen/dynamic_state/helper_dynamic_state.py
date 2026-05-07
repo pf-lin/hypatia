@@ -70,7 +70,10 @@ def worker(args):
                                   # "algorithm_free_gs_one_sat_many_only_over_isls"
                                   # "algorithm_paired_many_only_over_isls"
                                   # "algorithm_paired_one_only_over_isls"
-                                  # "algorithm_lohi_routing"
+                                  # "algorithm_queue_aware_over_isls"
+                                  # "algorithm_tlr"
+                                  # "algorithm_lohi"
+                                  # "algorithm_lhtr"
         print_logs,
         num_orbits,
         num_sats_per_orbit

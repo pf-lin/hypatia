@@ -10,6 +10,24 @@ from satgen.tles import read_tles
 from satgen.interfaces import read_gsl_interfaces_info
 
 
+def save_algorithm_state(dynamic_state_algorithm, prev_output_dir, time_ns):
+    if dynamic_state_algorithm == "algorithm_lhtr":
+        from satgen.dynamic_state.algorithm_lhtr import save_lhtr_state
+
+        return save_lhtr_state(
+            os.path.join(prev_output_dir, f"lhtr_state_{time_ns}.pkl")
+        )
+
+    if dynamic_state_algorithm == "algorithm_lohi":
+        from satgen.dynamic_state.algorithm_lohi import save_lohi_state
+
+        return save_lohi_state(
+            os.path.join(prev_output_dir, f"lohi_state_{time_ns}.pkl")
+        )
+
+    return False
+
+
 def run_ns3_simulation(run_dir):
     """
     執行 NS-3 模擬
@@ -133,6 +151,8 @@ def main():
         with open(pickle_file, 'wb') as f:
             pickle.dump(prev_output, f, protocol=pickle.HIGHEST_PROTOCOL)
         print(f"Saved initial prev_output to: {pickle_file}\n")
+
+    save_algorithm_state(fstate_calculation_algorithm, prev_output_dir, 0)
     
     print("Starting dynamic routing and NS-3 simulation loop...") 
     run_ns3_simulation(run_dir)

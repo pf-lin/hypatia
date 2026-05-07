@@ -31,6 +31,24 @@ CALCULATE_ROUTES_SCRIPT = (
 )
 
 
+def save_algorithm_state(dynamic_state_algorithm, prev_output_dir, time_ns):
+    if dynamic_state_algorithm == "algorithm_lhtr":
+        from satgen.dynamic_state.algorithm_lhtr import save_lhtr_state
+
+        return save_lhtr_state(
+            os.path.join(prev_output_dir, "lhtr_state_%d.pkl" % time_ns)
+        )
+
+    if dynamic_state_algorithm == "algorithm_lohi":
+        from satgen.dynamic_state.algorithm_lohi import save_lohi_state
+
+        return save_lohi_state(
+            os.path.join(prev_output_dir, "lohi_state_%d.pkl" % time_ns)
+        )
+
+    return False
+
+
 def generate_single_fstate(satellite_network_dir, dynamic_state_dir, time_ns,
                             dynamic_state_algorithm, prev_output,
                             queue_stats_file=None, alpha=0.7, beta=0.3, time_step_ns=None):
@@ -104,11 +122,8 @@ for run in get_tm_dynamic_run_list():
             pickle.dump(prev_output, f, protocol=pickle.HIGHEST_PROTOCOL)
         print("  > Saved initial prev_output → %s" % pkl)
 
-    # Persist LHTR internal state after t=0 so calculate_routes.py can restore it
-    if algorithm == "algorithm_lhtr":
-        from satgen.dynamic_state.algorithm_lhtr import save_lhtr_state
-        lhtr_pkl = os.path.join(prev_output_dir, "lhtr_state_0.pkl")
-        save_lhtr_state(lhtr_pkl)
+    # Persist algorithm-specific internal state after t=0 so calculate_routes.py can restore it
+    save_algorithm_state(algorithm, prev_output_dir, 0)
 
     # ------------------------------------------------------------------
     # Step 2: Launch dynamic closed-loop NS-3 simulation
