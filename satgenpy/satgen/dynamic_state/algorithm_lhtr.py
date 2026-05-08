@@ -1,22 +1,25 @@
 """
-LHTR (Load-aware Hierarchical Traffic Routing) Algorithm
-============================================================
+LHTR (Load-aware Hierarchical Traffic-light Routing) Algorithm
+==============================================================
 
-基於 LoHi 的 queue-aware 階層式路由算法。
+基於 LoHi 的 queue-aware + traffic-light 階層式路由算法。
 
 主要改進：
 1. 保留 LoHi 的 hierarchical / clustering routing 架構
-2. 增強 queue-aware 機制：
-   - 從 NS-3 CSV 檔案讀取即時 queue 統計
-   - 群內與跨群邊界選擇都考慮 queue 狀態
-   - 動態調整路由權重基於 queue occupancy
-3. 不引入 traffic-light decision (與 TLR 不同)
-4. 相容原有 LoHi 介面，新增參數都有默認值
+2. 保留 queue-aware 機制：
+    - 從 NS-3 CSV 檔案讀取即時 queue 統計
+    - 群內與跨群邊界選擇都考慮 queue 狀態
+    - 動態調整路由權重基於 queue occupancy
+3. 融合 TLR 的 traffic-light decision：
+    - 以 queue occupancy threshold 推導 link / node traffic-light 狀態
+    - 在 LHTR 的候選路徑之間套用 BR / SBR 決策
+    - 以 traffic-light penalty 補強 queue-aware path scoring
+4. 相容原有 LoHi / LHTR 介面，新增參數都有默認值
 
 修改歷史：
 - 基於 algorithm_lohi_kun.py
 - 參考 algorithm_queue_aware_over_isls.py 的 queue 讀取機制
-- 參考 algorithm_tlr.py 的 queue metrics 但不使用 traffic-light logic
+- 融合 algorithm_tlr.py 的 traffic-light state 與 decision logic
 """
 from dataclasses import dataclass
 from typing import Dict, Set, Tuple, List, Optional, Callable, Any
@@ -50,6 +53,17 @@ ALPHA_QUEUE = float(os.environ.get('LHTR_ALPHA_QUEUE', 0.3))        # queue weig
 # QUEUE-AWARE: Queue normalization and penalty
 QUEUE_NORMALIZE_MAX_PACKETS = int(os.environ.get('LHTR_QUEUE_NORM_MAX', 100))  # max packets for normalization
 QUEUE_MAX_PENALTY_M = float(os.environ.get('LHTR_QUEUE_MAX_PENALTY_M', 2000000.0))  # max penalty distance in meters
+
+# ===== Traffic-light parameters =====
+ENABLE_TRAFFIC_LIGHT = os.environ.get('LHTR_ENABLE_TRAFFIC_LIGHT', '1') not in ['0', 'false', 'False']
+TRAFFIC_LIGHT_BUFFER_SIZE = int(os.environ.get('LHTR_TL_BUFFER_SIZE', 100))
+TRAFFIC_LIGHT_QOR_GREEN_YELLOW = float(os.environ.get('LHTR_TL_QOR_GY', 0.6))
+TRAFFIC_LIGHT_QOR_YELLOW_RED = float(os.environ.get('LHTR_TL_QOR_YR', 0.8))
+TRAFFIC_LIGHT_TQOR_GREEN_YELLOW = float(os.environ.get('LHTR_TL_TQOR_GY', 1.0 / 3.0))
+TRAFFIC_LIGHT_TQOR_YELLOW_RED = float(os.environ.get('LHTR_TL_TQOR_YR', 2.0 / 3.0))
+TRAFFIC_LIGHT_YELLOW_PENALTY_M = float(os.environ.get('LHTR_TL_YELLOW_PENALTY_M', 400000.0))
+TRAFFIC_LIGHT_RED_PENALTY_M = float(os.environ.get('LHTR_TL_RED_PENALTY_M', 1200000.0))
+TRAFFIC_LIGHT_ALT_PATH_FACTOR = float(os.environ.get('LHTR_TL_ALT_PATH_FACTOR', 1.5))
 
 # ===== Chaos Monkey =====
 ENABLE_CHAOS_MONKEY = os.environ.get('ENABLE_CHAOS_MONKEY', 'false').lower() == 'true'
@@ -163,6 +177,322 @@ def calculate_link_queue_cost(distance_m: float, queue_packets: int,
     final_cost = distance_m + queue_penalty_m
     
     return final_cost
+
+
+class TrafficLightColor:
+    """TLR-style traffic-light colors used by the fused LHTR decision layer."""
+    GREEN = "GREEN"
+    YELLOW = "YELLOW"
+    RED = "RED"
+
+
+@dataclass(frozen=True)
+class TrafficLightState:
+    """Directional traffic-light state derived from queue statistics."""
+    link_queue_packets: Dict[Tuple[int, int], int]
+    link_qor: Dict[Tuple[int, int], float]
+    link_color: Dict[Tuple[int, int], str]
+    node_tqor: Dict[int, float]
+    node_color: Dict[int, str]
+    final_link_color_map: Dict[Tuple[int, int], str]
+
+
+@dataclass(frozen=True)
+class NextHopCandidate:
+    """Candidate first-hop used by the fused LHTR traffic-light decision."""
+    next_hop: int
+    path_cost: float
+    decision_score: float
+    final_color: str
+    link_qor: float
+    queue_packets: int
+    route_kind: str
+
+
+@dataclass(frozen=True)
+class BorderPairCandidate:
+    """Candidate inter-PID border pair used by hierarchical traffic-light selection."""
+    u_border: int
+    v_border: int
+    path_cost: float
+    decision_score: float
+    final_color: str
+    link_qor: float
+    queue_packets: int
+
+
+def _classify_traffic_light(rate: float, green_yellow: float, yellow_red: float) -> str:
+    """Map a normalized occupancy ratio to a TLR traffic-light color."""
+    if rate < green_yellow:
+        return TrafficLightColor.GREEN
+    if rate < yellow_red:
+        return TrafficLightColor.YELLOW
+    return TrafficLightColor.RED
+
+
+def combine_traffic_light_colors(current_hop_color: str, next_hop_color: str) -> str:
+    """TLR Table I: merge link-local and next-hop congestion states."""
+    if current_hop_color == TrafficLightColor.RED or next_hop_color == TrafficLightColor.RED:
+        return TrafficLightColor.RED
+    if current_hop_color == TrafficLightColor.YELLOW or next_hop_color == TrafficLightColor.YELLOW:
+        return TrafficLightColor.YELLOW
+    return TrafficLightColor.GREEN
+
+
+def traffic_light_color_to_penalty_m(color: str) -> float:
+    """Map traffic-light state to an additive path penalty used by fused scoring."""
+    if color == TrafficLightColor.RED:
+        return TRAFFIC_LIGHT_RED_PENALTY_M
+    if color == TrafficLightColor.YELLOW:
+        return TRAFFIC_LIGHT_YELLOW_PENALTY_M
+    return 0.0
+
+
+def calculate_link_lhtr_cost(distance_m: float,
+                             queue_packets: int,
+                             final_color: str,
+                             alpha_dist: float = ALPHA_DISTANCE,
+                             alpha_queue: float = ALPHA_QUEUE,
+                             queue_norm_max: int = QUEUE_NORMALIZE_MAX_PACKETS,
+                             queue_max_penalty_m: float = QUEUE_MAX_PENALTY_M) -> float:
+    """
+    LHTR fused cost: queue-aware link cost + traffic-light penalty.
+
+    NOTE:
+    - queue-aware cost remains the base metric from stage 1
+    - traffic-light penalty is directional, so it is applied only in local decision layers
+    """
+    queue_cost = calculate_link_queue_cost(
+        distance_m,
+        queue_packets,
+        alpha_dist=alpha_dist,
+        alpha_queue=alpha_queue,
+        queue_norm_max=queue_norm_max,
+        queue_max_penalty_m=queue_max_penalty_m,
+    )
+    return queue_cost + traffic_light_color_to_penalty_m(final_color)
+
+
+def build_traffic_light_state(queue_packets: Optional[Dict[Tuple[int, int], int]],
+                              G_sat: nx.Graph,
+                              num_satellites: int,
+                              enable_verbose_logs: bool = False) -> TrafficLightState:
+    """
+    Build directional traffic-light state from queue statistics.
+
+    Assumption:
+    - link QOR uses a per-link packet buffer threshold
+    - node TQOR uses degree * buffer_size as the available outgoing buffer budget
+    """
+    link_queue_packets: Dict[Tuple[int, int], int] = {}
+    link_qor: Dict[Tuple[int, int], float] = {}
+    link_color: Dict[Tuple[int, int], str] = {}
+    node_outgoing_queue_sum: Dict[int, int] = defaultdict(int)
+    node_tqor: Dict[int, float] = {}
+    node_color: Dict[int, str] = {}
+    final_link_color_map: Dict[Tuple[int, int], str] = {}
+
+    for (u, v), q_len in (queue_packets or {}).items():
+        if u >= num_satellites or v >= num_satellites:
+            continue
+        q_packets = max(0, int(q_len))
+        link_queue_packets[(u, v)] = q_packets
+        qor = q_packets / max(1.0, float(TRAFFIC_LIGHT_BUFFER_SIZE))
+        link_qor[(u, v)] = qor
+        link_color[(u, v)] = _classify_traffic_light(
+            qor,
+            TRAFFIC_LIGHT_QOR_GREEN_YELLOW,
+            TRAFFIC_LIGHT_QOR_YELLOW_RED,
+        )
+        node_outgoing_queue_sum[u] += q_packets
+
+    for sat_id in range(num_satellites):
+        degree = G_sat.degree(sat_id) if G_sat.has_node(sat_id) else 0
+        total_buffer_packets = max(1, degree) * max(1, TRAFFIC_LIGHT_BUFFER_SIZE)
+        tqor = node_outgoing_queue_sum.get(sat_id, 0) / float(total_buffer_packets)
+        node_tqor[sat_id] = tqor
+        node_color[sat_id] = _classify_traffic_light(
+            tqor,
+            TRAFFIC_LIGHT_TQOR_GREEN_YELLOW,
+            TRAFFIC_LIGHT_TQOR_YELLOW_RED,
+        )
+
+    for u, v in link_queue_packets.keys():
+        final_link_color_map[(u, v)] = combine_traffic_light_colors(
+            link_color.get((u, v), TrafficLightColor.GREEN),
+            node_color.get(v, TrafficLightColor.GREEN),
+        )
+
+    if enable_verbose_logs:
+        link_color_counter = Counter(final_link_color_map.values())
+        node_color_counter = Counter(node_color.values())
+        print("  > [TRAFFIC-LIGHT] Built directional traffic-light state:")
+        print(f"    >> Link colors: {dict(sorted(link_color_counter.items()))}")
+        print(f"    >> Node colors: {dict(sorted(node_color_counter.items()))}")
+
+    return TrafficLightState(
+        link_queue_packets=link_queue_packets,
+        link_qor=link_qor,
+        link_color=link_color,
+        node_tqor=node_tqor,
+        node_color=node_color,
+        final_link_color_map=final_link_color_map,
+    )
+
+
+def get_final_traffic_light_color(u: int,
+                                  v: int,
+                                  traffic_light_state: Optional[TrafficLightState]) -> str:
+    """Safe directional lookup for the fused TLR-style link color."""
+    if traffic_light_state is None:
+        return TrafficLightColor.GREEN
+    if (u, v) in traffic_light_state.final_link_color_map:
+        return traffic_light_state.final_link_color_map[(u, v)]
+    next_hop_color = traffic_light_state.node_color.get(v, TrafficLightColor.GREEN)
+    return combine_traffic_light_colors(TrafficLightColor.GREEN, next_hop_color)
+
+
+def _traffic_light_color_rank(color: str) -> int:
+    if color == TrafficLightColor.GREEN:
+        return 0
+    if color == TrafficLightColor.YELLOW:
+        return 1
+    return 2
+
+
+def _pick_br_sbr_candidates(candidates: List[NextHopCandidate]) -> Tuple[Optional[NextHopCandidate], Optional[NextHopCandidate]]:
+    """Select BR and SBR from LHTR local next-hop candidates."""
+    if not candidates:
+        return None, None
+
+    dedup: Dict[int, NextHopCandidate] = {}
+    for candidate in sorted(
+        candidates,
+        key=lambda item: (item.path_cost, item.decision_score, item.link_qor, item.next_hop),
+    ):
+        if candidate.next_hop not in dedup:
+            dedup[candidate.next_hop] = candidate
+
+    ordered = list(dedup.values())
+    if not ordered:
+        return None, None
+
+    br = ordered[0]
+    sbr_pool = [
+        item for item in ordered[1:]
+        if item.path_cost <= br.path_cost * max(1.0, TRAFFIC_LIGHT_ALT_PATH_FACTOR)
+    ]
+    if not sbr_pool:
+        return br, None
+
+    sbr_pool.sort(
+        key=lambda item: (
+            _traffic_light_color_rank(item.final_color),
+            item.decision_score,
+            item.path_cost,
+            item.link_qor,
+            item.next_hop,
+        )
+    )
+    return br, sbr_pool[0]
+
+
+def _pick_br_sbr_border_pairs(candidates: List[BorderPairCandidate]) -> Tuple[Optional[BorderPairCandidate], Optional[BorderPairCandidate]]:
+    """Select BR and SBR from hierarchical border-pair candidates."""
+    if not candidates:
+        return None, None
+
+    ordered = sorted(
+        candidates,
+        key=lambda item: (
+            item.path_cost,
+            item.decision_score,
+            item.link_qor,
+            item.u_border,
+            item.v_border,
+        )
+    )
+    br = ordered[0]
+    sbr_pool = [
+        item for item in ordered[1:]
+        if item.path_cost <= br.path_cost * max(1.0, TRAFFIC_LIGHT_ALT_PATH_FACTOR)
+    ]
+    if not sbr_pool:
+        return br, None
+
+    sbr_pool.sort(
+        key=lambda item: (
+            _traffic_light_color_rank(item.final_color),
+            item.decision_score,
+            item.path_cost,
+            item.link_qor,
+            item.u_border,
+            item.v_border,
+        )
+    )
+    return br, sbr_pool[0]
+
+
+def select_next_hop_candidate_by_traffic_light(candidates: List[NextHopCandidate]) -> Tuple[Optional[NextHopCandidate], Optional[NextHopCandidate], Optional[NextHopCandidate]]:
+    """
+    LHTR fused decision for first-hop candidates.
+
+    - BR is still the cheapest queue-aware hierarchical candidate
+    - SBR is an admissible alternative within the path-stretch budget
+    - traffic-light state decides whether congestion justifies offloading to SBR
+    """
+    br, sbr = _pick_br_sbr_candidates(candidates)
+    if br is None:
+        return None, None, None
+    if not ENABLE_TRAFFIC_LIGHT or sbr is None:
+        return br, br, sbr
+
+    if br.final_color == TrafficLightColor.GREEN:
+        return br, br, sbr
+
+    if br.final_color == TrafficLightColor.YELLOW:
+        if sbr.final_color in (TrafficLightColor.GREEN, TrafficLightColor.YELLOW):
+            return sbr, br, sbr
+        return br, br, sbr
+
+    if sbr.final_color in (TrafficLightColor.GREEN, TrafficLightColor.YELLOW):
+        return sbr, br, sbr
+
+    if sbr.link_qor < br.link_qor:
+        return sbr, br, sbr
+
+    if sbr.decision_score < br.decision_score:
+        return sbr, br, sbr
+
+    return br, br, sbr
+
+
+def select_border_pair_by_traffic_light(candidates: List[BorderPairCandidate]) -> Tuple[Optional[BorderPairCandidate], Optional[BorderPairCandidate], Optional[BorderPairCandidate]]:
+    """LHTR fused decision for inter-PID border-pair candidates."""
+    br, sbr = _pick_br_sbr_border_pairs(candidates)
+    if br is None:
+        return None, None, None
+    if not ENABLE_TRAFFIC_LIGHT or sbr is None:
+        return br, br, sbr
+
+    if br.final_color == TrafficLightColor.GREEN:
+        return br, br, sbr
+
+    if br.final_color == TrafficLightColor.YELLOW:
+        if sbr.final_color in (TrafficLightColor.GREEN, TrafficLightColor.YELLOW):
+            return sbr, br, sbr
+        return br, br, sbr
+
+    if sbr.final_color in (TrafficLightColor.GREEN, TrafficLightColor.YELLOW):
+        return sbr, br, sbr
+
+    if sbr.link_qor < br.link_qor:
+        return sbr, br, sbr
+
+    if sbr.decision_score < br.decision_score:
+        return sbr, br, sbr
+
+    return br, br, sbr
 
 
 # ==========================
@@ -789,31 +1119,45 @@ class GroupPlanner:
 # ==========================
 class BorderSelector:
     """
-    QUEUE-AWARE: 從 src_PID 指向 next_PID 的所有實體跨邊中，挑一組 (u_in_src, v_in_next)
+    QUEUE-AWARE / TRAFFIC-LIGHT: 從 src_PID 指向 next_PID 的所有實體跨邊中，挑一組 (u_in_src, v_in_next)
     
     策略改進：
     1. 選擇最短 geo_len_m 的邊界對（原始 LoHi）
     2. 分量感知（確保連通性）
     3. QUEUE-AWARE: 考慮邊界 ISL 的 queue 狀態（新增）
+    4. TRAFFIC-LIGHT: 在 BR / SBR 邊界對之間做 TLR 式決策（新增）
     """
     @staticmethod
-    def pick_border_pair(G_sat: nx.Graph,
-                         gplanner: 'GroupPlanner',
-                         src_pid:int,
-                         next_pid:int,
-                         sat_pid: Dict[int, int],
-                         src_sat: Optional[int] = None,
-                         router: Optional['VirtualPIDRouterPlaneBlock'] = None,
-                         queue_packets: Optional[Dict[Tuple[int,int], int]] = None,
-                         dst_sat: Optional[int] = None,
-                         dst_pid: Optional[int] = None,
-                         pre_src_side_dists: Optional[Dict[int, float]] = None,
-                         pre_dst_side_dists: Optional[Dict[int, float]] = None) -> Optional[Tuple[int,int]]:
+    def rank_border_pair_candidates(G_sat: nx.Graph,
+                                    gplanner: 'GroupPlanner',
+                                    src_pid:int,
+                                    next_pid:int,
+                                    sat_pid: Dict[int, int],
+                                    src_sat: Optional[int] = None,
+                                    router: Optional['VirtualPIDRouterPlaneBlock'] = None,
+                                    queue_packets: Optional[Dict[Tuple[int,int], int]] = None,
+                                    dst_sat: Optional[int] = None,
+                                    dst_pid: Optional[int] = None,
+                                    pre_src_side_dists: Optional[Dict[int, float]] = None,
+                                    pre_dst_side_dists: Optional[Dict[int, float]] = None,
+                                    traffic_light_state: Optional[TrafficLightState] = None) -> List[BorderPairCandidate]:
         """
         全路徑感知邊界對選擇：
-        cost = dist(src → u_border)          [src_pid 子圖內]
-             + calculate_link_queue_cost(geo_len_m, queue)
-             + dist(v_border → ref_node)     [next_pid 子圖內]
+
+        LoHi 原始邏輯:
+        - 尋找可行的跨 PID 邊界對
+
+        QUEUE-AWARE 邏輯:
+        - path_cost = dist(src → u_border)
+                    + calculate_link_queue_cost(geo_len_m, queue)
+                    + dist(v_border → ref_node)
+
+        TRAFFIC-LIGHT 邏輯:
+        - decision_score = path_cost + traffic_light_penalty(border_isl_color)
+
+        LHTR 融合邏輯:
+        - 先保留 LoHi/queue-aware 的 BR
+        - 再從 admissible alternatives 中選 SBR，供 traffic-light decision 使用
 
         ref_node:
             - next_pid == dst_pid  → dst_sat（最精確）
@@ -825,7 +1169,7 @@ class BorderSelector:
         """
         meta = gplanner.get_edge_meta(src_pid, next_pid)
         if not meta:
-            return None
+            return []
 
         # ── src 側分量 ID（快速過濾不連通候選）──────────────────────
         src_comp_id = None
@@ -868,7 +1212,7 @@ class BorderSelector:
                     pass
 
         # ── 候選評分 ────────────────────────────────────────────────
-        candidates: List[Tuple[float, int, int]] = []
+        candidates: List[BorderPairCandidate] = []
 
         for (u, v) in meta.get('isl_pairs', []):
             # 確保 u ∈ src_pid, v ∈ next_pid
@@ -895,12 +1239,20 @@ class BorderSelector:
             q_pkts = 0
             if queue_packets:
                 q_pkts = queue_packets.get((u, v), queue_packets.get((v, u), 0))
-            isl_cost = calculate_link_queue_cost(
+            final_color = get_final_traffic_light_color(u, v, traffic_light_state)
+            path_isl_cost = calculate_link_queue_cost(
                 geo_dist, q_pkts,
                 alpha_dist=ALPHA_DISTANCE,
                 alpha_queue=ALPHA_QUEUE,
                 queue_norm_max=QUEUE_NORMALIZE_MAX_PACKETS,
                 queue_max_penalty_m=QUEUE_MAX_PENALTY_M
+            )
+            fused_isl_cost = calculate_link_lhtr_cost(
+                geo_dist, q_pkts, final_color,
+                alpha_dist=ALPHA_DISTANCE,
+                alpha_queue=ALPHA_QUEUE,
+                queue_norm_max=QUEUE_NORMALIZE_MAX_PACKETS,
+                queue_max_penalty_m=QUEUE_MAX_PENALTY_M,
             )
 
             # dst-side cost
@@ -911,15 +1263,65 @@ class BorderSelector:
             else:
                 dst_cost = 0.0
 
-            total_cost = src_cost + isl_cost + dst_cost
-            candidates.append((total_cost, u, v))
+            path_cost = src_cost + path_isl_cost + dst_cost
+            decision_score = src_cost + fused_isl_cost + dst_cost
+            link_qor = traffic_light_state.link_qor.get((u, v), 0.0) if traffic_light_state else 0.0
+            candidates.append(
+                BorderPairCandidate(
+                    u_border=u,
+                    v_border=v,
+                    path_cost=path_cost,
+                    decision_score=decision_score,
+                    final_color=final_color,
+                    link_qor=link_qor,
+                    queue_packets=q_pkts,
+                )
+            )
 
-        if not candidates:
+        return sorted(
+            candidates,
+            key=lambda item: (
+                item.path_cost,
+                item.decision_score,
+                item.link_qor,
+                item.u_border,
+                item.v_border,
+            )
+        )
+
+    @staticmethod
+    def pick_border_pair(G_sat: nx.Graph,
+                         gplanner: 'GroupPlanner',
+                         src_pid:int,
+                         next_pid:int,
+                         sat_pid: Dict[int, int],
+                         src_sat: Optional[int] = None,
+                         router: Optional['VirtualPIDRouterPlaneBlock'] = None,
+                         queue_packets: Optional[Dict[Tuple[int,int], int]] = None,
+                         dst_sat: Optional[int] = None,
+                         dst_pid: Optional[int] = None,
+                         pre_src_side_dists: Optional[Dict[int, float]] = None,
+                         pre_dst_side_dists: Optional[Dict[int, float]] = None,
+                         traffic_light_state: Optional[TrafficLightState] = None) -> Optional[Tuple[int,int]]:
+        candidates = BorderSelector.rank_border_pair_candidates(
+            G_sat,
+            gplanner,
+            src_pid,
+            next_pid,
+            sat_pid,
+            src_sat=src_sat,
+            router=router,
+            queue_packets=queue_packets,
+            dst_sat=dst_sat,
+            dst_pid=dst_pid,
+            pre_src_side_dists=pre_src_side_dists,
+            pre_dst_side_dists=pre_dst_side_dists,
+            traffic_light_state=traffic_light_state,
+        )
+        selected, _, _ = select_border_pair_by_traffic_light(candidates)
+        if selected is None:
             return None
-
-        candidates.sort()
-        _, best_u, best_v = candidates[0]
-        return (best_u, best_v)
+        return (selected.u_border, selected.v_border)
 
 
 # ==========================
@@ -1013,6 +1415,118 @@ def _select_potential_descent_neighbor(
     # 3. 被迫上升（選上升最少的）
     # 這種情況理論上不應該發生在正確的勢能場中，但作為 fallback
     return min(valid_neighbors, key=lambda n: (dist[n], n))
+
+
+def _ensure_intra_group_routing_cache(target: int,
+                                      pid: int,
+                                      router,
+                                      intra_tree_cache: Optional[Dict[Tuple[int, int], Dict[int, int]]] = None,
+                                      intra_dist_cache: Optional[Dict[Tuple[int, int], Dict[int, float]]] = None) -> None:
+    """Populate per-target intra-PID next-hop and distance caches on demand."""
+    cache_key = (target, pid)
+    has_tree = intra_tree_cache is not None and cache_key in intra_tree_cache
+    has_dist = intra_dist_cache is not None and cache_key in intra_dist_cache
+    if has_tree and has_dist:
+        return
+
+    Gp = router.pid_subgraphs.get(pid)
+    if not Gp or not Gp.has_node(target):
+        return
+
+    try:
+        lengths, paths = nx.single_source_dijkstra(Gp, target, weight='weight')
+    except (nx.NetworkXNoPath, nx.NodeNotFound, nx.NetworkXError):
+        return
+
+    if intra_dist_cache is not None and not has_dist:
+        intra_dist_cache[cache_key] = dict(lengths)
+
+    if intra_tree_cache is not None and not has_tree:
+        intra_tree_cache[cache_key] = {
+            src_node: path[-2]
+            for src_node, path in paths.items()
+            if src_node != target and len(path) >= 2
+        }
+
+
+def _build_intra_pid_next_hop_candidates(src: int,
+                                         target: int,
+                                         pid: int,
+                                         router,
+                                         G_sat: nx.Graph,
+                                         intra_tree_cache: Optional[Dict[Tuple[int, int], Dict[int, int]]] = None,
+                                         intra_dist_cache: Optional[Dict[Tuple[int, int], Dict[int, float]]] = None,
+                                         traffic_light_state: Optional[TrafficLightState] = None,
+                                         route_kind: str = 'intra_pid') -> List[NextHopCandidate]:
+    """
+    Build local first-hop candidates within a PID.
+
+    LoHi 原始邏輯:
+    - 只允許朝目標勢能下降的群內鄰居
+
+    QUEUE-AWARE 邏輯:
+    - 以群內加權 `weight` 作為 path_cost
+
+    TRAFFIC-LIGHT 邏輯:
+    - 對每個第一跳加入 directional traffic-light penalty
+
+    LHTR 融合邏輯:
+    - 保留 BR 的階層式目標
+    - 在 admissible next hops 間用 TLR 決策選 BR / SBR
+    """
+    if src == target:
+        return []
+
+    comp_map = router.pid_sat_comp.get(pid, {})
+    src_comp = comp_map.get(src)
+    target_comp = comp_map.get(target)
+    if src_comp is None or target_comp is None or src_comp != target_comp:
+        return []
+
+    pid_nodes = set(router.pid_members.get(pid, []))
+    if src not in pid_nodes or target not in pid_nodes:
+        return []
+
+    _ensure_intra_group_routing_cache(target, pid, router, intra_tree_cache, intra_dist_cache)
+    dist_map = intra_dist_cache.get((target, pid), {}) if intra_dist_cache is not None else {}
+    my_dist = dist_map.get(src, float('inf'))
+    if my_dist == float('inf'):
+        return []
+
+    neighbors = [
+        neighbor for neighbor in G_sat.neighbors(src)
+        if neighbor in pid_nodes and dist_map.get(neighbor, float('inf')) < float('inf')
+    ]
+    if not neighbors:
+        return []
+
+    strict_descent = [neighbor for neighbor in neighbors if dist_map[neighbor] < my_dist - 1e-8]
+    weak_descent = [neighbor for neighbor in neighbors if dist_map[neighbor] <= my_dist + 1e-8]
+    candidate_neighbors = strict_descent or weak_descent or neighbors
+    candidate_neighbors = sorted(candidate_neighbors, key=lambda neighbor: (dist_map[neighbor], neighbor))
+
+    candidates: List[NextHopCandidate] = []
+    for neighbor in candidate_neighbors:
+        edge_data = G_sat.get_edge_data(src, neighbor, default={}) or {}
+        edge_weight = float(edge_data.get('weight', 1.0))
+        path_cost = edge_weight + float(dist_map.get(neighbor, float('inf')))
+        final_color = get_final_traffic_light_color(src, neighbor, traffic_light_state)
+        decision_score = path_cost + traffic_light_color_to_penalty_m(final_color)
+        link_qor = traffic_light_state.link_qor.get((src, neighbor), 0.0) if traffic_light_state else 0.0
+        queue_pkts = traffic_light_state.link_queue_packets.get((src, neighbor), 0) if traffic_light_state else 0
+        candidates.append(
+            NextHopCandidate(
+                next_hop=neighbor,
+                path_cost=path_cost,
+                decision_score=decision_score,
+                final_color=final_color,
+                link_qor=link_qor,
+                queue_packets=queue_pkts,
+                route_kind=route_kind,
+            )
+        )
+
+    return candidates
 
 
 def _route_direct_in_subgraph(src: int, dst: int, pid: int, 
@@ -1315,6 +1829,7 @@ def build_fstate_lhtr(
     prev_src_sat_map: Optional[Dict[int,int]] = None,
     prev_fstate: Optional[Dict[Tuple[int,int], Tuple[int,int,int]]] = None,
     queue_packets: Optional[Dict[Tuple[int,int], int]] = None,
+    traffic_light_state: Optional[TrafficLightState] = None,
 ) -> Tuple[
     Dict[Tuple[int,int], Tuple[int,int,int]],
     Dict[int,int],
@@ -1323,10 +1838,11 @@ def build_fstate_lhtr(
     Dict[str, int],
 ]:
     """
-    QUEUE-AWARE: 產生 fstate（第一跳）：(u,dst) -> (next_hop, my_if, next_if)
+    LHTR: 產生 fstate（第一跳）：(u,dst) -> (next_hop, my_if, next_if)
     
     新增：
     - queue_packets: 用於 queue-aware 邊界選擇
+    - traffic_light_state: 用於 TLR-style BR / SBR 決策
     
     基於 algorithm_lohi_kun.py 的 build_fstate_lohi，保留完整階層路由邏輯
     """
@@ -1420,6 +1936,7 @@ def build_fstate_lhtr(
     dst_pid_prev_cache: Dict[int, Dict[int,int]] = {}
     # **群內最短路樹快取**：(dst_sat, src_pid) -> {sat_id: next_hop_sat_id}
     intra_group_tree_cache: Dict[Tuple[int,int], Dict[int,int]] = {}
+    intra_group_dist_cache: Dict[Tuple[int,int], Dict[int,float]] = {}
     
     EPS = 1e-4
     
@@ -1447,29 +1964,18 @@ def build_fstate_lhtr(
                 unique_dst_targets[dst_sat] = dst_pid
     
     for dst_sat, dst_pid in unique_dst_targets.items():
-        cache_key = (dst_sat, dst_pid)
-        if cache_key in intra_group_tree_cache:
-            continue
-        
         Gp = router.pid_subgraphs.get(dst_pid)
         if not Gp or not Gp.has_node(dst_sat):
             reason["intra_tree_missing"] += 1
             continue
-        
-        try:
-            lengths, paths = nx.single_source_dijkstra(Gp, dst_sat, weight='weight')
-            
-            next_hop_map = {}
-            for src_node, path in paths.items():
-                if src_node == dst_sat:
-                    continue
-                if len(path) >= 2:
-                    # path is [dst_sat, ..., src_node] from single_source_dijkstra(dst_sat)
-                    next_hop_map[src_node] = path[-2]
-            
-            intra_group_tree_cache[cache_key] = next_hop_map
-        except (nx.NetworkXNoPath, nx.NodeNotFound, nx.NetworkXError):
-            pass
+
+        _ensure_intra_group_routing_cache(
+            dst_sat,
+            dst_pid,
+            router,
+            intra_group_tree_cache,
+            intra_group_dist_cache,
+        )
 
     # ============================================================
     # 性能優化：預計算 src-side 和 dst-side 距離快取
@@ -1559,6 +2065,9 @@ def build_fstate_lhtr(
                 continue
             
             # 情況 A: 同群路由
+            # LoHi 原始邏輯：維持同 PID 內 routing target 決策
+            # QUEUE-AWARE 邏輯：沿用群內加權最短路
+            # TRAFFIC-LIGHT 邏輯：在 admissible next hops 間做 BR / SBR 決策
             if src_pid == dst_pid:
                 mgmt_sat = router.pid_mgmt_sat.get(src_pid)
                 comp_map = router.pid_sat_comp.get(src_pid, {})
@@ -1575,9 +2084,28 @@ def build_fstate_lhtr(
                     target = mgmt_sat
                 else:
                     target = dst_sat
-                
-                # 在群內路由
-                next_hop = _route_direct_in_subgraph(u, target, src_pid, router, G_sat, intra_group_tree_cache)
+
+                intra_candidates = _build_intra_pid_next_hop_candidates(
+                    u,
+                    target,
+                    src_pid,
+                    router,
+                    G_sat,
+                    intra_group_tree_cache,
+                    intra_group_dist_cache,
+                    traffic_light_state=traffic_light_state,
+                    route_kind='same_pid',
+                )
+                selected_candidate, br_candidate, sbr_candidate = select_next_hop_candidate_by_traffic_light(intra_candidates)
+                next_hop = selected_candidate.next_hop if selected_candidate is not None else None
+
+                if selected_candidate is not None and br_candidate is not None and selected_candidate.next_hop != br_candidate.next_hop:
+                    reason['traffic_light_offload_same_pid'] += 1
+                elif sbr_candidate is not None:
+                    reason['traffic_light_eval_same_pid'] += 1
+
+                if next_hop is None:
+                    next_hop = _route_direct_in_subgraph(u, target, src_pid, router, G_sat, intra_group_tree_cache)
                 
                 # 保底機制
                 if next_hop is None:
@@ -1594,6 +2122,9 @@ def build_fstate_lhtr(
                 continue
             
             # 情況 B: 跨群路由
+            # LoHi 原始邏輯：先決定群間 next_pid，再選 border pair
+            # QUEUE-AWARE 邏輯：保留 queue-aware border pair path_cost
+            # TRAFFIC-LIGHT 邏輯：在 BR / SBR border pairs 間做 offload 決策
             dist, prev = pid_to_group_path.get(dst_pid, ({}, {}))
             next_pid = prev.get(src_pid)
             
@@ -1603,20 +2134,31 @@ def build_fstate_lhtr(
             
             # QUEUE-AWARE: 邊界衛星對選擇（傳入 queue_packets、dst 資訊，使用預計算快取）
             _ref_for_dst_cache = dst_sat if next_pid == dst_pid else router.pid_mgmt_sat.get(next_pid)
-            border_pair = BorderSelector.pick_border_pair(
+            border_candidates = BorderSelector.rank_border_pair_candidates(
                 G_sat, gplanner, src_pid, next_pid, sat_pid,
                 src_sat=u, router=router, queue_packets=queue_packets,
                 dst_sat=dst_sat, dst_pid=dst_pid,
                 pre_src_side_dists=src_side_dists_cache.get(u),
                 pre_dst_side_dists=dst_side_dists_cache.get((next_pid, _ref_for_dst_cache)),
+                traffic_light_state=traffic_light_state,
             )
-            
-            if not border_pair:
+
+            selected_border, br_border, sbr_border = select_border_pair_by_traffic_light(border_candidates)
+            if selected_border is not None and br_border is not None and (
+                selected_border.u_border != br_border.u_border or selected_border.v_border != br_border.v_border
+            ):
+                reason['traffic_light_offload_border'] += 1
+            elif sbr_border is not None:
+                reason['traffic_light_eval_border'] += 1
+
+            if selected_border is None:
                 _record_missing(u, dst_node, "border_none")
                 continue
-            
-            u_border, v_border = border_pair
-            u_border2, v_border2 = None, None
+
+            u_border, v_border = selected_border.u_border, selected_border.v_border
+            backup_border = br_border if selected_border != br_border else sbr_border
+            u_border2 = backup_border.u_border if backup_border is not None else None
+            v_border2 = backup_border.v_border if backup_border is not None else None
             
             # B1. 硬規則：邊界直接跳轉
             if u == u_border:
@@ -1668,24 +2210,52 @@ def build_fstate_lhtr(
                 _record_missing(u, dst_node, "fallback_failed")
                 continue
             
-            # B2. 資料面：非邊界衛星直接往邊界路由
-            # 延遲建構 u_border 的群內路徑樹（消除 _route_direct_in_subgraph 對 border target 的快取 miss）
-            _border_ck = (u_border, src_pid)
-            if _border_ck not in intra_group_tree_cache:
-                _Gp_b = router.pid_subgraphs.get(src_pid)
-                if _Gp_b is not None and _Gp_b.has_node(u_border):
-                    try:
-                        _, _bp = nx.single_source_dijkstra(_Gp_b, u_border, weight='weight')
-                        intra_group_tree_cache[_border_ck] = {
-                            s: p[-2] for s, p in _bp.items() if s != u_border and len(p) >= 2
-                        }
-                    except Exception:
-                        pass
-            next_hop = _route_direct_in_subgraph(u, u_border, src_pid, router, G_sat, intra_group_tree_cache)
+            # B2. 資料面：非邊界衛星先在 src_pid 內朝選中的邊界推進
+            _ensure_intra_group_routing_cache(
+                u_border,
+                src_pid,
+                router,
+                intra_group_tree_cache,
+                intra_group_dist_cache,
+            )
+            if u_border2 is not None:
+                _ensure_intra_group_routing_cache(
+                    u_border2,
+                    src_pid,
+                    router,
+                    intra_group_tree_cache,
+                    intra_group_dist_cache,
+                )
+
+            intra_candidates = _build_intra_pid_next_hop_candidates(
+                u,
+                u_border,
+                src_pid,
+                router,
+                G_sat,
+                intra_group_tree_cache,
+                intra_group_dist_cache,
+                traffic_light_state=traffic_light_state,
+                route_kind='cross_pid_primary',
+            )
+
+            selected_candidate, br_candidate, sbr_candidate = select_next_hop_candidate_by_traffic_light(intra_candidates)
+            next_hop = selected_candidate.next_hop if selected_candidate is not None else None
+
+            if selected_candidate is not None and br_candidate is not None and selected_candidate.next_hop != br_candidate.next_hop:
+                reason['traffic_light_offload_cross_pid'] += 1
+            elif sbr_candidate is not None:
+                reason['traffic_light_eval_cross_pid'] += 1
+
+            if next_hop is None:
+                next_hop = _route_direct_in_subgraph(u, u_border, src_pid, router, G_sat, intra_group_tree_cache)
+            if next_hop is None and u_border2 is not None:
+                next_hop = _route_direct_in_subgraph(u, u_border2, src_pid, router, G_sat, intra_group_tree_cache)
             
             # 保底機制
             if next_hop is None:
-                next_hop = _fallback_spf_one_hop(u, u_border, G_sat)
+                fallback_target = u_border2 if u_border2 is not None else u_border
+                next_hop = _fallback_spf_one_hop(u, fallback_target, G_sat)
             
             # ISL驗證
             if next_hop is not None and G_sat.has_edge(u, next_hop):
@@ -1784,11 +2354,24 @@ _PREV_SRC_SAT_MAP: Dict[int,int] = {}
 def init(config: Optional[dict] = None):
     """初始化 LHTR 模組"""
     global BETA_Q, BETA_S
+    global ENABLE_TRAFFIC_LIGHT
+    global TRAFFIC_LIGHT_BUFFER_SIZE, TRAFFIC_LIGHT_QOR_GREEN_YELLOW, TRAFFIC_LIGHT_QOR_YELLOW_RED
+    global TRAFFIC_LIGHT_TQOR_GREEN_YELLOW, TRAFFIC_LIGHT_TQOR_YELLOW_RED
+    global TRAFFIC_LIGHT_YELLOW_PENALTY_M, TRAFFIC_LIGHT_RED_PENALTY_M, TRAFFIC_LIGHT_ALT_PATH_FACTOR
     global _ROUTER, _GPLANNER
 
     cfg = config or {}
     BETA_Q = float(cfg.get('beta_q', BETA_Q))
     BETA_S = float(cfg.get('beta_s', BETA_S))
+    ENABLE_TRAFFIC_LIGHT = bool(cfg.get('traffic_light_enabled', ENABLE_TRAFFIC_LIGHT))
+    TRAFFIC_LIGHT_BUFFER_SIZE = int(cfg.get('traffic_light_buffer_size', TRAFFIC_LIGHT_BUFFER_SIZE))
+    TRAFFIC_LIGHT_QOR_GREEN_YELLOW = float(cfg.get('traffic_light_qor_green_yellow', TRAFFIC_LIGHT_QOR_GREEN_YELLOW))
+    TRAFFIC_LIGHT_QOR_YELLOW_RED = float(cfg.get('traffic_light_qor_yellow_red', TRAFFIC_LIGHT_QOR_YELLOW_RED))
+    TRAFFIC_LIGHT_TQOR_GREEN_YELLOW = float(cfg.get('traffic_light_tqor_green_yellow', TRAFFIC_LIGHT_TQOR_GREEN_YELLOW))
+    TRAFFIC_LIGHT_TQOR_YELLOW_RED = float(cfg.get('traffic_light_tqor_yellow_red', TRAFFIC_LIGHT_TQOR_YELLOW_RED))
+    TRAFFIC_LIGHT_YELLOW_PENALTY_M = float(cfg.get('traffic_light_yellow_penalty_m', TRAFFIC_LIGHT_YELLOW_PENALTY_M))
+    TRAFFIC_LIGHT_RED_PENALTY_M = float(cfg.get('traffic_light_red_penalty_m', TRAFFIC_LIGHT_RED_PENALTY_M))
+    TRAFFIC_LIGHT_ALT_PATH_FACTOR = float(cfg.get('traffic_light_alt_path_factor', TRAFFIC_LIGHT_ALT_PATH_FACTOR))
 
     planes_per_group = cfg.get('planes_per_group', PLANES_PER_GROUP)
     sats_per_plane = cfg.get('sats_per_plane_in_group', SATS_PER_PLANE_IN_GROUP)
@@ -1886,6 +2469,7 @@ def algorithm_lhtr(
     link_rate_bps: Optional[Dict[Tuple[int,int], float]] = None,
     time_step_ns: Optional[int] = None,
     group_cost_mode: str = 'hop',
+    traffic_light_enabled: Optional[bool] = None,
 ):
     """
     LHTR (Load-aware Hierarchical Traffic Routing) Algorithm
@@ -1896,7 +2480,7 @@ def algorithm_lhtr(
         queue_stats_file: NS-3 輸出的 queue 統計 CSV 檔案路徑
         其他參數與 LoHi 相同，保持向後相容
     """
-    global _PREV_DST_SAT_MAP, _PREV_SRC_SAT_MAP, _SAT_NEI_TO_IF
+    global _PREV_DST_SAT_MAP, _PREV_SRC_SAT_MAP, _SAT_NEI_TO_IF, ENABLE_TRAFFIC_LIGHT
     
     assert _ROUTER is not None and _GPLANNER is not None, "call init() first"
 
@@ -1911,6 +2495,9 @@ def algorithm_lhtr(
         print(f"\n{'='*70}")
         print(f"LHTR Algorithm at t={time_since_epoch_ns} ns (snapshot {snapshot_idx})")
         print(f"{'='*70}")
+
+    if traffic_light_enabled is not None:
+        ENABLE_TRAFFIC_LIGHT = bool(traffic_light_enabled)
 
     num_sats = len(satellites) if not isinstance(satellites, int) else satellites
     
@@ -1958,6 +2545,15 @@ def algorithm_lhtr(
         if enable_verbose_logs and queue_packets:
             print(f"  > [QUEUE-AWARE] Loaded {len(queue_packets)} queue entries from {queue_stats_file}")
 
+    traffic_light_state = None
+    if ENABLE_TRAFFIC_LIGHT:
+        traffic_light_state = build_traffic_light_state(
+            queue_packets,
+            sat_net_graph_only_satellites_with_isls,
+            num_sats,
+            enable_verbose_logs=enable_verbose_logs,
+        )
+
     # QUEUE-AWARE: 群內權重更新 (使用增強模式)
     apply_queue_aware_weights_intra_only(sat_net_graph_only_satellites_with_isls,
                                          sat_to_pid,
@@ -2001,6 +2597,7 @@ def algorithm_lhtr(
         prev_src_sat_map=_PREV_SRC_SAT_MAP,
         prev_fstate=prev_fstate,
         queue_packets=queue_packets,  # QUEUE-AWARE: 傳入 queue 資訊
+        traffic_light_state=traffic_light_state,
     )
     if enable_verbose_logs:
         _dump_pid_snapshot(
