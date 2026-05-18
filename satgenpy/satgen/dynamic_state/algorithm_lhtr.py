@@ -360,7 +360,8 @@ def _traffic_light_color_rank(color: str) -> int:
     return 2
 
 
-def _pick_br_sbr_candidates(candidates: List[NextHopCandidate]) -> Tuple[Optional[NextHopCandidate], Optional[NextHopCandidate]]:
+def _pick_br_sbr_candidates(candidates: List[NextHopCandidate],
+                            preferred_br_next_hop: Optional[int] = None) -> Tuple[Optional[NextHopCandidate], Optional[NextHopCandidate]]:
     """Select BR and SBR from LHTR local next-hop candidates."""
     if not candidates:
         return None, None
@@ -377,10 +378,15 @@ def _pick_br_sbr_candidates(candidates: List[NextHopCandidate]) -> Tuple[Optiona
     if not ordered:
         return None, None
 
-    br = ordered[0]
+    br = None
+    if preferred_br_next_hop is not None:
+        br = next((item for item in ordered if item.next_hop == preferred_br_next_hop), None)
+    if br is None:
+        br = ordered[0]
+
     sbr_pool = [
         item for item in ordered[1:]
-        if item.path_cost <= br.path_cost * max(1.0, TRAFFIC_LIGHT_ALT_PATH_FACTOR)
+        if item.next_hop != br.next_hop and item.path_cost <= br.path_cost * max(1.0, TRAFFIC_LIGHT_ALT_PATH_FACTOR)
     ]
     if not sbr_pool:
         return br, None
@@ -397,7 +403,8 @@ def _pick_br_sbr_candidates(candidates: List[NextHopCandidate]) -> Tuple[Optiona
     return br, sbr_pool[0]
 
 
-def _pick_br_sbr_border_pairs(candidates: List[BorderPairCandidate]) -> Tuple[Optional[BorderPairCandidate], Optional[BorderPairCandidate]]:
+def _pick_br_sbr_border_pairs(candidates: List[BorderPairCandidate],
+                              preferred_br_pair: Optional[Tuple[int, int]] = None) -> Tuple[Optional[BorderPairCandidate], Optional[BorderPairCandidate]]:
     """Select BR and SBR from hierarchical border-pair candidates."""
     if not candidates:
         return None, None
@@ -412,10 +419,22 @@ def _pick_br_sbr_border_pairs(candidates: List[BorderPairCandidate]) -> Tuple[Op
             item.v_border,
         )
     )
-    br = ordered[0]
+    br = None
+    if preferred_br_pair is not None:
+        br = next(
+            (
+                item for item in ordered
+                if (item.u_border, item.v_border) == preferred_br_pair
+            ),
+            None,
+        )
+    if br is None:
+        br = ordered[0]
+
     sbr_pool = [
         item for item in ordered[1:]
-        if item.path_cost <= br.path_cost * max(1.0, TRAFFIC_LIGHT_ALT_PATH_FACTOR)
+        if (item.u_border, item.v_border) != (br.u_border, br.v_border)
+        and item.path_cost <= br.path_cost * max(1.0, TRAFFIC_LIGHT_ALT_PATH_FACTOR)
     ]
     if not sbr_pool:
         return br, None
@@ -433,7 +452,8 @@ def _pick_br_sbr_border_pairs(candidates: List[BorderPairCandidate]) -> Tuple[Op
     return br, sbr_pool[0]
 
 
-def select_next_hop_candidate_by_traffic_light(candidates: List[NextHopCandidate]) -> Tuple[Optional[NextHopCandidate], Optional[NextHopCandidate], Optional[NextHopCandidate]]:
+def select_next_hop_candidate_by_traffic_light(candidates: List[NextHopCandidate],
+                                               preferred_br_next_hop: Optional[int] = None) -> Tuple[Optional[NextHopCandidate], Optional[NextHopCandidate], Optional[NextHopCandidate]]:
     """
     LHTR fused decision for first-hop candidates.
 
@@ -441,7 +461,7 @@ def select_next_hop_candidate_by_traffic_light(candidates: List[NextHopCandidate
     - SBR is an admissible alternative within the path-stretch budget
     - traffic-light state decides whether congestion justifies offloading to SBR
     """
-    br, sbr = _pick_br_sbr_candidates(candidates)
+    br, sbr = _pick_br_sbr_candidates(candidates, preferred_br_next_hop=preferred_br_next_hop)
     if br is None:
         return None, None, None
     if not ENABLE_TRAFFIC_LIGHT or sbr is None:
@@ -467,9 +487,10 @@ def select_next_hop_candidate_by_traffic_light(candidates: List[NextHopCandidate
     return br, br, sbr
 
 
-def select_border_pair_by_traffic_light(candidates: List[BorderPairCandidate]) -> Tuple[Optional[BorderPairCandidate], Optional[BorderPairCandidate], Optional[BorderPairCandidate]]:
+def select_border_pair_by_traffic_light(candidates: List[BorderPairCandidate],
+                                        preferred_br_pair: Optional[Tuple[int, int]] = None) -> Tuple[Optional[BorderPairCandidate], Optional[BorderPairCandidate], Optional[BorderPairCandidate]]:
     """LHTR fused decision for inter-PID border-pair candidates."""
-    br, sbr = _pick_br_sbr_border_pairs(candidates)
+    br, sbr = _pick_br_sbr_border_pairs(candidates, preferred_br_pair=preferred_br_pair)
     if br is None:
         return None, None, None
     if not ENABLE_TRAFFIC_LIGHT or sbr is None:
@@ -2085,6 +2106,8 @@ def build_fstate_lhtr(
                 else:
                     target = dst_sat
 
+                baseline_next_hop = _route_direct_in_subgraph(u, target, src_pid, router, G_sat, intra_group_tree_cache)
+
                 intra_candidates = _build_intra_pid_next_hop_candidates(
                     u,
                     target,
@@ -2096,7 +2119,10 @@ def build_fstate_lhtr(
                     traffic_light_state=traffic_light_state,
                     route_kind='same_pid',
                 )
-                selected_candidate, br_candidate, sbr_candidate = select_next_hop_candidate_by_traffic_light(intra_candidates)
+                selected_candidate, br_candidate, sbr_candidate = select_next_hop_candidate_by_traffic_light(
+                    intra_candidates,
+                    preferred_br_next_hop=baseline_next_hop,
+                )
                 next_hop = selected_candidate.next_hop if selected_candidate is not None else None
 
                 if selected_candidate is not None and br_candidate is not None and selected_candidate.next_hop != br_candidate.next_hop:
@@ -2105,7 +2131,7 @@ def build_fstate_lhtr(
                     reason['traffic_light_eval_same_pid'] += 1
 
                 if next_hop is None:
-                    next_hop = _route_direct_in_subgraph(u, target, src_pid, router, G_sat, intra_group_tree_cache)
+                    next_hop = baseline_next_hop
                 
                 # 保底機制
                 if next_hop is None:
@@ -2143,7 +2169,18 @@ def build_fstate_lhtr(
                 traffic_light_state=traffic_light_state,
             )
 
-            selected_border, br_border, sbr_border = select_border_pair_by_traffic_light(border_candidates)
+            baseline_border = None
+            if border_candidates:
+                baseline_border_candidate = min(
+                    border_candidates,
+                    key=lambda item: (item.path_cost, item.u_border, item.v_border),
+                )
+                baseline_border = (baseline_border_candidate.u_border, baseline_border_candidate.v_border)
+
+            selected_border, br_border, sbr_border = select_border_pair_by_traffic_light(
+                border_candidates,
+                preferred_br_pair=baseline_border,
+            )
             if selected_border is not None and br_border is not None and (
                 selected_border.u_border != br_border.u_border or selected_border.v_border != br_border.v_border
             ):
@@ -2227,6 +2264,8 @@ def build_fstate_lhtr(
                     intra_group_dist_cache,
                 )
 
+            baseline_next_hop = _route_direct_in_subgraph(u, u_border, src_pid, router, G_sat, intra_group_tree_cache)
+
             intra_candidates = _build_intra_pid_next_hop_candidates(
                 u,
                 u_border,
@@ -2239,7 +2278,10 @@ def build_fstate_lhtr(
                 route_kind='cross_pid_primary',
             )
 
-            selected_candidate, br_candidate, sbr_candidate = select_next_hop_candidate_by_traffic_light(intra_candidates)
+            selected_candidate, br_candidate, sbr_candidate = select_next_hop_candidate_by_traffic_light(
+                intra_candidates,
+                preferred_br_next_hop=baseline_next_hop,
+            )
             next_hop = selected_candidate.next_hop if selected_candidate is not None else None
 
             if selected_candidate is not None and br_candidate is not None and selected_candidate.next_hop != br_candidate.next_hop:
@@ -2248,7 +2290,7 @@ def build_fstate_lhtr(
                 reason['traffic_light_eval_cross_pid'] += 1
 
             if next_hop is None:
-                next_hop = _route_direct_in_subgraph(u, u_border, src_pid, router, G_sat, intra_group_tree_cache)
+                next_hop = baseline_next_hop
             if next_hop is None and u_border2 is not None:
                 next_hop = _route_direct_in_subgraph(u, u_border2, src_pid, router, G_sat, intra_group_tree_cache)
             
