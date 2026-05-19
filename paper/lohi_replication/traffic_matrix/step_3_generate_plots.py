@@ -8,6 +8,7 @@ import sys
 import shutil
 import subprocess
 import tempfile
+import argparse
 import numpy as np
 from datetime import datetime
 
@@ -23,7 +24,11 @@ import astropy.units as u
 
 sys.path.append("/home/pflin/research/hypatia-pf/satgenpy")
 sys.path.append(os.path.join(os.path.dirname(__file__)))
-from dynamic_run_list import get_tm_dynamic_run_list
+from dynamic_run_list import (
+    add_traffic_mode_argument,
+    describe_traffic_mode_selection,
+    get_tm_dynamic_run_list,
+)
 
 import exputil
 
@@ -58,6 +63,16 @@ def restore_logging(original_stdout, original_stderr, log_fp):
     sys.stdout = original_stdout
     sys.stderr = original_stderr
     log_fp.close()
+
+
+def find_missing_analysis_inputs(run_dir, dynamic_state_algorithm):
+    algorithm_run_dir = os.path.join(run_dir, dynamic_state_algorithm)
+    required_paths = [
+        algorithm_run_dir,
+        os.path.join(algorithm_run_dir, "dynamic_state", "fstate_0.txt"),
+        os.path.join(algorithm_run_dir, "logs_ns3", "isl_utilization.csv"),
+    ]
+    return [path for path in required_paths if not os.path.exists(path)]
 
 # ---------------------------------------------------------------------------
 # gnuplot template (same style as lohi_replication/a_b/analysis_dynamic_result.py)
@@ -704,11 +719,21 @@ def analyze_pair_path_utilization(run_dir, dynamic_state_algorithm,
 # ---------------------------------------------------------------------------
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Analyze and plot dynamic traffic-matrix results."
+    )
+    add_traffic_mode_argument(parser)
+    args = parser.parse_args()
+    explicit_traffic_mode = args.traffic_mode is not None
+    selected_traffic_mode, selected_traffic_modes = describe_traffic_mode_selection(
+        args.traffic_mode
+    )
+
     os.makedirs("data", exist_ok=True)
     os.makedirs("pdf", exist_ok=True)
 
     # [新增] 每次執行 step_3 都寫一份獨立 log
-    runs = get_tm_dynamic_run_list()
+    runs = get_tm_dynamic_run_list(selected_traffic_mode)
     algo = runs[0]["dynamic_state_algorithm"] if runs else "unknown_algo"
     script_dir = os.path.abspath(os.path.dirname(__file__))
     logs_dir = os.path.join(script_dir, "logs")
@@ -725,8 +750,11 @@ def main():
         print("============================================================")
         print("step_3_generate_plots.py started")
         print("Log file: %s" % log_file_path)
+        print("Traffic mode selection: %s (%s)" % (
+            selected_traffic_mode, ", ".join(selected_traffic_modes)))
         print("============================================================")
 
+        analyzed_count = 0
         for run in runs:
             run_name = run["name"]
             algorithm = run["dynamic_state_algorithm"]
@@ -736,6 +764,22 @@ def main():
             print("Analyzing: %s / %s" % (run_name, algorithm))
             print("=" * 60)
 
+            missing_inputs = find_missing_analysis_inputs(run_dir, algorithm)
+            if missing_inputs:
+                message = (
+                    "Missing analysis inputs for %s / %s: %s. "
+                    "Run step_2_run.py --traffic-mode %s first."
+                ) % (
+                    run_name,
+                    algorithm,
+                    ", ".join(missing_inputs),
+                    selected_traffic_mode,
+                )
+                if explicit_traffic_mode:
+                    raise RuntimeError(message)
+                print("  > Warning: %s Skipping this run." % message)
+                continue
+
             analyze_pair_path_utilization(
                 run_dir=run_dir,
                 dynamic_state_algorithm=algorithm,
@@ -743,6 +787,13 @@ def main():
                 dst_node_id=run["dst_node_id"],
                 dynamic_state_update_interval_ns=run["dynamic_state_update_interval_ns"],
                 simulation_end_time_ns=run["simulation_end_time_ns"],
+            )
+            analyzed_count += 1
+
+        if analyzed_count == 0:
+            raise RuntimeError(
+                "No traffic-matrix runs were analyzed for traffic mode selection: %s"
+                % selected_traffic_mode
             )
 
         print("\nstep_3_generate_plots.py finished successfully")

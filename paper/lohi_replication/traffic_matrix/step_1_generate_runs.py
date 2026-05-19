@@ -8,18 +8,35 @@ import networkload
 import random
 import os
 import sys
+import argparse
 
 sys.path.append(os.path.join(os.path.dirname(__file__)))
-from dynamic_run_list import get_tm_dynamic_run_list
+from dynamic_run_list import (
+    add_traffic_mode_argument,
+    describe_traffic_mode_selection,
+    get_tm_dynamic_run_list,
+)
 
-# [修改] 直接引入 satgenpy 套件，用於在 step_1 計算衝突衛星（不依賴 networkx_path 檔案）
-sys.path.append("/home/pflin/research/hypatia-pf/satgenpy")
-from satgen.dynamic_state.generate_dynamic_state import generate_dynamic_state_at
-from satgen.isls import read_isls
-from satgen.ground_stations import read_ground_stations_extended
-from satgen.tles import read_tles
-from satgen.interfaces import read_gsl_interfaces_info
-from satgen.post_analysis.graph_tools import get_path
+parser = argparse.ArgumentParser(
+    description="Generate dynamic traffic-matrix run directories."
+)
+add_traffic_mode_argument(parser)
+args = parser.parse_args()
+selected_traffic_mode, selected_traffic_modes = describe_traffic_mode_selection(
+    args.traffic_mode
+)
+print("Traffic mode selection: %s (%s)" % (
+    selected_traffic_mode, ", ".join(selected_traffic_modes)))
+
+# [修改] specific 模式才需要 satgenpy 來計算衝突衛星（不依賴 networkx_path 檔案）
+if "specific" in selected_traffic_modes:
+    sys.path.append("/home/pflin/research/hypatia-pf/satgenpy")
+    from satgen.dynamic_state.generate_dynamic_state import generate_dynamic_state_at
+    from satgen.isls import read_isls
+    from satgen.ground_stations import read_ground_stations_extended
+    from satgen.tles import read_tles
+    from satgen.interfaces import read_gsl_interfaces_info
+    from satgen.post_analysis.graph_tools import get_path
 
 local_shell = exputil.LocalShell()
 
@@ -134,7 +151,7 @@ def batch_check_conflicts(pairs, fstates_by_step, satellite_conflicts):
 # ---------------------------------------------------------------------------
 precomputed_fstates = {}   # key: (satellite_network_dir, algorithm)
 
-for run in get_tm_dynamic_run_list():
+for run in get_tm_dynamic_run_list(selected_traffic_mode):
 
     traffic_mode = run["traffic_mode"]
     movement = run["movement"]

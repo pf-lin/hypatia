@@ -5,9 +5,14 @@
 import os
 import sys
 import pickle
+import argparse
 
 sys.path.append(os.path.join(os.path.dirname(__file__)))
-from dynamic_run_list import get_tm_dynamic_run_list
+from dynamic_run_list import (
+    add_traffic_mode_argument,
+    describe_traffic_mode_selection,
+    get_tm_dynamic_run_list,
+)
 
 sys.path.append("/home/pflin/research/hypatia-pf/satgenpy")
 from satgen.dynamic_state.generate_dynamic_state import generate_dynamic_state_at
@@ -93,10 +98,36 @@ def run_ns3_simulation(run_dir_relative):
 # Main
 # ---------------------------------------------------------------------------
 
-for run in get_tm_dynamic_run_list():
+parser = argparse.ArgumentParser(
+    description="Run dynamic closed-loop NS-3 traffic-matrix simulations."
+)
+add_traffic_mode_argument(parser)
+args = parser.parse_args()
+selected_traffic_mode, selected_traffic_modes = describe_traffic_mode_selection(
+    args.traffic_mode
+)
+print("Traffic mode selection: %s (%s)" % (
+    selected_traffic_mode, ", ".join(selected_traffic_modes)))
+
+for run in get_tm_dynamic_run_list(selected_traffic_mode):
     run_name = run["name"]
     algorithm = run["dynamic_state_algorithm"]
     run_dir = "runs/%s/%s" % (run_name, algorithm)
+
+    if not os.path.isdir(run_dir):
+        raise RuntimeError(
+            "Run directory not found: %s. Generate it first with "
+            "step_1_generate_runs.py --traffic-mode %s."
+            % (run_dir, selected_traffic_mode)
+        )
+    for required_file in ["config_ns3.properties", "schedule_oneweb_1200.csv"]:
+        required_path = os.path.join(run_dir, required_file)
+        if not os.path.exists(required_path):
+            raise RuntimeError(
+                "Required run file not found: %s. Regenerate the run with "
+                "step_1_generate_runs.py --traffic-mode %s."
+                % (required_path, selected_traffic_mode)
+            )
 
     satellite_network_dir = os.path.join(SATELLITE_NETWORK_BASE, run["satellite_network"])
     dynamic_state_dir = os.path.join(run_dir, "dynamic_state")

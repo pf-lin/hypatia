@@ -20,11 +20,45 @@ routing_algorithm = "algorithm_lhtr"
 # Traffic modes and movement modes (mirrors ns3_experiments/traffic_matrix)
 traffic_modes = ["specific", "general"]
 movement_modes = ["moving"]  # Only dynamic (moving) makes sense here; static is handled separately if needed
+traffic_mode_selections = ["specific", "general", "both"]
+default_traffic_mode_selection = "both"
 
 
-def get_tm_dynamic_run_list():
+def get_traffic_modes(selected_mode=default_traffic_mode_selection):
+    if selected_mode is None:
+        selected_mode = default_traffic_mode_selection
+
+    if selected_mode == "both":
+        return list(traffic_modes)
+    if selected_mode in traffic_modes:
+        return [selected_mode]
+    raise ValueError(
+        "Invalid traffic mode '%s'. Expected one of: %s"
+        % (selected_mode, ", ".join(traffic_mode_selections))
+    )
+
+
+def add_traffic_mode_argument(parser):
+    parser.add_argument(
+        "--traffic-mode",
+        choices=traffic_mode_selections,
+        default=None,
+        help=(
+            "Traffic matrix mode to run: specific, general, or both. "
+            "Default: %s"
+        ) % default_traffic_mode_selection,
+    )
+
+
+def describe_traffic_mode_selection(selected_mode=None):
+    if selected_mode is None:
+        selected_mode = default_traffic_mode_selection
+    return selected_mode, get_traffic_modes(selected_mode)
+
+
+def get_tm_dynamic_run_list(selected_mode=default_traffic_mode_selection):
     run_list = []
-    for traffic_mode in traffic_modes:
+    for traffic_mode in get_traffic_modes(selected_mode):
         for movement in movement_modes:
             run_list.append({
                 "name": "run_%s_tm_pairing_oneweb_isls_%s_dynamic" % (traffic_mode, movement),
