@@ -89,6 +89,11 @@ ENABLE_BORDER_SELECTION_DEBUG = os.environ.get(
 BORDER_SELECTION_DEBUG_LIMIT = int(os.environ.get('LHTR_DEBUG_BORDER_LIMIT', 200))
 _BORDER_SELECTION_DEBUG_COUNT = 0
 
+ENABLE_PID_SNAPSHOT_DUMP = os.environ.get(
+    'LHTR_DUMP_PID_SNAPSHOT',
+    '0'
+) not in ['0', 'false', 'False']
+
 # ===== Chaos Monkey =====
 ENABLE_CHAOS_MONKEY = os.environ.get('ENABLE_CHAOS_MONKEY', 'false').lower() == 'true'
 CHAOS_FAILURE_RATE = float(os.environ.get('CHAOS_FAILURE_RATE', '0.01'))
@@ -329,6 +334,17 @@ def _anchor_border_pair_key(candidate: BorderPairCandidate) -> Tuple[float, floa
     )
 
 
+def _border_sbr_key(candidate: BorderPairCandidate) -> Tuple[int, float, float, float, int, int]:
+    return (
+        _traffic_light_color_rank(candidate.final_color),
+        candidate.decision_score,
+        candidate.path_cost,
+        candidate.link_qor,
+        candidate.u_border,
+        candidate.v_border,
+    )
+
+
 def _border_candidate_summary(candidate: Optional[BorderPairCandidate]) -> str:
     if candidate is None:
         return "None"
@@ -563,15 +579,13 @@ def _pick_br_sbr_candidates(candidates: List[NextHopCandidate],
 
 
 def _pick_br_sbr_border_pairs(candidates: List[BorderPairCandidate],
-                              preferred_br_pair: Optional[Tuple[int, int]] = None) -> Tuple[Optional[BorderPairCandidate], Optional[BorderPairCandidate]]:
+                              preferred_br_pair: Optional[Tuple[int, int]] = None,
+                              candidates_are_ranked: bool = False) -> Tuple[Optional[BorderPairCandidate], Optional[BorderPairCandidate]]:
     """Select BR and SBR from hierarchical border-pair candidates."""
     if not candidates:
         return None, None
 
-    ordered = sorted(
-        candidates,
-        key=_border_pair_key,
-    )
+    ordered = candidates if candidates_are_ranked else sorted(candidates, key=_border_pair_key)
     br = None
     if preferred_br_pair is not None:
         br = next(
@@ -584,25 +598,17 @@ def _pick_br_sbr_border_pairs(candidates: List[BorderPairCandidate],
     if br is None:
         br = ordered[0]
 
-    sbr_pool = [
-        item for item in ordered[1:]
-        if (item.u_border, item.v_border) != (br.u_border, br.v_border)
-        and item.path_cost <= br.path_cost * max(1.0, TRAFFIC_LIGHT_ALT_PATH_FACTOR)
-    ]
-    if not sbr_pool:
-        return br, None
+    best_sbr = None
+    max_sbr_path_cost = br.path_cost * max(1.0, TRAFFIC_LIGHT_ALT_PATH_FACTOR)
+    for item in ordered[1:]:
+        if (item.u_border, item.v_border) == (br.u_border, br.v_border):
+            continue
+        if item.path_cost > max_sbr_path_cost:
+            continue
+        if best_sbr is None or _border_sbr_key(item) < _border_sbr_key(best_sbr):
+            best_sbr = item
 
-    sbr_pool.sort(
-        key=lambda item: (
-            _traffic_light_color_rank(item.final_color),
-            item.decision_score,
-            item.path_cost,
-            item.link_qor,
-            item.u_border,
-            item.v_border,
-        )
-    )
-    return br, sbr_pool[0]
+    return br, best_sbr
 
 
 def select_next_hop_candidate_by_traffic_light(candidates: List[NextHopCandidate],
@@ -641,9 +647,14 @@ def select_next_hop_candidate_by_traffic_light(candidates: List[NextHopCandidate
 
 
 def select_border_pair_by_traffic_light(candidates: List[BorderPairCandidate],
-                                        preferred_br_pair: Optional[Tuple[int, int]] = None) -> Tuple[Optional[BorderPairCandidate], Optional[BorderPairCandidate], Optional[BorderPairCandidate]]:
+                                        preferred_br_pair: Optional[Tuple[int, int]] = None,
+                                        candidates_are_ranked: bool = False) -> Tuple[Optional[BorderPairCandidate], Optional[BorderPairCandidate], Optional[BorderPairCandidate]]:
     """LHTR fused decision for inter-PID border-pair candidates."""
-    br, sbr = _pick_br_sbr_border_pairs(candidates, preferred_br_pair=preferred_br_pair)
+    br, sbr = _pick_br_sbr_border_pairs(
+        candidates,
+        preferred_br_pair=preferred_br_pair,
+        candidates_are_ranked=candidates_are_ranked,
+    )
     if br is None:
         return None, None, None
     if not ENABLE_TRAFFIC_LIGHT or sbr is None:
@@ -1526,10 +1537,8 @@ class BorderSelector:
                 )
             )
 
-        return sorted(
-            candidates,
-            key=_border_pair_key,
-        )
+        candidates.sort(key=_border_pair_key)
+        return candidates
 
     @staticmethod
     def pick_border_pair(G_sat: nx.Graph,
@@ -1562,7 +1571,7 @@ class BorderSelector:
             pre_destination_dists=pre_destination_dists,
             traffic_light_state=traffic_light_state,
         )
-        selected, _, _ = select_border_pair_by_traffic_light(candidates)
+        selected, _, _ = select_border_pair_by_traffic_light(candidates, candidates_are_ranked=True)
         if selected is None:
             return None
         return (selected.u_border, selected.v_border)
@@ -2427,7 +2436,7 @@ def build_fstate_lhtr(
             scored_baseline_candidate = None
             if border_candidates:
                 anchor_baseline_candidate = min(border_candidates, key=_anchor_border_pair_key)
-                scored_baseline_candidate = min(border_candidates, key=_border_pair_key)
+                scored_baseline_candidate = border_candidates[0]
                 baseline_border = (scored_baseline_candidate.u_border, scored_baseline_candidate.v_border)
 
                 if _destination_aware_border_active(next_pid, dst_pid):
@@ -2441,6 +2450,7 @@ def build_fstate_lhtr(
             selected_border, br_border, sbr_border = select_border_pair_by_traffic_light(
                 border_candidates,
                 preferred_br_pair=baseline_border,
+                candidates_are_ranked=True,
             )
 
             _debug_border_selection_decision(
@@ -2932,7 +2942,7 @@ def algorithm_lhtr(
         queue_packets=queue_packets,  # QUEUE-AWARE: 傳入 queue 資訊
         traffic_light_state=traffic_light_state,
     )
-    if enable_verbose_logs:
+    if enable_verbose_logs and ENABLE_PID_SNAPSHOT_DUMP:
         _dump_pid_snapshot(
             snapshot_idx,
             step_ms,
