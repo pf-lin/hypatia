@@ -599,14 +599,17 @@ def _pick_br_sbr_border_pairs(candidates: List[BorderPairCandidate],
         br = ordered[0]
 
     best_sbr = None
+    best_sbr_key = None
     max_sbr_path_cost = br.path_cost * max(1.0, TRAFFIC_LIGHT_ALT_PATH_FACTOR)
     for item in ordered[1:]:
         if (item.u_border, item.v_border) == (br.u_border, br.v_border):
             continue
         if item.path_cost > max_sbr_path_cost:
             continue
-        if best_sbr is None or _border_sbr_key(item) < _border_sbr_key(best_sbr):
+        item_sbr_key = _border_sbr_key(item)
+        if best_sbr_key is None or item_sbr_key < best_sbr_key:
             best_sbr = item
+            best_sbr_key = item_sbr_key
 
     return br, best_sbr
 
@@ -1326,7 +1329,8 @@ class BorderSelector:
                                     pre_src_side_dists: Optional[Dict[int, float]] = None,
                                     pre_dst_side_dists: Optional[Dict[int, float]] = None,
                                     pre_destination_dists: Optional[Dict[int, float]] = None,
-                                    traffic_light_state: Optional[TrafficLightState] = None) -> List[BorderPairCandidate]:
+                                    traffic_light_state: Optional[TrafficLightState] = None,
+                                    pre_border_edge_records: Optional[Dict[Tuple[int, int], List[Tuple[int, int, Optional[int], float, float, str, float, int]]]] = None) -> List[BorderPairCandidate]:
         """
         全路徑感知邊界對選擇：
 
@@ -1404,54 +1408,96 @@ class BorderSelector:
                 except Exception:
                     pass
 
+        # ── 每個 directed PID pair 的邊界 ISL 固定項只需算一次 ──────
+        edge_record_key = (src_pid, next_pid)
+        edge_records = None
+        if pre_border_edge_records is not None:
+            edge_records = pre_border_edge_records.get(edge_record_key)
+
+        if edge_records is None:
+            pid_comp_map = router.pid_sat_comp.get(src_pid, {}) if router is not None else {}
+            queue_get = queue_packets.get if queue_packets else None
+            link_qor_get = traffic_light_state.link_qor.get if traffic_light_state else None
+
+            edge_records = []
+            for u_raw, v_raw in meta.get('isl_pairs', []):
+                # 確保 u ∈ src_pid, v ∈ next_pid
+                u, v = u_raw, v_raw
+                if sat_pid.get(u) == next_pid and sat_pid.get(v) == src_pid:
+                    u, v = v, u
+
+                d = G_sat.get_edge_data(u, v, default={})
+                geo_dist = float(d.get('geo_len_m', d.get('weight', 1.0)))
+                q_pkts = 0
+                if queue_get is not None:
+                    q_pkts = queue_get((u, v), queue_get((v, u), 0))
+
+                final_color = get_final_traffic_light_color(u, v, traffic_light_state)
+                path_isl_cost = calculate_link_queue_cost(
+                    geo_dist, q_pkts,
+                    alpha_dist=ALPHA_DISTANCE,
+                    alpha_queue=ALPHA_QUEUE,
+                    queue_norm_max=QUEUE_NORMALIZE_MAX_PACKETS,
+                    queue_max_penalty_m=QUEUE_MAX_PENALTY_M
+                )
+                fused_isl_cost = path_isl_cost + traffic_light_color_to_penalty_m(final_color)
+                link_qor = link_qor_get((u, v), 0.0) if link_qor_get is not None else 0.0
+                u_comp = pid_comp_map.get(u) if router is not None else None
+
+                edge_records.append((
+                    u,
+                    v,
+                    u_comp,
+                    path_isl_cost,
+                    fused_isl_cost,
+                    final_color,
+                    link_qor,
+                    q_pkts,
+                ))
+
+            if pre_border_edge_records is not None:
+                pre_border_edge_records[edge_record_key] = edge_records
+
         # ── 候選評分 ────────────────────────────────────────────────
         candidates: List[BorderPairCandidate] = []
+        INF = float('inf')
+        base_scoring_mode = _normalized_border_selection_mode()
+        destination_aware_active = _destination_aware_border_active(next_pid, dst_pid)
+        local_border_weight = max(0.0, LOCAL_BORDER_WEIGHT)
+        dest_aware_border_weight = max(0.0, DEST_AWARE_BORDER_WEIGHT)
+        anchor_border_weight = max(0.0, ANCHOR_BORDER_WEIGHT)
+        src_side_get = src_side_dists.get if src_side_dists else None
+        dst_side_get = dst_side_dists.get if dst_side_dists else None
+        destination_get = pre_destination_dists.get if pre_destination_dists else None
 
-        for (u, v) in meta.get('isl_pairs', []):
-            # 確保 u ∈ src_pid, v ∈ next_pid
-            if sat_pid.get(u) == next_pid and sat_pid.get(v) == src_pid:
-                u, v = v, u
+        for (
+            u,
+            v,
+            u_comp,
+            path_isl_cost,
+            fused_isl_cost,
+            final_color,
+            link_qor,
+            q_pkts,
+        ) in edge_records:
 
             # 分量過濾（快速：不連通直接跳過）
             if src_comp_id is not None and router is not None:
-                u_comp = router.pid_sat_comp.get(src_pid, {}).get(u)
                 if u_comp != src_comp_id:
                     continue
 
             # src-side cost
-            if src_side_dists:
-                src_cost = src_side_dists.get(u, float('inf'))
-                if src_cost == float('inf'):
+            if src_side_get is not None:
+                src_cost = src_side_get(u, INF)
+                if src_cost == INF:
                     continue  # u 不可達，候選無效
             else:
                 src_cost = 0.0
 
-            # ISL cost（保留 queue-aware）
-            d = G_sat.get_edge_data(u, v, default={})
-            geo_dist = float(d.get('geo_len_m', d.get('weight', 1.0)))
-            q_pkts = 0
-            if queue_packets:
-                q_pkts = queue_packets.get((u, v), queue_packets.get((v, u), 0))
-            final_color = get_final_traffic_light_color(u, v, traffic_light_state)
-            path_isl_cost = calculate_link_queue_cost(
-                geo_dist, q_pkts,
-                alpha_dist=ALPHA_DISTANCE,
-                alpha_queue=ALPHA_QUEUE,
-                queue_norm_max=QUEUE_NORMALIZE_MAX_PACKETS,
-                queue_max_penalty_m=QUEUE_MAX_PENALTY_M
-            )
-            fused_isl_cost = calculate_link_lhtr_cost(
-                geo_dist, q_pkts, final_color,
-                alpha_dist=ALPHA_DISTANCE,
-                alpha_queue=ALPHA_QUEUE,
-                queue_norm_max=QUEUE_NORMALIZE_MAX_PACKETS,
-                queue_max_penalty_m=QUEUE_MAX_PENALTY_M,
-            )
-
             # anchor-side cost（原本 LHTR/LoHi relay proxy scoring）
-            if dst_side_dists:
-                anchor_cost = dst_side_dists.get(v, float('inf'))
-                if anchor_cost == float('inf'):
+            if dst_side_get is not None:
+                anchor_cost = dst_side_get(v, INF)
+                if anchor_cost == INF:
                     continue  # v 無法到達 ref_node，候選無效
             else:
                 anchor_cost = 0.0
@@ -1462,14 +1508,14 @@ class BorderSelector:
             anchor_decision_score = local_decision_cost + anchor_cost
 
             # destination-aware estimate（只影響合法 border pair 的 ranking）
-            destination_cost = float('inf')
-            if pre_destination_dists:
-                destination_cost = pre_destination_dists.get(v, float('inf'))
+            destination_cost = INF
+            if destination_get is not None:
+                destination_cost = destination_get(v, INF)
 
-            scoring_mode = _normalized_border_selection_mode()
+            scoring_mode = base_scoring_mode
             use_destination_term = (
-                _destination_aware_border_active(next_pid, dst_pid)
-                and destination_cost < float('inf')
+                destination_aware_active
+                and destination_cost < INF
             )
 
             if not use_destination_term:
@@ -1481,27 +1527,27 @@ class BorderSelector:
 
                 if scoring_mode == "destination":
                     path_cost = (
-                        max(0.0, LOCAL_BORDER_WEIGHT) * local_path_cost
-                        + max(0.0, DEST_AWARE_BORDER_WEIGHT) * destination_cost
+                        local_border_weight * local_path_cost
+                        + dest_aware_border_weight * destination_cost
                     )
                     decision_score = (
-                        max(0.0, LOCAL_BORDER_WEIGHT) * local_decision_cost
-                        + max(0.0, DEST_AWARE_BORDER_WEIGHT) * destination_cost
+                        local_border_weight * local_decision_cost
+                        + dest_aware_border_weight * destination_cost
                     )
                 elif scoring_mode == "penalty":
-                    path_cost = anchor_path_cost + max(0.0, DEST_AWARE_BORDER_WEIGHT) * destination_cost
-                    decision_score = anchor_decision_score + max(0.0, DEST_AWARE_BORDER_WEIGHT) * destination_cost
+                    path_cost = anchor_path_cost + dest_aware_border_weight * destination_cost
+                    decision_score = anchor_decision_score + dest_aware_border_weight * destination_cost
                 else:
                     scoring_mode = "hybrid"
                     path_cost = (
-                        max(0.0, LOCAL_BORDER_WEIGHT) * local_path_cost
-                        + max(0.0, DEST_AWARE_BORDER_WEIGHT) * destination_cost
-                        + max(0.0, ANCHOR_BORDER_WEIGHT) * anchor_cost
+                        local_border_weight * local_path_cost
+                        + dest_aware_border_weight * destination_cost
+                        + anchor_border_weight * anchor_cost
                     )
                     decision_score = (
-                        max(0.0, LOCAL_BORDER_WEIGHT) * local_decision_cost
-                        + max(0.0, DEST_AWARE_BORDER_WEIGHT) * destination_cost
-                        + max(0.0, ANCHOR_BORDER_WEIGHT) * anchor_cost
+                        local_border_weight * local_decision_cost
+                        + dest_aware_border_weight * destination_cost
+                        + anchor_border_weight * anchor_cost
                     )
 
                 # Keep the pure destination score for diagnostics even in hybrid mode.
@@ -1510,11 +1556,10 @@ class BorderSelector:
             if not use_destination_term:
                 destination_path_cost_for_debug = (
                     local_path_cost + destination_cost
-                    if destination_cost < float('inf')
-                    else float('inf')
+                    if destination_cost < INF
+                    else INF
                 )
 
-            link_qor = traffic_light_state.link_qor.get((u, v), 0.0) if traffic_light_state else 0.0
             candidates.append(
                 BorderPairCandidate(
                     u_border=u,
@@ -1554,7 +1599,8 @@ class BorderSelector:
                          pre_src_side_dists: Optional[Dict[int, float]] = None,
                          pre_dst_side_dists: Optional[Dict[int, float]] = None,
                          pre_destination_dists: Optional[Dict[int, float]] = None,
-                         traffic_light_state: Optional[TrafficLightState] = None) -> Optional[Tuple[int,int]]:
+                         traffic_light_state: Optional[TrafficLightState] = None,
+                         pre_border_edge_records: Optional[Dict[Tuple[int, int], List[Tuple[int, int, Optional[int], float, float, str, float, int]]]] = None) -> Optional[Tuple[int,int]]:
         candidates = BorderSelector.rank_border_pair_candidates(
             G_sat,
             gplanner,
@@ -1570,6 +1616,7 @@ class BorderSelector:
             pre_dst_side_dists=pre_dst_side_dists,
             pre_destination_dists=pre_destination_dists,
             traffic_light_state=traffic_light_state,
+            pre_border_edge_records=pre_border_edge_records,
         )
         selected, _, _ = select_border_pair_by_traffic_light(candidates, candidates_are_ranked=True)
         if selected is None:
@@ -2288,6 +2335,7 @@ def build_fstate_lhtr(
     # border candidates; it does not choose next_pid and does not install a global-SPF
     # next hop.
     destination_dists_cache: Dict[int, Dict[int, float]] = {}
+    border_edge_records_cache: Dict[Tuple[int, int], List[Tuple[int, int, Optional[int], float, float, str, float, int]]] = {}
 
     def _get_destination_dists_for_border(dst_sat_for_cache: int) -> Optional[Dict[int, float]]:
         if _normalized_border_selection_mode() == "anchor":
@@ -2429,6 +2477,7 @@ def build_fstate_lhtr(
                 pre_dst_side_dists=dst_side_dists_cache.get((next_pid, _ref_for_dst_cache)),
                 pre_destination_dists=_destination_dists_for_dst,
                 traffic_light_state=traffic_light_state,
+                pre_border_edge_records=border_edge_records_cache,
             )
 
             baseline_border = None
