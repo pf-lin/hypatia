@@ -1074,6 +1074,14 @@ class VirtualPIDRouterPlaneBlock:
         self._prev_pid_of_sat = dict(self.pid_of_sat)
         return dict(self.pid_of_sat)
 
+    def sync_pid_subgraph_weights_from_graph(self, G_sat: nx.Graph) -> None:
+        """Refresh observed intra-PID edge weights after queue-aware weighting."""
+        for Gp in self.pid_subgraphs.values():
+            for u, v, edge_data in Gp.edges(data=True):
+                current_edge_data = G_sat.get_edge_data(u, v)
+                if current_edge_data is not None and 'weight' in current_edge_data:
+                    edge_data['weight'] = current_edge_data['weight']
+
 
 # ==========================
 # QUEUE-AWARE: 群內佇列權重 (Enhanced)
@@ -2955,6 +2963,7 @@ def algorithm_lhtr(
                                          beta_q=BETA_Q, 
                                          beta_s=BETA_S,
                                          use_enhanced_queue_cost=True)
+    _ROUTER.sync_pid_subgraph_weights_from_graph(sat_net_graph_only_satellites_with_isls)
 
     # 建立群圖
     _GPLANNER.build_group_graph(sat_net_graph_only_satellites_with_isls,
