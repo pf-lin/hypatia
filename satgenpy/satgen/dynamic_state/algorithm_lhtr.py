@@ -1764,6 +1764,8 @@ def _build_intra_pid_next_hop_candidates(src: int,
                                          G_sat: nx.Graph,
                                          intra_tree_cache: Optional[Dict[Tuple[int, int], Dict[int, int]]] = None,
                                          intra_dist_cache: Optional[Dict[Tuple[int, int], Dict[int, float]]] = None,
+                                         pid_member_nodes_cache: Optional[Dict[int, frozenset]] = None,
+                                         intra_pid_neighbors_cache: Optional[Dict[Tuple[int, int], Tuple[int, ...]]] = None,
                                          traffic_light_state: Optional[TrafficLightState] = None,
                                          route_kind: str = 'intra_pid') -> List[NextHopCandidate]:
     """
@@ -1791,7 +1793,10 @@ def _build_intra_pid_next_hop_candidates(src: int,
     if src_comp is None or target_comp is None or src_comp != target_comp:
         return []
 
-    pid_nodes = set(router.pid_members.get(pid, []))
+    if pid_member_nodes_cache is not None:
+        pid_nodes = pid_member_nodes_cache.get(pid, frozenset())
+    else:
+        pid_nodes = set(router.pid_members.get(pid, []))
     if src not in pid_nodes or target not in pid_nodes:
         return []
 
@@ -1801,9 +1806,24 @@ def _build_intra_pid_next_hop_candidates(src: int,
     if my_dist == float('inf'):
         return []
 
+    if intra_pid_neighbors_cache is not None:
+        neighbor_cache_key = (pid, src)
+        neighbors_in_pid = intra_pid_neighbors_cache.get(neighbor_cache_key)
+        if neighbors_in_pid is None:
+            neighbors_in_pid = tuple(
+                neighbor for neighbor in G_sat.neighbors(src)
+                if neighbor in pid_nodes
+            )
+            intra_pid_neighbors_cache[neighbor_cache_key] = neighbors_in_pid
+    else:
+        neighbors_in_pid = tuple(
+            neighbor for neighbor in G_sat.neighbors(src)
+            if neighbor in pid_nodes
+        )
+
     neighbors = [
-        neighbor for neighbor in G_sat.neighbors(src)
-        if neighbor in pid_nodes and dist_map.get(neighbor, float('inf')) < float('inf')
+        neighbor for neighbor in neighbors_in_pid
+        if dist_map.get(neighbor, float('inf')) < float('inf')
     ]
     if not neighbors:
         return []
@@ -1983,6 +2003,9 @@ def _break_2cycles(
         3. 若無勢能下降鄰居，設為 None（等待 holdover）
         4. 迭代直到無新 2-cycle 或達最大迭代次數
     """
+    pid_nodes_cache: Dict[int, Set[int]] = {}
+    potential_cache: Dict[Tuple[Any, int], Dict[int, float]] = {}
+
     for iteration in range(max_iterations):
         cycles_found = []
         
@@ -2023,12 +2046,17 @@ def _break_2cycles(
                 continue
             
             # 建立勢能場
-            pid_nodes = set(router.pid_members.get(large_pid, []))
+            if large_pid not in pid_nodes_cache:
+                pid_nodes_cache[large_pid] = set(router.pid_members.get(large_pid, []))
+            pid_nodes = pid_nodes_cache[large_pid]
             if large_id not in pid_nodes:
                 continue
             
-            subgraph = G_sat.subgraph(pid_nodes)
-            potential_dist = _build_potential_field([dst_sat], subgraph, weight='weight')
+            potential_key = (large_pid, dst_sat)
+            if potential_key not in potential_cache:
+                subgraph = G_sat.subgraph(pid_nodes)
+                potential_cache[potential_key] = _build_potential_field([dst_sat], subgraph, weight='weight')
+            potential_dist = potential_cache[potential_key]
             
             # ★ 改進：先嘗試同 PID 鄰居，若無法修復則允許任何鄰居
             neighbors_in_pid = [n for n in G_sat.neighbors(large_id) if n != small_id and n in pid_nodes]
@@ -2036,7 +2064,10 @@ def _break_2cycles(
             
             # 若同 PID 無法修復，使用全局勢能場嘗試任意鄰居
             if new_hop is None:
-                global_potential_dist = _build_potential_field([dst_sat], G_sat, weight='weight')
+                global_potential_key = ("global", dst_sat)
+                if global_potential_key not in potential_cache:
+                    potential_cache[global_potential_key] = _build_potential_field([dst_sat], G_sat, weight='weight')
+                global_potential_dist = potential_cache[global_potential_key]
                 all_neighbors = [n for n in G_sat.neighbors(large_id) if n != small_id]
                 new_hop = _select_potential_descent_neighbor(large_id, all_neighbors, global_potential_dist, tolerance=1e-6)
             
@@ -2245,6 +2276,11 @@ def build_fstate_lhtr(
     # **群內最短路樹快取**：(dst_sat, src_pid) -> {sat_id: next_hop_sat_id}
     intra_group_tree_cache: Dict[Tuple[int,int], Dict[int,int]] = {}
     intra_group_dist_cache: Dict[Tuple[int,int], Dict[int,float]] = {}
+    pid_member_nodes_cache: Dict[int, frozenset] = {
+        pid: frozenset(members)
+        for pid, members in router.pid_members.items()
+    }
+    intra_pid_neighbors_cache: Dict[Tuple[int, int], Tuple[int, ...]] = {}
     
     EPS = 1e-4
     
@@ -2428,6 +2464,8 @@ def build_fstate_lhtr(
                     G_sat,
                     intra_group_tree_cache,
                     intra_group_dist_cache,
+                    pid_member_nodes_cache,
+                    intra_pid_neighbors_cache,
                     traffic_light_state=traffic_light_state,
                     route_kind='same_pid',
                 )
@@ -2619,6 +2657,8 @@ def build_fstate_lhtr(
                 G_sat,
                 intra_group_tree_cache,
                 intra_group_dist_cache,
+                pid_member_nodes_cache,
+                intra_pid_neighbors_cache,
                 traffic_light_state=traffic_light_state,
                 route_kind='cross_pid_primary',
             )
