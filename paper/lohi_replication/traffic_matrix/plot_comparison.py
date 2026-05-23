@@ -3,6 +3,7 @@ Compare NetworkX RTT outputs across traffic_matrix algorithm runs.
 """
 
 import argparse
+import inspect
 import itertools
 import os
 import re
@@ -494,6 +495,12 @@ def configure_common_axes(ax):
     ax.spines["right"].set_visible(False)
 
 
+def boxplot_label_kwargs(ax, tick_labels):
+    if "tick_labels" in inspect.signature(ax.boxplot).parameters:
+        return {"tick_labels": tick_labels}
+    return {"labels": tick_labels}
+
+
 def plot_rtt_over_time(all_data, algorithms, labels, run_name, src, dst, output_dir, width, height, output_prefix):
     fig, ax = plt.subplots(figsize=(width, height))
     colors = plt.get_cmap("tab10")
@@ -559,7 +566,7 @@ def plot_rtt_boxplot(all_data, algorithms, labels, run_name, src, dst, output_di
     values = [all_data[algo].rtt_ms for algo in algorithms]
     box = ax.boxplot(
         values,
-        tick_labels=[labels[algo] for algo in algorithms],
+        **boxplot_label_kwargs(ax, [labels[algo] for algo in algorithms]),
         showmeans=True,
         patch_artist=True,
     )
