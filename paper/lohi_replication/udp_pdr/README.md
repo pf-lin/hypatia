@@ -230,6 +230,12 @@ runs/<run_name>/comparison_packet_delivery/per_flow_delivery.csv
 runs/<run_name>/comparison_packet_delivery/summary_by_algorithm.csv
 runs/<run_name>/comparison_packet_delivery/focus_flow_delivery.csv
 runs/<run_name>/comparison_packet_delivery/pairwise_algorithm_comparison.csv
+runs/<run_name>/comparison_packet_delivery/affected_flows.csv
+runs/<run_name>/comparison_packet_delivery/top_loss_flows.csv
+runs/<run_name>/comparison_packet_delivery/destination_loss_summary.csv
+runs/<run_name>/comparison_packet_delivery/loss_diagnostics.txt
+runs/<run_name>/comparison_packet_delivery/synthetic_link_drops.csv
+runs/<run_name>/comparison_packet_delivery/link_drops.csv
 runs/<run_name>/comparison_packet_delivery/max_queue_occupancy_by_algorithm.csv
 ```
 
@@ -239,10 +245,25 @@ Basic plots:
 aggregate_pdr.png
 focus_flow_pdr.png
 per_flow_pdr_cdf.png
-packet_loss_count.png
+packet_loss_count_by_algorithm.png
 failed_flow_count.png
-link_drop_heatmap.png
+top_loss_flows.png
+destination_loss_summary.png
+destination_offered_rate_vs_gsl_capacity.png
+max_queue_occupancy_top_links.png
 ```
+
+`affected_flows.csv` lists every flow with synthetic sent-minus-received loss,
+while `top_loss_flows.csv` keeps the largest loss contributors. The
+destination aggregate report compares offered rate into each destination
+against the configured GSL/access capacity when `gsl_data_rate_megabit_per_s`
+is available.
+
+`max_queue_occupancy_top_links.png` is based on sampled/event-derived ISL queue
+occupancy from `max_queue_occupancy_by_algorithm.csv`. It is not a physical
+packet-drop heatmap. The old `link_drop_heatmap.png` name is deprecated if it
+appears in older comparison folders; rerunning plots may overwrite it with a
+deprecation notice for backward compatibility.
 
 ## Dynamic Closed Loop
 
@@ -267,3 +288,19 @@ is not true per-link drop attribution.
 Queue attribution currently uses `queue_stats/*.csv` to report max queue
 occupancy per ISL. A future NS-3 trace hook can replace the synthetic drop file
 with real queue-overflow records.
+
+`loss_diagnostics.txt` and `statistics.txt` explicitly record the current
+attribution scope:
+
+```text
+physical_drop_trace_available = false
+loss_attribution = synthetic_sent_minus_received
+max_queue_scope = sampled/event-derived ISL queue
+gsl_queue_tracking_available = false
+```
+
+PDR remains an end-to-end delivery metric. Queue occupancy and utilization logs
+are supporting congestion evidence only; packet loss should not be described as
+physical ISL queue overflow unless physical drop tracing is enabled. Destination
+loss aggregation can reveal possible GSL/access bottlenecks, but it is still an
+inference until GSL queue tracking or physical drop traces confirm it.
