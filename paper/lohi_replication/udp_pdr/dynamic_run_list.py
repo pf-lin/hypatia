@@ -117,6 +117,10 @@ def normalize_algorithms(algorithms=None):
     return list(algorithms)
 
 
+def seconds_to_ns(seconds):
+    return int(round(float(seconds) * 1000 * 1000 * 1000))
+
+
 def add_traffic_mode_argument(parser):
     parser.add_argument(
         "--traffic-mode",
@@ -156,6 +160,15 @@ def add_runtime_override_arguments(parser):
         type=float,
         default=None,
         help="Override simulation duration in seconds.",
+    )
+    parser.add_argument(
+        "--traffic-stop-time-s",
+        type=float,
+        default=None,
+        help=(
+            "Stop generating UDP traffic at this simulation time. "
+            "Default: simulation_end_time_s (no drain interval)."
+        ),
     )
     parser.add_argument(
         "--dynamic-state-update-interval-ms",
@@ -214,6 +227,7 @@ def get_udp_pdr_run_list(
     load_levels=None,
     algorithms=None,
     simulation_end_time_s_override=None,
+    traffic_stop_time_s_override=None,
     update_interval_ms_override=None,
     queue_size_pkt_override=None,
     background_flow_count_override=None,
@@ -225,6 +239,11 @@ def get_udp_pdr_run_list(
         simulation_end_time_s
         if simulation_end_time_s_override is None
         else float(simulation_end_time_s_override)
+    )
+    traffic_stop_s = (
+        sim_end_s
+        if traffic_stop_time_s_override is None
+        else float(traffic_stop_time_s_override)
     )
     update_ms = (
         dynamic_state_update_interval_ms
@@ -249,6 +268,13 @@ def get_udp_pdr_run_list(
 
     if sim_end_s <= 0:
         raise ValueError("simulation_end_time_s must be positive")
+    if traffic_stop_s < 0 or traffic_stop_s > sim_end_s:
+        raise ValueError(
+            "traffic_stop_time_s must satisfy 0 <= traffic_stop_time_s <= "
+            "simulation_end_time_s (got traffic_stop_time_s=%s, "
+            "simulation_end_time_s=%s)"
+            % (traffic_stop_s, sim_end_s)
+        )
     if update_ms <= 0:
         raise ValueError("dynamic_state_update_interval_ms must be positive")
     if queue_pkts <= 0:
@@ -257,6 +283,17 @@ def get_udp_pdr_run_list(
         raise ValueError("background_flow_count must be non-negative")
     if random_flow_count <= 0:
         raise ValueError("random_flow_count must be positive")
+
+    sim_end_ns = seconds_to_ns(sim_end_s)
+    traffic_stop_ns = seconds_to_ns(traffic_stop_s)
+    if traffic_stop_ns > sim_end_ns:
+        raise ValueError(
+            "traffic_stop_time_ns must be <= simulation_end_time_ns "
+            "(got traffic_stop_time_ns=%d, simulation_end_time_ns=%d)"
+            % (traffic_stop_ns, sim_end_ns)
+        )
+    drain_time_ns = sim_end_ns - traffic_stop_ns
+    drain_time_s = drain_time_ns / 1e9
 
     run_list = []
     for traffic_mode in get_traffic_modes(selected_mode):
@@ -270,8 +307,13 @@ def get_udp_pdr_run_list(
                     "dynamic_state": "dynamic_state",
                     "dynamic_state_algorithm": algorithm,
                     "dynamic_state_update_interval_ns": int(update_ms * 1000 * 1000),
-                    "simulation_end_time_ns": int(sim_end_s * 1000 * 1000 * 1000),
+                    "simulation_end_time_ns": sim_end_ns,
                     "simulation_end_time_s": sim_end_s,
+                    "traffic_stop_time_ns": traffic_stop_ns,
+                    "traffic_stop_time_s": traffic_stop_s,
+                    "drain_time_ns": drain_time_ns,
+                    "drain_time_s": drain_time_s,
+                    "drain_time_enabled": drain_time_ns > 0,
                     "data_rate_megabit_per_s": data_rate_megabit_per_s,
                     "queue_size_pkt": queue_pkts,
                     "load_level": float(load_level),

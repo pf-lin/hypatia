@@ -65,6 +65,8 @@ def _render_config(run, udp_logging_ids):
         _load_template(),
         {
             "[SIMULATION-END-TIME-NS]": run["simulation_end_time_ns"],
+            "[TRAFFIC-STOP-TIME-NS]": run["traffic_stop_time_ns"],
+            "[DRAIN-TIME-NS]": run["drain_time_ns"],
             "[SATELLITE-NETWORK]": run["satellite_network"],
             "[DYNAMIC-STATE]": run["dynamic_state"],
             "[DYNAMIC-STATE-ALGORITHM]": run["dynamic_state_algorithm"],
@@ -335,7 +337,13 @@ def compute_per_flow_rate_mbps(run, pair_count):
 
 def write_udp_schedule(run_dir, run, pairs):
     per_flow_rate = compute_per_flow_rate_mbps(run, len(pairs))
-    duration_ns = run["simulation_end_time_ns"]
+    start_time_ns = 0
+    duration_ns = run["traffic_stop_time_ns"] - start_time_ns
+    if duration_ns < 0:
+        raise ValueError(
+            "UDP traffic duration must be non-negative (traffic_stop_time_ns=%d, start_time_ns=%d)"
+            % (run["traffic_stop_time_ns"], start_time_ns)
+        )
     schedule_path = os.path.join(run_dir, "udp_burst_schedule.csv")
     with open(schedule_path, "w") as f_out:
         for idx, pair in enumerate(pairs):
@@ -343,6 +351,8 @@ def write_udp_schedule(run_dir, run, pairs):
                 "class=%s" % pair["class"],
                 "traffic_mode=%s" % run["traffic_mode"],
                 "load_level=%.3f" % run["load_level"],
+                "traffic_stop_time_ns=%d" % run["traffic_stop_time_ns"],
+                "drain_time_ns=%d" % run["drain_time_ns"],
             ]
             if pair.get("score") != "":
                 metadata_items.append("hotspot_score=%s" % pair["score"])
@@ -354,7 +364,7 @@ def write_udp_schedule(run_dir, run, pairs):
                     pair["src"],
                     pair["dst"],
                     per_flow_rate,
-                    0,
+                    start_time_ns,
                     duration_ns,
                     metadata,
                 )
@@ -372,10 +382,18 @@ def write_run_metadata(run_dir, run, pairs, per_flow_rate):
         "flow_count_by_class": dict(by_class),
         "per_flow_rate_mbps": per_flow_rate,
         "aggregate_offered_rate_mbps": per_flow_rate * len(pairs),
+        "simulation_end_time_s": run["simulation_end_time_s"],
+        "traffic_stop_time_s": run["traffic_stop_time_s"],
+        "drain_time_s": run["drain_time_s"],
+        "simulation_end_time_ns": run["simulation_end_time_ns"],
+        "traffic_stop_time_ns": run["traffic_stop_time_ns"],
+        "drain_time_ns": run["drain_time_ns"],
+        "drain_time_enabled": run["drain_time_enabled"],
         "pairs": pairs,
         "notes": [
             "UDP/PDR experiment generated outside paper/lohi_replication/traffic_matrix.",
             "core_hotspot_specific uses baseline shortest-path middle-ISL overlap heuristic.",
+            "UDP packets are generated only until traffic_stop_time_s; NS-3 continues until simulation_end_time_s to drain in-flight packets.",
         ],
     }
     _write_text(
@@ -422,6 +440,7 @@ def main():
         load_levels,
         algorithms,
         args.simulation_end_time_s,
+        args.traffic_stop_time_s,
         args.dynamic_state_update_interval_ms,
         args.queue_size_pkt,
         args.background_flow_count,
@@ -432,6 +451,14 @@ def main():
     for run in runs:
         run_dir = os.path.join("runs", run["name"], run["dynamic_state_algorithm"])
         print("\nPlanned run: %s" % run_dir)
+        print(
+            "  simulation_end=%.6fs, traffic_stop=%.6fs, drain=%.6fs"
+            % (
+                run["simulation_end_time_s"],
+                run["traffic_stop_time_s"],
+                run["drain_time_s"],
+            )
+        )
         if args.dry_run:
             continue
 
@@ -440,6 +467,7 @@ def main():
             run["traffic_mode"],
             run["load_level"],
             run["simulation_end_time_ns"],
+            run["traffic_stop_time_ns"],
             run["background_flow_count"],
             run["random_flow_count"],
         )

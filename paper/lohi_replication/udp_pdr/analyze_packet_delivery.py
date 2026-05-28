@@ -30,6 +30,18 @@ UDP_FLOW_COLUMNS = [
 ]
 
 
+def run_timing_fields(run):
+    return {
+        "simulation_end_time_s": run["simulation_end_time_s"],
+        "traffic_stop_time_s": run["traffic_stop_time_s"],
+        "drain_time_s": run["drain_time_s"],
+        "simulation_end_time_ns": run["simulation_end_time_ns"],
+        "traffic_stop_time_ns": run["traffic_stop_time_ns"],
+        "drain_time_ns": run["drain_time_ns"],
+        "drain_time_enabled": bool(run["drain_time_enabled"]),
+    }
+
+
 def parse_metadata(metadata):
     result = {}
     if not isinstance(metadata, str):
@@ -185,11 +197,14 @@ def summarize_algorithm(run, algorithm, flows):
     focus_received = int(focus["received_packets"].sum()) if len(focus) else 0
     focus_pdr = focus_received / float(focus_sent) if focus_sent > 0 else 0.0
     pdr_values = flows["pdr"]
-    return {
+    summary = {
         "run_name": run["name"],
         "traffic_mode": run["traffic_mode"],
         "load_level": run["load_level"],
         "algorithm": algorithm,
+    }
+    summary.update(run_timing_fields(run))
+    summary.update({
         "flow_count": int(len(flows)),
         "focus_flow_count": int(len(focus)),
         "total_sent_packets": total_sent_packets,
@@ -210,7 +225,8 @@ def summarize_algorithm(run, algorithm, flows):
         "pdr_lt_0_9_count": int((flows["pdr"] < 0.9).sum()),
         "pdr_lt_0_5_count": int((flows["pdr"] < 0.5).sum()),
         "jain_fairness": jain_fairness(flows["received_rate_mbps"].tolist()),
-    }
+    })
+    return summary
 
 
 def write_synthetic_link_drops(algorithm_run_dir, algorithm, flows):
@@ -306,10 +322,33 @@ def build_pairwise(summary_df, per_flow_df):
     return pd.DataFrame(rows)
 
 
-def write_statistics(path, summary_df, focus_df, pairwise_df, queue_df):
+def write_statistics(path, run, summary_df, focus_df, pairwise_df, queue_df):
     with open(path, "w") as f_out:
         f_out.write("UDP/PDR Packet Delivery Statistics\n")
         f_out.write("=" * 40 + "\n\n")
+
+        f_out.write("Run timing\n")
+        f_out.write("-" * 40 + "\n")
+        f_out.write(
+            "Simulation end time: %.6f s (%d ns)\n"
+            % (run["simulation_end_time_s"], run["simulation_end_time_ns"])
+        )
+        f_out.write(
+            "Traffic stop time: %.6f s (%d ns)\n"
+            % (run["traffic_stop_time_s"], run["traffic_stop_time_ns"])
+        )
+        f_out.write(
+            "Drain time: %.6f s (%d ns)\n"
+            % (run["drain_time_s"], run["drain_time_ns"])
+        )
+        f_out.write(
+            "drain_time_enabled = %s\n"
+            % ("true" if run["drain_time_enabled"] else "false")
+        )
+        f_out.write(
+            "PDR definition: packets received by simulation end divided by "
+            "packets sent during the active traffic interval.\n\n"
+        )
 
         f_out.write("Per algorithm summary\n")
         f_out.write("-" * 40 + "\n")
@@ -317,6 +356,10 @@ def write_statistics(path, summary_df, focus_df, pairwise_df, queue_df):
             f_out.write("algorithm: %s\n" % row["algorithm"])
             for key in [
                 "flow_count",
+                "simulation_end_time_s",
+                "traffic_stop_time_s",
+                "drain_time_s",
+                "drain_time_enabled",
                 "total_sent_packets",
                 "total_received_packets",
                 "total_lost_packets",
@@ -383,6 +426,8 @@ def analyze_run(run, algorithms):
         flows.insert(0, "load_level", run["load_level"])
         flows.insert(0, "traffic_mode", run["traffic_mode"])
         flows.insert(0, "run_name", run["name"])
+        for key, value in run_timing_fields(run).items():
+            flows[key] = value
         per_flow_frames.append(flows)
 
         summary_rows.append(summarize_algorithm(run, algorithm, flows))
@@ -393,6 +438,10 @@ def analyze_run(run, algorithms):
                 "run_name",
                 "algorithm",
                 "flow_id",
+                "simulation_end_time_s",
+                "traffic_stop_time_s",
+                "drain_time_s",
+                "drain_time_enabled",
                 "src",
                 "dst",
                 "sent_packets",
@@ -432,6 +481,7 @@ def analyze_run(run, algorithms):
     queue_df.to_csv(os.path.join(comparison_dir, "max_queue_occupancy_by_algorithm.csv"), index=False)
     write_statistics(
         os.path.join(comparison_dir, "statistics.txt"),
+        run,
         summary_df,
         focus_df,
         pairwise_df,
@@ -450,6 +500,7 @@ def main():
         load_levels,
         algorithms,
         args.simulation_end_time_s,
+        args.traffic_stop_time_s,
         args.dynamic_state_update_interval_ms,
         args.queue_size_pkt,
         args.background_flow_count,

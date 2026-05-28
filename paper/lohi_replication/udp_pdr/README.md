@@ -81,6 +81,44 @@ With the default 10 Mbps links and `load_level=1.0`, all UDP flows together
 offer about 10 Mbps along the selected workload. Higher load levels such as
 `1.4` intentionally push the bottleneck harder.
 
+## Traffic Timing and Drain Time
+
+UDP traffic is generated during the active traffic interval:
+
+```text
+0 <= t < traffic_stop_time_s
+```
+
+The NS-3 simulation continues until:
+
+```text
+simulation_end_time_s
+```
+
+The difference is the drain interval:
+
+```text
+drain_time_s = simulation_end_time_s - traffic_stop_time_s
+```
+
+This matters because a UDP packet can be counted as sent shortly before the
+simulation ends but still be in flight when NS-3 stops. Without a drain
+interval, `sent_packets - received_packets` can overestimate true loss by
+counting these tail in-flight packets as missing. With drain time enabled,
+packets are generated only during the active interval, and received packets are
+counted through the simulation end.
+
+By default, `traffic_stop_time_s = simulation_end_time_s` for backward
+compatibility, which means no drain interval. For formal UDP/PDR results, use:
+
+```text
+traffic_stop_time_s = simulation_end_time_s - 2
+```
+
+For example, use `--simulation-end-time-s 60 --traffic-stop-time-s 58` for a
+60 s simulation with 2 s of drain time, or `--simulation-end-time-s 200
+--traffic-stop-time-s 198` for the 200 s version.
+
 ## Usage
 
 From this directory:
@@ -95,6 +133,8 @@ Generate runs:
 python step_1_generate_runs.py \
   --traffic-mode core_hotspot_specific \
   --load-level 1.0 \
+  --simulation-end-time-s 60 \
+  --traffic-stop-time-s 58 \
   --algorithms algorithm_free_one_only_over_isls algorithm_queue_aware_over_isls algorithm_lohi algorithm_lhtr
 ```
 
@@ -114,6 +154,8 @@ Run simulations:
 python step_2_run.py \
   --traffic-mode core_hotspot_specific \
   --load-level 1.0 \
+  --simulation-end-time-s 60 \
+  --traffic-stop-time-s 58 \
   --algorithms algorithm_free_one_only_over_isls algorithm_queue_aware_over_isls algorithm_lohi algorithm_lhtr
 ```
 
@@ -123,6 +165,8 @@ Analyze and plot:
 python step_3_generate_plots.py \
   --traffic-mode core_hotspot_specific \
   --load-level 1.0 \
+  --simulation-end-time-s 60 \
+  --traffic-stop-time-s 58 \
   --algorithms algorithm_free_one_only_over_isls algorithm_queue_aware_over_isls algorithm_lohi algorithm_lhtr
 ```
 
@@ -136,6 +180,9 @@ python step_1_generate_runs.py \
   --algorithms algorithm_free_one_only_over_isls \
   --dry-run
 ```
+
+Backward-compatible no-drain runs can omit `--traffic-stop-time-s`, or set it
+equal to `--simulation-end-time-s`.
 
 ## Outputs
 
@@ -160,6 +207,20 @@ sent_packets, received_packets, lost_packets,
 sent_bytes, received_bytes, pdr,
 offered_rate_mbps, received_rate_mbps
 ```
+
+In comparison outputs, `simulation_end_time_s`, `traffic_stop_time_s`,
+`drain_time_s`, and `drain_time_enabled` are included so results can be traced
+to the active traffic and drain timing.
+
+PDR is interpreted as:
+
+```text
+packets received by simulation end / packets sent during the active traffic interval
+```
+
+Runs generated without drain time can still be useful as preliminary results,
+but they can include tail in-flight artifacts. Do not directly mix old no-drain
+PDR values with drain-aware formal values in the same comparison.
 
 Run-level comparison outputs:
 

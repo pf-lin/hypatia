@@ -31,6 +31,14 @@ def _bar_plot(df, x_col, y_col, output_path, ylabel, title=None):
     plt.close()
 
 
+def _timing_title(base_title, df):
+    if "traffic_stop_time_s" not in df.columns or "drain_time_s" not in df.columns or len(df) == 0:
+        return base_title
+    traffic_stop_time_s = float(df["traffic_stop_time_s"].iloc[0])
+    drain_time_s = float(df["drain_time_s"].iloc[0])
+    return "%s (stop %.3gs, drain %.3gs)" % (base_title, traffic_stop_time_s, drain_time_s)
+
+
 def plot_single_run(comparison_dir):
     summary_path = os.path.join(comparison_dir, "summary_by_algorithm.csv")
     per_flow_path = os.path.join(comparison_dir, "per_flow_delivery.csv")
@@ -50,6 +58,7 @@ def plot_single_run(comparison_dir):
         "aggregate_pdr",
         os.path.join(comparison_dir, "aggregate_pdr.png"),
         "Aggregate PDR",
+        _timing_title("Aggregate PDR", summary),
     )
     _bar_plot(
         summary,
@@ -57,6 +66,7 @@ def plot_single_run(comparison_dir):
         "focus_flow_pdr",
         os.path.join(comparison_dir, "focus_flow_pdr.png"),
         "Focus-flow PDR",
+        _timing_title("Focus-flow PDR", summary),
     )
     _bar_plot(
         summary,
@@ -64,6 +74,7 @@ def plot_single_run(comparison_dir):
         "total_lost_packets",
         os.path.join(comparison_dir, "packet_loss_count.png"),
         "Lost packets",
+        _timing_title("Lost Packets", summary),
     )
     _bar_plot(
         summary,
@@ -71,6 +82,7 @@ def plot_single_run(comparison_dir):
         "failed_flow_count",
         os.path.join(comparison_dir, "failed_flow_count.png"),
         "Failed flow count",
+        _timing_title("Failed Flow Count", summary),
     )
 
     plt.figure(figsize=(7.5, 5))
@@ -84,6 +96,7 @@ def plot_single_run(comparison_dir):
     plt.ylabel("CDF")
     plt.xlim(0, 1.01)
     plt.ylim(0, 1.01)
+    plt.title(_timing_title("Per-flow PDR CDF", summary))
     plt.grid(True, alpha=0.25)
     plt.legend()
     plt.tight_layout()
@@ -136,6 +149,7 @@ def plot_across_loads(runs_root, run_names):
     plt.xlabel("Offered load multiplier")
     plt.ylabel("Aggregate PDR")
     plt.ylim(0, 1.01)
+    plt.title(_timing_title("Offered Load vs PDR", df))
     plt.grid(True, alpha=0.25)
     plt.legend()
     plt.tight_layout()
@@ -153,6 +167,7 @@ def main():
         load_levels,
         algorithms,
         args.simulation_end_time_s,
+        args.traffic_stop_time_s,
         args.dynamic_state_update_interval_ms,
         args.queue_size_pkt,
         args.background_flow_count,

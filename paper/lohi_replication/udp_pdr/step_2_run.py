@@ -103,6 +103,7 @@ def main():
         load_levels,
         algorithms,
         args.simulation_end_time_s,
+        args.traffic_stop_time_s,
         args.dynamic_state_update_interval_ms,
         args.queue_size_pkt,
         args.background_flow_count,
@@ -113,6 +114,14 @@ def main():
 
         print("\n" + "=" * 70)
         print("Run: %s" % run_dir)
+        print(
+            "Timing: simulation_end=%.6fs, traffic_stop=%.6fs, drain=%.6fs"
+            % (
+                run["simulation_end_time_s"],
+                run["traffic_stop_time_s"],
+                run["drain_time_s"],
+            )
+        )
         print("=" * 70)
         generate_initial_fstate(run, run_dir)
 
