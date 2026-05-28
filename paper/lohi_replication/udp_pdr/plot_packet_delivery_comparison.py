@@ -31,6 +31,20 @@ def _bar_plot(df, x_col, y_col, output_path, ylabel, title=None):
     plt.close()
 
 
+def _stacked_bar(df, index_col, value_cols, output_path, ylabel, title):
+    if len(df) == 0:
+        return
+    plot_df = df.set_index(index_col)[value_cols].copy()
+    plot_df.index = [_short_label(x) for x in plot_df.index]
+    plot_df.plot(kind="bar", stacked=True, figsize=(9, 4.8))
+    plt.ylabel(ylabel)
+    plt.xticks(rotation=25, ha="right")
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=180)
+    plt.close()
+
+
 def _timing_title(base_title, df):
     if "traffic_stop_time_s" not in df.columns or "drain_time_s" not in df.columns or len(df) == 0:
         return base_title
@@ -78,6 +92,9 @@ def plot_single_run(comparison_dir):
     queue_path = os.path.join(comparison_dir, "max_queue_occupancy_by_algorithm.csv")
     top_loss_path = os.path.join(comparison_dir, "top_loss_flows.csv")
     destination_path = os.path.join(comparison_dir, "destination_loss_summary.csv")
+    physical_drop_path = os.path.join(comparison_dir, "physical_drop_summary.csv")
+    gsl_queue_path = os.path.join(comparison_dir, "gsl_queue_summary.csv")
+    loss_attribution_path = os.path.join(comparison_dir, "loss_attribution_summary.csv")
     if not os.path.exists(summary_path) or not os.path.exists(per_flow_path):
         print("Skipping plots; missing analysis outputs in %s" % comparison_dir)
         return
@@ -119,6 +136,87 @@ def plot_single_run(comparison_dir):
         "Failed flow count",
         _timing_title("Failed Flow Count", summary),
     )
+
+    if os.path.exists(physical_drop_path):
+        physical = pd.read_csv(physical_drop_path)
+        algorithms = summary[["algorithm"]].drop_duplicates().sort_values("algorithm")
+        if len(physical):
+            by_algorithm = (
+                physical.groupby("algorithm")["drop_count"]
+                .sum()
+                .reset_index()
+                .sort_values("algorithm")
+            )
+            by_algorithm = algorithms.merge(by_algorithm, on="algorithm", how="left")
+            by_algorithm["drop_count"] = by_algorithm["drop_count"].fillna(0)
+            by_link_type = (
+                physical.pivot_table(
+                    index="algorithm",
+                    columns="link_type",
+                    values="drop_count",
+                    aggfunc="sum",
+                    fill_value=0,
+                )
+                .reset_index()
+            )
+            by_link_type = algorithms.merge(by_link_type, on="algorithm", how="left")
+        else:
+            by_algorithm = algorithms.copy()
+            by_algorithm["drop_count"] = 0
+            by_link_type = algorithms.copy()
+        for link_type in ["isl", "gsl", "unknown"]:
+            if link_type not in by_link_type.columns:
+                by_link_type[link_type] = 0
+        value_cols = [col for col in ["isl", "gsl", "unknown"] if col in by_link_type.columns]
+        by_link_type[value_cols] = by_link_type[value_cols].fillna(0)
+        _bar_plot(
+            by_algorithm,
+            "algorithm",
+            "drop_count",
+            os.path.join(comparison_dir, "physical_drop_count_by_algorithm.png"),
+            "Physical drop trace events",
+            "Physical Drop Count by Algorithm",
+        )
+        _stacked_bar(
+            by_link_type,
+            "algorithm",
+            value_cols,
+            os.path.join(comparison_dir, "physical_drop_by_link_type.png"),
+            "Physical drop trace events",
+            "Physical Drops by Link Type",
+        )
+
+    if os.path.exists(gsl_queue_path):
+        gsl_queue = pd.read_csv(gsl_queue_path)
+        if len(gsl_queue):
+            _bar_plot(
+                gsl_queue,
+                "algorithm",
+                "max_gsl_queue_pkt",
+                os.path.join(comparison_dir, "gsl_queue_occupancy_by_algorithm.png"),
+                "Max GSL/access queue occupancy (packets)",
+                "GSL Queue Occupancy by Algorithm",
+            )
+
+    if os.path.exists(loss_attribution_path):
+        attribution = pd.read_csv(loss_attribution_path)
+        if len(attribution):
+            attribution = attribution.copy()
+            attribution["unexplained_loss_nonnegative"] = attribution[
+                "unexplained_loss"
+            ].clip(lower=0)
+            _stacked_bar(
+                attribution,
+                "algorithm",
+                [
+                    "physical_drop_packets",
+                    "send_failed_packets",
+                    "unexplained_loss_nonnegative",
+                ],
+                os.path.join(comparison_dir, "loss_attribution_breakdown.png"),
+                "Packets",
+                "Loss Attribution Breakdown",
+            )
 
     plt.figure(figsize=(7.5, 5))
     for algorithm, group in per_flow.groupby("algorithm"):

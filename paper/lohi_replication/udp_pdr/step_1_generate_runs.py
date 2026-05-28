@@ -84,6 +84,9 @@ def _render_config(run, udp_logging_ids):
             "[ENABLE-LINK-QUEUE-TRACKING]": (
                 "true" if run["enable_link_queue_tracking"] else "false"
             ),
+            "[ENABLE-PHYSICAL-LINK-DROP-TRACKING]": (
+                "true" if run["enable_physical_link_drop_tracking"] else "false"
+            ),
             "[UDP-BURST-LOGGING-SET]": logging_set,
         },
     )

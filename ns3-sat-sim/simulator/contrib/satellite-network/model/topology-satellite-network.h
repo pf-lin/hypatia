@@ -22,6 +22,7 @@
 #ifndef TOPOLOGY_SATELLITE_NETWORK_H
 #define TOPOLOGY_SATELLITE_NETWORK_H
 
+#include <cstdio>
 #include <utility>
 #include "ns3/core-module.h"
 #include "ns3/node.h"
@@ -54,6 +55,7 @@
 #include "ns3/ipv4-routing-table-entry.h"
 #include "ns3/wifi-net-device.h"
 #include "ns3/point-to-point-laser-net-device.h"
+#include "ns3/gsl-net-device.h"
 #include "ns3/ipv4.h"
 #include "ns3/ptop-link-queue-tracker.h"
 
@@ -93,6 +95,24 @@ namespace ns3 {
 
     private:
 
+        class PhysicalLinkTraceContext : public SimpleRefCount<PhysicalLinkTraceContext>
+        {
+        public:
+            PhysicalLinkTraceContext(
+                std::string link_type,
+                int32_t from_node,
+                int32_t to_node,
+                std::string drop_reason,
+                Ptr<Queue<Packet>> queue
+            );
+
+            std::string m_link_type;
+            int32_t m_from_node;
+            int32_t m_to_node;
+            std::string m_drop_reason;
+            Ptr<Queue<Packet>> m_queue;
+        };
+
         // Build functions
         void ReadConfig();
         void Build(const Ipv4RoutingHelper& ipv4RoutingHelper);
@@ -104,6 +124,21 @@ namespace ns3 {
 
         // Helper
         void EnsureValidNodeId(uint32_t node_id);
+        void InitializePhysicalDropTraceFile();
+        void ConnectPhysicalDropTraces(
+            Ptr<Object> trace_source,
+            Ptr<Queue<Packet>> queue,
+            std::string link_type,
+            int32_t from_node,
+            int32_t to_node
+        );
+        void RecordPhysicalDrop(Ptr<PhysicalLinkTraceContext> context, Ptr<const Packet> packet);
+        void WriteGSLQueueTrackingResults();
+        static void PhysicalDropTraceCallback(
+            TopologySatelliteNetwork* topology,
+            Ptr<PhysicalLinkTraceContext> context,
+            Ptr<const Packet> packet
+        );
 
         // Routing
         Ipv4AddressHelper m_ipv4_helper;
@@ -136,10 +171,17 @@ namespace ns3 {
         bool m_enable_isl_utilization_tracking;
         int64_t m_isl_utilization_tracking_interval_ns;
         bool m_enable_queue_traces;
+        bool m_enable_physical_link_drop_tracking;
         std::string m_queue_trace_file;
+        std::string m_physical_link_drops_csv_filename;
 
         // ISL queue trackers
         std::vector<std::pair<std::pair<int32_t, int32_t>, Ptr<PtopLinkQueueTracker>>> m_isl_queue_trackers;
+
+        // GSL/access queue trackers. GSL interfaces use a shared channel, so
+        // their queue destination is not fixed and is recorded as -1.
+        std::vector<std::pair<std::pair<int32_t, int32_t>, Ptr<PtopLinkQueueTracker>>> m_gsl_queue_trackers;
+        std::vector<Ptr<PhysicalLinkTraceContext>> m_physical_drop_trace_contexts;
 
     };
 

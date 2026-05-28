@@ -23,6 +23,20 @@
 
 namespace ns3 {
 
+    TopologySatelliteNetwork::PhysicalLinkTraceContext::PhysicalLinkTraceContext(
+        std::string link_type,
+        int32_t from_node,
+        int32_t to_node,
+        std::string drop_reason,
+        Ptr<Queue<Packet>> queue
+    ) {
+        m_link_type = link_type;
+        m_from_node = from_node;
+        m_to_node = to_node;
+        m_drop_reason = drop_reason;
+        m_queue = queue;
+    }
+
     NS_OBJECT_ENSURE_REGISTERED (TopologySatelliteNetwork);
     TypeId TopologySatelliteNetwork::GetTypeId (void)
     {
@@ -88,6 +102,15 @@ namespace ns3 {
 
         // ISL queue tracking settings
         m_enable_queue_traces = parse_boolean(m_basicSimulation->GetConfigParamOrFail("enable_link_queue_tracking"));
+        m_enable_physical_link_drop_tracking = parse_boolean(
+            m_basicSimulation->GetConfigParamOrDefault(
+                "enable_physical_link_drop_tracking",
+                m_enable_queue_traces ? "true" : "false"
+            )
+        );
+        if (m_enable_physical_link_drop_tracking) {
+            InitializePhysicalDropTraceFile();
+        }
 
         // Create ISLs
         std::cout << "  > Reading and creating ISLs" << std::endl;
@@ -236,6 +259,114 @@ namespace ns3 {
     }
 
     void
+    TopologySatelliteNetwork::InitializePhysicalDropTraceFile() {
+        m_physical_link_drops_csv_filename = m_basicSimulation->GetLogsDir() + "/physical_link_drops.csv";
+        std::ofstream ofs;
+        ofs.open(m_physical_link_drops_csv_filename, std::ofstream::out | std::ofstream::trunc);
+        ofs << "time_ns,link_type,from_node,to_node,drop_reason,packet_size_bytes,"
+            << "queue_occupancy_pkt_if_available,queue_occupancy_byte_if_available,"
+            << "flow_id_if_available" << std::endl;
+        ofs.close();
+    }
+
+    void
+    TopologySatelliteNetwork::PhysicalDropTraceCallback(
+        TopologySatelliteNetwork* topology,
+        Ptr<PhysicalLinkTraceContext> context,
+        Ptr<const Packet> packet
+    ) {
+        topology->RecordPhysicalDrop(context, packet);
+    }
+
+    void
+    TopologySatelliteNetwork::RecordPhysicalDrop(
+        Ptr<PhysicalLinkTraceContext> context,
+        Ptr<const Packet> packet
+    ) {
+        if (!m_enable_physical_link_drop_tracking) {
+            return;
+        }
+
+        std::ofstream ofs;
+        ofs.open(m_physical_link_drops_csv_filename, std::ofstream::out | std::ofstream::app);
+        uint32_t packet_size = packet == nullptr ? 0 : packet->GetSize();
+        if (context->m_queue != nullptr) {
+            ofs << Simulator::Now().GetNanoSeconds()
+                << "," << context->m_link_type
+                << "," << context->m_from_node
+                << "," << context->m_to_node
+                << "," << context->m_drop_reason
+                << "," << packet_size
+                << "," << context->m_queue->GetNPackets()
+                << "," << context->m_queue->GetNBytes()
+                << "," << std::endl;
+        } else {
+            ofs << Simulator::Now().GetNanoSeconds()
+                << "," << context->m_link_type
+                << "," << context->m_from_node
+                << "," << context->m_to_node
+                << "," << context->m_drop_reason
+                << "," << packet_size
+                << ",,," << std::endl;
+        }
+        ofs.close();
+    }
+
+    void
+    TopologySatelliteNetwork::ConnectPhysicalDropTraces(
+        Ptr<Object> trace_source,
+        Ptr<Queue<Packet>> queue,
+        std::string link_type,
+        int32_t from_node,
+        int32_t to_node
+    ) {
+        if (!m_enable_physical_link_drop_tracking || trace_source == nullptr) {
+            return;
+        }
+
+        if (queue != nullptr) {
+            Ptr<PhysicalLinkTraceContext> queue_context = new PhysicalLinkTraceContext(
+                link_type, from_node, to_node, "QueueDrop", queue
+            );
+            m_physical_drop_trace_contexts.push_back(queue_context);
+            queue->TraceConnectWithoutContext(
+                "DropBeforeEnqueue",
+                MakeBoundCallback(
+                    &TopologySatelliteNetwork::PhysicalDropTraceCallback,
+                    this,
+                    queue_context
+                )
+            );
+        }
+
+        Ptr<PhysicalLinkTraceContext> phy_tx_context = new PhysicalLinkTraceContext(
+            link_type, from_node, to_node, "PhyTxDrop", queue
+        );
+        m_physical_drop_trace_contexts.push_back(phy_tx_context);
+        trace_source->TraceConnectWithoutContext(
+            "PhyTxDrop",
+            MakeBoundCallback(
+                &TopologySatelliteNetwork::PhysicalDropTraceCallback,
+                this,
+                phy_tx_context
+            )
+        );
+
+        Ptr<PhysicalLinkTraceContext> phy_rx_context = new PhysicalLinkTraceContext(
+            link_type, from_node, to_node, "PhyRxDrop", queue
+        );
+        m_physical_drop_trace_contexts.push_back(phy_rx_context);
+        trace_source->TraceConnectWithoutContext(
+            "PhyRxDrop",
+            MakeBoundCallback(
+                &TopologySatelliteNetwork::PhysicalDropTraceCallback,
+                this,
+                phy_rx_context
+            )
+        );
+    }
+
+    void
     TopologySatelliteNetwork::ReadISLs()
     {
 
@@ -298,8 +429,8 @@ namespace ns3 {
                 m_islFromTo.push_back(std::make_pair(sat1_id, sat0_id));
             }
 
-            // 如果啟用 queue tracking，創建 tracker
-            if (m_enable_queue_traces) {
+            // Queue and drop traces share the same device queues.
+            if (m_enable_queue_traces || m_enable_physical_link_drop_tracking) {
                 Ptr<PointToPointLaserNetDevice> netDeviceA = netDevices.Get(0)->GetObject<PointToPointLaserNetDevice>();
                 Ptr<PointToPointLaserNetDevice> netDeviceB = netDevices.Get(1)->GetObject<PointToPointLaserNetDevice>();
 
@@ -315,18 +446,35 @@ namespace ns3 {
                     continue;
                 }
 
-                // 為 A -> B 方向創建 tracker - 直接使用 queue
-                Ptr<PtopLinkQueueTracker> tracker_a_b = CreateObject<PtopLinkQueueTracker>();
-                tracker_a_b->SetQueue(netDeviceA->GetQueue());
-                m_isl_queue_trackers.push_back(
-                    std::make_pair(std::make_pair(sat0_id, sat1_id), tracker_a_b)
-                );
+                if (m_enable_queue_traces) {
+                    // 為 A -> B 方向創建 tracker - 直接使用 queue
+                    Ptr<PtopLinkQueueTracker> tracker_a_b = CreateObject<PtopLinkQueueTracker>();
+                    tracker_a_b->SetQueue(netDeviceA->GetQueue());
+                    m_isl_queue_trackers.push_back(
+                        std::make_pair(std::make_pair(sat0_id, sat1_id), tracker_a_b)
+                    );
 
-                // 為 B -> A 方向創建 tracker
-                Ptr<PtopLinkQueueTracker> tracker_b_a = CreateObject<PtopLinkQueueTracker>();
-                tracker_b_a->SetQueue(netDeviceB->GetQueue());
-                m_isl_queue_trackers.push_back(
-                    std::make_pair(std::make_pair(sat1_id, sat0_id), tracker_b_a)
+                    // 為 B -> A 方向創建 tracker
+                    Ptr<PtopLinkQueueTracker> tracker_b_a = CreateObject<PtopLinkQueueTracker>();
+                    tracker_b_a->SetQueue(netDeviceB->GetQueue());
+                    m_isl_queue_trackers.push_back(
+                        std::make_pair(std::make_pair(sat1_id, sat0_id), tracker_b_a)
+                    );
+                }
+
+                ConnectPhysicalDropTraces(
+                    netDeviceA,
+                    netDeviceA->GetQueue(),
+                    "ISL",
+                    sat0_id,
+                    sat1_id
+                );
+                ConnectPhysicalDropTraces(
+                    netDeviceB,
+                    netDeviceB->GetQueue(),
+                    "ISL",
+                    sat1_id,
+                    sat0_id
                 );
             }
 
@@ -340,6 +488,9 @@ namespace ns3 {
         if (m_enable_queue_traces) {
             std::cout << "  > Enable queue traces" << std::endl;
             std::cout << "    >> Installed " << m_isl_queue_trackers.size() << " queue trackers" << std::endl;
+        }
+        if (m_enable_physical_link_drop_tracking) {
+            std::cout << "  > Enable ISL physical drop traces" << std::endl;
         }
 
     }
@@ -394,6 +545,45 @@ namespace ns3 {
         // Create and install GSL network devices
         NetDeviceContainer devices = gsl_helper.Install(m_satelliteNodes, m_groundStationNodes, node_gsl_if_info);
         std::cout << "    >> Finished install GSL interfaces (interfaces, network devices, one shared channel)" << std::endl;
+
+        if (m_enable_queue_traces || m_enable_physical_link_drop_tracking) {
+            for (uint32_t i = 0; i < devices.GetN(); i++) {
+                Ptr<GSLNetDevice> gslNetDevice = devices.Get(i)->GetObject<GSLNetDevice>();
+                if (gslNetDevice == nullptr) {
+                    std::cerr << "ERROR: Failed to get GSLNetDevice" << std::endl;
+                    continue;
+                }
+                if (gslNetDevice->GetQueue() == nullptr) {
+                    std::cerr << "ERROR: Queue is null for GSL interface on node "
+                              << gslNetDevice->GetNode()->GetId() << std::endl;
+                    continue;
+                }
+
+                int32_t from_node = gslNetDevice->GetNode()->GetId();
+                int32_t to_node = -1;
+                if (m_enable_queue_traces) {
+                    Ptr<PtopLinkQueueTracker> tracker = CreateObject<PtopLinkQueueTracker>();
+                    tracker->SetQueue(gslNetDevice->GetQueue());
+                    m_gsl_queue_trackers.push_back(
+                        std::make_pair(std::make_pair(from_node, to_node), tracker)
+                    );
+                }
+                ConnectPhysicalDropTraces(
+                    gslNetDevice,
+                    gslNetDevice->GetQueue(),
+                    "GSL",
+                    from_node,
+                    to_node
+                );
+            }
+            if (m_enable_queue_traces) {
+                std::cout << "    >> Installed " << m_gsl_queue_trackers.size()
+                          << " GSL/access queue trackers" << std::endl;
+            }
+            if (m_enable_physical_link_drop_tracking) {
+                std::cout << "    >> Installed GSL/access physical drop traces" << std::endl;
+            }
+        }
 
         // Install queueing disciplines
         tch_gsl.Install(devices);
@@ -596,8 +786,78 @@ namespace ns3 {
             m_basicSimulation->RegisterTimestamp("Write ISL queue tracking files");
 
         }
+
+        WriteGSLQueueTrackingResults();
         
         std::cout << std::endl;
+    }
+
+    void TopologySatelliteNetwork::WriteGSLQueueTrackingResults() {
+        std::cout << "STORE GSL QUEUE TRACKING RESULTS" << std::endl;
+
+        if (!m_enable_queue_traces) {
+            std::cout << "  > GSL queue tracking not enabled, skipping" << std::endl;
+            return;
+        }
+
+        std::string filename_pkt = m_basicSimulation->GetLogsDir() + "/gsl_queue_pkt.csv";
+        std::string filename_byte = m_basicSimulation->GetLogsDir() + "/gsl_queue_byte.csv";
+
+        std::cout<< "  > Opening GSL queue tracking output files" << std::endl;
+        FILE* file_queue_pkt_csv = fopen(filename_pkt.c_str(), "w+");
+        std::cout << "    >> Opened: " << filename_pkt << std::endl;
+        FILE* file_queue_byte_csv = fopen(filename_byte.c_str(), "w+");
+        std::cout << "    >> Opened: " << filename_byte << std::endl;
+
+        if (!file_queue_pkt_csv || !file_queue_byte_csv) {
+            NS_ABORT_MSG("Failed to open GSL queue tracking output files");
+        }
+
+        std::sort(m_gsl_queue_trackers.begin(), m_gsl_queue_trackers.end(),
+            [](const std::pair<std::pair<int32_t, int32_t>, Ptr<PtopLinkQueueTracker>>& a,
+            const std::pair<std::pair<int32_t, int32_t>, Ptr<PtopLinkQueueTracker>>& b) {
+                return (a.first.first == b.first.first) ?
+                    (a.first.second < b.first.second) :
+                    (a.first.first < b.first.first);
+            }
+        );
+
+        for (const auto& entry : m_gsl_queue_trackers) {
+            int32_t from = entry.first.first;
+            int32_t to = entry.first.second;
+            Ptr<PtopLinkQueueTracker> tracker = entry.second;
+
+            const std::vector<std::tuple<int64_t, int64_t, int64_t>>& log_entries_pkt = tracker->GetIntervalsNumPackets();
+            for (size_t j = 0; j < log_entries_pkt.size(); j++) {
+                fprintf(file_queue_pkt_csv,
+                        "%d,%d,%" PRId64 ",%" PRId64 ",%" PRId64 "\n",
+                        from, to,
+                        std::get<0>(log_entries_pkt[j]),
+                        std::get<1>(log_entries_pkt[j]),
+                        std::get<2>(log_entries_pkt[j])
+                );
+            }
+
+            const std::vector<std::tuple<int64_t, int64_t, int64_t>>& log_entries_byte = tracker->GetIntervalsNumBytes();
+            for (size_t j = 0; j < log_entries_byte.size(); j++) {
+                fprintf(file_queue_byte_csv,
+                        "%d,%d,%" PRId64 ",%" PRId64 ",%" PRId64 "\n",
+                        from, to,
+                        std::get<0>(log_entries_byte[j]),
+                        std::get<1>(log_entries_byte[j]),
+                        std::get<2>(log_entries_byte[j])
+                );
+            }
+        }
+
+        std::cout << "  > Closing GSL queue tracking output files" << std::endl;
+        fclose(file_queue_pkt_csv);
+        std::cout << "    >> Closed: " << filename_pkt << std::endl;
+        fclose(file_queue_byte_csv);
+        std::cout << "    >> Closed: " << filename_byte << std::endl;
+
+        std::cout << "  > GSL queue tracking files written successfully" << std::endl;
+        m_basicSimulation->RegisterTimestamp("Write GSL queue tracking files");
     }
 
     void TopologySatelliteNetwork::ResetQueueTrackers() {

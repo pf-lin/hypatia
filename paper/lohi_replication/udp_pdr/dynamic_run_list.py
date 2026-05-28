@@ -10,6 +10,7 @@ simulation_end_time_s = 60
 enable_isl_utilization_tracking = True
 isl_utilization_tracking_interval_ns = 1 * 1000 * 1000 * 1000
 enable_link_queue_tracking = True
+enable_physical_link_drop_tracking = True
 
 # Satellite network
 full_satellite_network_isls = (
@@ -322,6 +323,7 @@ def get_udp_pdr_run_list(
                     "enable_isl_utilization_tracking": enable_isl_utilization_tracking,
                     "isl_utilization_tracking_interval_ns": isl_utilization_tracking_interval_ns,
                     "enable_link_queue_tracking": enable_link_queue_tracking,
+                    "enable_physical_link_drop_tracking": enable_physical_link_drop_tracking,
                     "src_node_id": focus_src_node_id,
                     "dst_node_id": focus_dst_node_id,
                     "packet_trace_flow_count": default_packet_trace_flow_count,

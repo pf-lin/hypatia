@@ -144,9 +144,9 @@ int main(int argc, char *argv[]) {
                   << (Simulator::Now().GetNanoSeconds() / 1e9) << "s" << std::endl;
         
         // ===== 步驟 2: 輸出 Queue 統計數據 =====
-        std::cout << "\n[Step 2] Writing ISL queue tracking results..." << std::endl;
+        std::cout << "\n[Step 2] Writing ISL/GSL queue tracking results..." << std::endl;
         topology->WriteISLQueueTrackingResults();
-        std::cout << "  > Queue data written to logs_ns3/isl_queue_pkt.csv" << std::endl;
+        std::cout << "  > Queue data written to logs_ns3/{isl,gsl}_queue_pkt.csv" << std::endl;
         
         // ===== 步驟 3: 重置 Queue Trackers =====
         std::cout << "\n[Step 3] Resetting queue trackers for next iteration..." << std::endl;

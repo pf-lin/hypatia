@@ -70,9 +70,66 @@ DESTINATION_LOSS_COLUMNS = [
     "observed_vs_capacity_limit_gap",
 ]
 
+PHYSICAL_DROP_COLUMNS = [
+    "time_ns",
+    "link_type",
+    "from_node",
+    "to_node",
+    "drop_reason",
+    "packet_size_bytes",
+    "queue_occupancy_pkt_if_available",
+    "queue_occupancy_byte_if_available",
+    "flow_id_if_available",
+]
+
+PHYSICAL_DROP_SUMMARY_COLUMNS = [
+    "algorithm",
+    "link_type",
+    "drop_reason",
+    "drop_count",
+    "drop_bytes",
+    "first_drop_time_ns",
+    "last_drop_time_ns",
+]
+
+GSL_QUEUE_SUMMARY_COLUMNS = [
+    "algorithm",
+    "max_gsl_queue_pkt",
+    "mean_gsl_queue_pkt",
+    "nonzero_gsl_queue_samples",
+    "top_gsl_queue_links",
+]
+
+LOSS_ATTRIBUTION_COLUMNS = [
+    "algorithm",
+    "synthetic_lost_packets",
+    "physical_drop_packets",
+    "send_failed_packets",
+    "unexplained_loss",
+    "physical_drop_coverage_ratio",
+    "gsl_drop_packets",
+    "isl_drop_packets",
+    "unknown_drop_packets",
+]
+
+UDP_SEND_FAILURE_COLUMNS = [
+    "time_ns",
+    "flow_id",
+    "src",
+    "dst",
+    "packet_size_bytes",
+    "error_code",
+    "error_message_if_available",
+]
+
 TOP_LOSS_FLOW_COUNT = 20
 SYNTHETIC_LOSS_REASON = "udp_sent_minus_received"
-MAX_QUEUE_SCOPE = "sampled/event-derived ISL net-device queue only"
+MAX_QUEUE_SCOPE = "sampled/event-derived ISL net-device queue; GSL queue summarized separately when available"
+PHYSICAL_DROP_TRACE_COVERAGE = (
+    "DropBeforeEnqueue queue callbacks and PhyTxDrop/PhyRxDrop on tracked "
+    "ISL/GSL NetDevices; MacTxDrop is not separately counted to avoid "
+    "double-counting queue overflow"
+)
 
 
 def run_timing_fields(run):
@@ -167,7 +224,8 @@ def physical_drop_trace_available(algorithm_run_dir, drops_df):
     physical_path = os.path.join(logs_dir, "physical_link_drops.csv")
     if os.path.exists(physical_path):
         try:
-            return len(pd.read_csv(physical_path)) > 0
+            pd.read_csv(physical_path, nrows=0)
+            return True
         except pd.errors.EmptyDataError:
             return False
     return not is_synthetic_sent_minus_received_drop_df(drops_df)
@@ -184,6 +242,54 @@ def gsl_queue_tracking_available(algorithm_run_dir):
         if os.path.exists(os.path.join(logs_dir, filename)):
             return True
     return False
+
+
+def udp_send_failure_trace_available(algorithm_run_dir):
+    return os.path.exists(
+        os.path.join(algorithm_run_dir, "logs_ns3", "udp_send_failures.csv")
+    )
+
+
+def read_physical_link_drops(algorithm_run_dir):
+    path = os.path.join(algorithm_run_dir, "logs_ns3", "physical_link_drops.csv")
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=PHYSICAL_DROP_COLUMNS)
+    try:
+        df = pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame(columns=PHYSICAL_DROP_COLUMNS)
+    for col in PHYSICAL_DROP_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+    df = df[PHYSICAL_DROP_COLUMNS].copy()
+    for col in [
+        "time_ns",
+        "from_node",
+        "to_node",
+        "packet_size_bytes",
+        "queue_occupancy_pkt_if_available",
+        "queue_occupancy_byte_if_available",
+        "flow_id_if_available",
+    ]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+def read_udp_send_failures(algorithm_run_dir):
+    path = os.path.join(algorithm_run_dir, "logs_ns3", "udp_send_failures.csv")
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=UDP_SEND_FAILURE_COLUMNS)
+    try:
+        df = pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame(columns=UDP_SEND_FAILURE_COLUMNS)
+    for col in UDP_SEND_FAILURE_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+    df = df[UDP_SEND_FAILURE_COLUMNS].copy()
+    for col in ["time_ns", "flow_id", "src", "dst", "packet_size_bytes", "error_code"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
 
 
 def read_udp_burst_csv(path, incoming=False):
@@ -436,6 +542,115 @@ def collect_queue_summary(algorithm_run_dir, run_name, algorithm):
     )
 
 
+def _read_queue_interval_csv(path, value_name):
+    columns = ["from", "to", "interval_start_ns", "interval_end_ns", value_name]
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=columns)
+    try:
+        df = pd.read_csv(path, header=None, names=columns)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame(columns=columns)
+    for col in columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df.dropna(subset=["from", "to", "interval_start_ns", "interval_end_ns", value_name])
+
+
+def collect_gsl_queue_summary(algorithm_run_dir, algorithm):
+    logs_dir = os.path.join(algorithm_run_dir, "logs_ns3")
+    pkt_path = os.path.join(logs_dir, "gsl_queue_pkt.csv")
+    df = _read_queue_interval_csv(pkt_path, "queue_pkt")
+    if len(df) == 0:
+        return {
+            "algorithm": algorithm,
+            "max_gsl_queue_pkt": 0,
+            "mean_gsl_queue_pkt": 0.0,
+            "nonzero_gsl_queue_samples": 0,
+            "top_gsl_queue_links": "",
+        }
+
+    df["from"] = df["from"].astype("int64")
+    df["to"] = df["to"].astype("int64")
+    df["queue_pkt"] = df["queue_pkt"].astype("float64")
+    max_by_link = (
+        df.groupby(["from", "to"])["queue_pkt"]
+        .max()
+        .reset_index(name="packet_max")
+        .sort_values(["packet_max", "from", "to"], ascending=[False, True, True])
+    )
+    top_links = []
+    for _, row in max_by_link.head(8).iterrows():
+        top_links.append(
+            "%d->%d:%d"
+            % (int(row["from"]), int(row["to"]), int(row["packet_max"]))
+        )
+    return {
+        "algorithm": algorithm,
+        "max_gsl_queue_pkt": int(df["queue_pkt"].max()),
+        "mean_gsl_queue_pkt": float(df["queue_pkt"].mean()),
+        "nonzero_gsl_queue_samples": int((df["queue_pkt"] > 0).sum()),
+        "top_gsl_queue_links": ";".join(top_links),
+    }
+
+
+def build_physical_drop_summary(physical_drop_df):
+    if len(physical_drop_df) == 0:
+        return pd.DataFrame(columns=PHYSICAL_DROP_SUMMARY_COLUMNS)
+    df = physical_drop_df.copy()
+    df["packet_size_bytes"] = pd.to_numeric(
+        df["packet_size_bytes"], errors="coerce"
+    ).fillna(0)
+    return (
+        df.groupby(["algorithm", "link_type", "drop_reason"])
+        .agg(
+            drop_count=("drop_reason", "size"),
+            drop_bytes=("packet_size_bytes", "sum"),
+            first_drop_time_ns=("time_ns", "min"),
+            last_drop_time_ns=("time_ns", "max"),
+        )
+        .reset_index()[PHYSICAL_DROP_SUMMARY_COLUMNS]
+        .sort_values(["algorithm", "link_type", "drop_reason"])
+    )
+
+
+def build_loss_attribution_summary(summary_df, physical_drop_df, send_failure_df):
+    rows = []
+    for _, row in summary_df.iterrows():
+        algorithm = row["algorithm"]
+        synthetic_lost = int(row["total_lost_packets"])
+        alg_drops = physical_drop_df[
+            physical_drop_df["algorithm"] == algorithm
+        ] if len(physical_drop_df) else pd.DataFrame()
+        alg_send_failures = send_failure_df[
+            send_failure_df["algorithm"] == algorithm
+        ] if len(send_failure_df) else pd.DataFrame()
+
+        physical_drop_packets = int(len(alg_drops))
+        send_failed_packets = int(len(alg_send_failures))
+        gsl_drop_packets = int((alg_drops["link_type"] == "GSL").sum()) if len(alg_drops) else 0
+        isl_drop_packets = int((alg_drops["link_type"] == "ISL").sum()) if len(alg_drops) else 0
+        unknown_drop_packets = (
+            physical_drop_packets - gsl_drop_packets - isl_drop_packets
+        )
+        unexplained_loss = synthetic_lost - physical_drop_packets - send_failed_packets
+        coverage = (
+            physical_drop_packets / float(synthetic_lost)
+            if synthetic_lost > 0
+            else 0.0
+        )
+        rows.append({
+            "algorithm": algorithm,
+            "synthetic_lost_packets": synthetic_lost,
+            "physical_drop_packets": physical_drop_packets,
+            "send_failed_packets": send_failed_packets,
+            "unexplained_loss": unexplained_loss,
+            "physical_drop_coverage_ratio": coverage,
+            "gsl_drop_packets": gsl_drop_packets,
+            "isl_drop_packets": isl_drop_packets,
+            "unknown_drop_packets": unknown_drop_packets,
+        })
+    return pd.DataFrame(rows, columns=LOSS_ATTRIBUTION_COLUMNS)
+
+
 def build_pairwise(summary_df, per_flow_df):
     rows = []
     summaries = {row["algorithm"]: row for _, row in summary_df.iterrows()}
@@ -562,8 +777,12 @@ def write_loss_diagnostics(
     affected_df,
     destination_df,
     queue_df,
+    physical_drop_summary_df,
+    gsl_queue_summary_df,
+    loss_attribution_df,
     physical_trace_available,
     gsl_queue_available,
+    udp_send_failure_available,
     gsl_capacity_warnings,
 ):
     loss_attribution = (
@@ -584,8 +803,15 @@ def write_loss_diagnostics(
         f_out.write("loss_attribution = %s\n" % loss_attribution)
         f_out.write("max_queue_scope = %s\n" % MAX_QUEUE_SCOPE)
         f_out.write(
+            "physical_drop_trace_coverage = %s\n" % PHYSICAL_DROP_TRACE_COVERAGE
+        )
+        f_out.write(
             "gsl_queue_tracking_available = %s\n\n"
             % format_bool(gsl_queue_available)
+        )
+        f_out.write(
+            "udp_send_failure_trace_available = %s\n\n"
+            % format_bool(udp_send_failure_available)
         )
 
         f_out.write("Key observations\n")
@@ -699,6 +925,63 @@ def write_loss_diagnostics(
                 "Use max_queue_occupancy_top_links.png for this plot; "
                 "the legacy name link_drop_heatmap.png is deprecated if present.\n"
             )
+        if len(gsl_queue_summary_df):
+            f_out.write("GSL/access queue summary:\n")
+            for _, row in gsl_queue_summary_df.iterrows():
+                f_out.write(
+                    "  algorithm=%s max_gsl_queue_pkt=%s mean_gsl_queue_pkt=%.6f "
+                    "nonzero_samples=%s top_links=%s\n"
+                    % (
+                        row["algorithm"],
+                        row["max_gsl_queue_pkt"],
+                        float(row["mean_gsl_queue_pkt"]),
+                        row["nonzero_gsl_queue_samples"],
+                        row["top_gsl_queue_links"],
+                    )
+                )
+        if len(physical_drop_summary_df):
+            f_out.write("Physical drop summary:\n")
+            for _, row in physical_drop_summary_df.iterrows():
+                f_out.write(
+                    "  algorithm=%s link_type=%s reason=%s drops=%d bytes=%d first=%s last=%s\n"
+                    % (
+                        row["algorithm"],
+                        row["link_type"],
+                        row["drop_reason"],
+                        int(row["drop_count"]),
+                        int(row["drop_bytes"]),
+                        row["first_drop_time_ns"],
+                        row["last_drop_time_ns"],
+                    )
+                )
+        else:
+            f_out.write("No physical drop events were recorded by the available trace hooks.\n")
+        if len(loss_attribution_df):
+            f_out.write("Loss attribution summary:\n")
+            for _, row in loss_attribution_df.iterrows():
+                f_out.write(
+                    "  algorithm=%s synthetic_lost=%d physical_drops=%d "
+                    "send_failed=%d unexplained=%d gsl_drops=%d isl_drops=%d unknown_drops=%d\n"
+                    % (
+                        row["algorithm"],
+                        int(row["synthetic_lost_packets"]),
+                        int(row["physical_drop_packets"]),
+                        int(row["send_failed_packets"]),
+                        int(row["unexplained_loss"]),
+                        int(row["gsl_drop_packets"]),
+                        int(row["isl_drop_packets"]),
+                        int(row["unknown_drop_packets"]),
+                    )
+                )
+        dst_818 = destination_df[
+            (destination_df["dst"].astype(int) == 818)
+            & (destination_df["total_lost_packets"] > 0)
+        ] if len(destination_df) else pd.DataFrame()
+        if len(dst_818):
+            f_out.write(
+                "dst=818 has synthetic loss in this run; compare its aggregate "
+                "offered rate with GSL capacity and the GSL queue/drop rows above.\n"
+            )
         f_out.write("\n")
 
         f_out.write("Warnings\n")
@@ -707,7 +990,10 @@ def write_loss_diagnostics(
             "The synthetic sent-minus-received loss should not be interpreted as a physical per-link drop trace.\n"
         )
         f_out.write(
-            "The max queue occupancy summary only covers tracked ISL queues and may not include GSL/access queues or device-level drop events.\n"
+            "The max queue occupancy summary for routing still covers tracked ISL queues only; GSL/access queues are summarized separately and are not used by the routing algorithms.\n"
+        )
+        f_out.write(
+            "No-route and forwarding drops are not covered by this first tracing pass.\n"
         )
         if gsl_capacity_warnings:
             for warning in gsl_capacity_warnings:
@@ -717,10 +1003,10 @@ def write_loss_diagnostics(
         f_out.write("Recommended next steps\n")
         f_out.write("-" * 40 + "\n")
         f_out.write(
-            "Enable GSL queue tracking and/or physical drop tracing to confirm access-side bottleneck attribution.\n"
+            "Use physical_drop_summary.csv, gsl_queue_summary.csv, and loss_attribution_summary.csv before making access-side bottleneck claims.\n"
         )
         f_out.write(
-            "Consider UDP SendTo error logging, no-route/forwarding drop tracing, and FlowMonitor only as follow-up instrumentation work.\n"
+            "Consider no-route/forwarding drop tracing and FlowMonitor as follow-up instrumentation work if unexplained_loss remains high.\n"
         )
 
 
@@ -731,8 +1017,10 @@ def write_statistics(
     focus_df,
     pairwise_df,
     queue_df,
+    loss_attribution_df,
     physical_trace_available,
     gsl_queue_available,
+    udp_send_failure_available,
 ):
     loss_attribution = (
         "physical_drop_trace"
@@ -775,8 +1063,15 @@ def write_statistics(
         f_out.write("loss_attribution = %s\n" % loss_attribution)
         f_out.write("max_queue_scope = sampled/event-derived ISL queue\n")
         f_out.write(
+            "physical_drop_trace_coverage = %s\n" % PHYSICAL_DROP_TRACE_COVERAGE
+        )
+        f_out.write(
             "gsl_queue_tracking_available = %s\n"
             % format_bool(gsl_queue_available)
+        )
+        f_out.write(
+            "udp_send_failure_trace_available = %s\n"
+            % format_bool(udp_send_failure_available)
         )
         f_out.write(
             "PDR is an end-to-end delivery metric. Queue occupancy and "
@@ -845,6 +1140,14 @@ def write_statistics(
             f_out.write("No queue summary available yet.")
         f_out.write("\n")
 
+        f_out.write("Loss attribution summary\n")
+        f_out.write("-" * 40 + "\n")
+        if len(loss_attribution_df):
+            f_out.write(loss_attribution_df.to_string(index=False))
+        else:
+            f_out.write("No loss attribution summary available.")
+        f_out.write("\n")
+
 
 def analyze_run(run, algorithms):
     comparison_dir = os.path.join("runs", run["name"], "comparison_packet_delivery")
@@ -855,10 +1158,14 @@ def analyze_run(run, algorithms):
     focus_rows = []
     link_drop_frames = []
     queue_frames = []
+    physical_drop_frames = []
+    udp_send_failure_frames = []
+    gsl_queue_summary_rows = []
     gsl_capacity_by_algorithm = {}
     gsl_capacity_warnings = []
     physical_trace_available_any = False
     gsl_queue_available_any = False
+    udp_send_failure_available_any = False
 
     for algorithm in algorithms:
         algorithm_run_dir = os.path.join("runs", run["name"], algorithm)
@@ -875,6 +1182,10 @@ def analyze_run(run, algorithms):
             )
         gsl_queue_available_any = (
             gsl_queue_available_any or gsl_queue_tracking_available(algorithm_run_dir)
+        )
+        udp_send_failure_available_any = (
+            udp_send_failure_available_any
+            or udp_send_failure_trace_available(algorithm_run_dir)
         )
 
         flows, udp_flows_path = build_udp_flows_csv(algorithm_run_dir)
@@ -919,6 +1230,21 @@ def analyze_run(run, algorithms):
             physical_trace_available_any
             or physical_drop_trace_available(algorithm_run_dir, drops)
         )
+        physical_drops = read_physical_link_drops(algorithm_run_dir)
+        if len(physical_drops):
+            physical_drops.insert(0, "algorithm", algorithm)
+            physical_drops.insert(0, "run_name", run["name"])
+            physical_drop_frames.append(physical_drops)
+
+        udp_send_failures = read_udp_send_failures(algorithm_run_dir)
+        if len(udp_send_failures):
+            udp_send_failures.insert(0, "algorithm", algorithm)
+            udp_send_failures.insert(0, "run_name", run["name"])
+            udp_send_failure_frames.append(udp_send_failures)
+
+        gsl_queue_summary_rows.append(
+            collect_gsl_queue_summary(algorithm_run_dir, algorithm)
+        )
         if len(drops):
             drops.insert(0, "algorithm", algorithm)
             drops.insert(0, "run_name", run["name"])
@@ -934,6 +1260,26 @@ def analyze_run(run, algorithms):
     focus_df = pd.concat(focus_rows, ignore_index=True) if focus_rows else pd.DataFrame()
     link_drops_df = pd.concat(link_drop_frames, ignore_index=True) if link_drop_frames else pd.DataFrame()
     queue_df = pd.concat(queue_frames, ignore_index=True) if queue_frames else pd.DataFrame()
+    physical_drop_df = (
+        pd.concat(physical_drop_frames, ignore_index=True)
+        if physical_drop_frames
+        else pd.DataFrame(columns=["run_name", "algorithm"] + PHYSICAL_DROP_COLUMNS)
+    )
+    udp_send_failure_df = (
+        pd.concat(udp_send_failure_frames, ignore_index=True)
+        if udp_send_failure_frames
+        else pd.DataFrame(columns=["run_name", "algorithm"] + UDP_SEND_FAILURE_COLUMNS)
+    )
+    gsl_queue_summary_df = pd.DataFrame(
+        gsl_queue_summary_rows,
+        columns=GSL_QUEUE_SUMMARY_COLUMNS,
+    )
+    physical_drop_summary_df = build_physical_drop_summary(physical_drop_df)
+    loss_attribution_df = build_loss_attribution_summary(
+        summary_df,
+        physical_drop_df,
+        udp_send_failure_df,
+    )
     pairwise_df = build_pairwise(summary_df, per_flow_df)
     affected_df = build_affected_flows(per_flow_df)
     top_loss_df = build_top_loss_flows(affected_df)
@@ -950,6 +1296,11 @@ def analyze_run(run, algorithms):
     top_loss_df.to_csv(os.path.join(comparison_dir, "top_loss_flows.csv"), index=False)
     destination_df.to_csv(os.path.join(comparison_dir, "destination_loss_summary.csv"), index=False)
     link_drops_df.to_csv(os.path.join(comparison_dir, "link_drops.csv"), index=False)
+    physical_drop_df.to_csv(os.path.join(comparison_dir, "physical_link_drops.csv"), index=False)
+    udp_send_failure_df.to_csv(os.path.join(comparison_dir, "udp_send_failures.csv"), index=False)
+    physical_drop_summary_df.to_csv(os.path.join(comparison_dir, "physical_drop_summary.csv"), index=False)
+    gsl_queue_summary_df.to_csv(os.path.join(comparison_dir, "gsl_queue_summary.csv"), index=False)
+    loss_attribution_df.to_csv(os.path.join(comparison_dir, "loss_attribution_summary.csv"), index=False)
     if not physical_trace_available_any:
         link_drops_df.to_csv(os.path.join(comparison_dir, "synthetic_link_drops.csv"), index=False)
     queue_df.to_csv(os.path.join(comparison_dir, "max_queue_occupancy_by_algorithm.csv"), index=False)
@@ -960,8 +1311,10 @@ def analyze_run(run, algorithms):
         focus_df,
         pairwise_df,
         queue_df,
+        loss_attribution_df,
         physical_trace_available_any,
         gsl_queue_available_any,
+        udp_send_failure_available_any,
     )
     write_loss_diagnostics(
         os.path.join(comparison_dir, "loss_diagnostics.txt"),
@@ -971,8 +1324,12 @@ def analyze_run(run, algorithms):
         affected_df,
         destination_df,
         queue_df,
+        physical_drop_summary_df,
+        gsl_queue_summary_df,
+        loss_attribution_df,
         physical_trace_available_any,
         gsl_queue_available_any,
+        udp_send_failure_available_any,
         gsl_capacity_warnings,
     )
     print("  > Wrote comparison outputs under %s" % comparison_dir)
