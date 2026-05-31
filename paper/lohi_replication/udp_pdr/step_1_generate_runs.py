@@ -1,3 +1,4 @@
+import csv
 import json
 import os
 import random
@@ -25,6 +26,13 @@ from dynamic_run_list import (
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
 SATGENPY_DIR = os.path.join(REPO_ROOT, "satgenpy")
+
+SELECTION_DIAGNOSTIC_FILENAMES = [
+    "flow_selection_diagnostics.csv",
+    "corridor_overlap_summary.csv",
+    "gsl_load_by_endpoint.csv",
+    "isl_corridor_load_summary.csv",
+]
 
 
 def _replace_many(text, mapping):
@@ -114,6 +122,30 @@ def _first_last_sats(path):
     if path is None or len(path) < 3:
         return set()
     return {path[1], path[-2]}
+
+
+def _first_sat(path):
+    if path is None or len(path) < 3:
+        return None
+    return path[1]
+
+
+def _last_sat(path):
+    if path is None or len(path) < 3:
+        return None
+    return path[-2]
+
+
+def _format_bool(value):
+    return "true" if bool(value) else "false"
+
+
+def _format_edges(edges):
+    return ";".join("%d->%d" % (a, b) for a, b in sorted(edges))
+
+
+def _format_timestamps(timestamps):
+    return ";".join(str(int(value)) for value in timestamps)
 
 
 def _read_fstate_delta(path, accumulated):
@@ -321,14 +353,602 @@ def _generate_core_hotspot_pairs(run, sample_count):
     return _generate_focus_only_pairs(run) + selected
 
 
-def generate_pairs(run, hotspot_sample_count):
+def _evaluate_core_isl_hotspot_candidates(run, sample_count):
+    sys.path.append(SATGENPY_DIR)
+    from satgen.post_analysis.graph_tools import get_path
+
+    print("  > Selecting core-ISL hotspot background flows from baseline paths...")
+    snapshots = _compute_baseline_snapshots(run, sample_count)
+    sampled_timestamps = [time_ns for time_ns, _ in snapshots]
+
+    focus_edges_by_time = {}
+    focus_conflict_sats_by_time = {}
+    focus_middle_edges_by_pair = {
+        (run["src_node_id"], run["dst_node_id"]): set(),
+        (run["dst_node_id"], run["src_node_id"]): set(),
+    }
+    focus_middle_edges_union = set()
+    for time_ns, fstate in snapshots:
+        path_a = get_path(run["src_node_id"], run["dst_node_id"], fstate)
+        path_b = get_path(run["dst_node_id"], run["src_node_id"], fstate)
+        path_a_middle = _satellite_middle_edges(path_a)
+        path_b_middle = _satellite_middle_edges(path_b)
+        focus_edges = path_a_middle | path_b_middle
+        focus_edges_by_time[time_ns] = focus_edges
+        focus_conflict_sats_by_time[time_ns] = (
+            _first_last_sats(path_a) | _first_last_sats(path_b)
+        )
+        focus_middle_edges_by_pair[(run["src_node_id"], run["dst_node_id"])].update(
+            path_a_middle
+        )
+        focus_middle_edges_by_pair[(run["dst_node_id"], run["src_node_id"])].update(
+            path_b_middle
+        )
+        focus_middle_edges_union.update(focus_edges)
+
+    candidates = []
+    focus_endpoint_set = {run["src_node_id"], run["dst_node_id"]}
+    for src in endpoint_node_ids:
+        for dst in endpoint_node_ids:
+            if src == dst or src in focus_endpoint_set or dst in focus_endpoint_set:
+                continue
+
+            reachable_samples = 0
+            samples_with_overlap = 0
+            middle_isl_overlap_score = 0
+            first_hop_conflict = False
+            last_hop_conflict = False
+            shared_edges = set()
+            candidate_middle_edges = set()
+            reachable_timestamps = []
+
+            for time_ns, fstate in snapshots:
+                path = get_path(src, dst, fstate)
+                if path is None or len(path) < 4:
+                    continue
+                reachable_samples += 1
+                reachable_timestamps.append(time_ns)
+
+                focus_conflict_sats = focus_conflict_sats_by_time[time_ns]
+                if _first_sat(path) in focus_conflict_sats:
+                    first_hop_conflict = True
+                if _last_sat(path) in focus_conflict_sats:
+                    last_hop_conflict = True
+
+                middle_edges = _satellite_middle_edges(path)
+                overlap_edges = middle_edges & focus_edges_by_time[time_ns]
+                if overlap_edges:
+                    samples_with_overlap += 1
+                middle_isl_overlap_score += len(overlap_edges)
+                shared_edges.update(overlap_edges)
+                candidate_middle_edges.update(middle_edges)
+
+            path_stability_score = reachable_samples + samples_with_overlap
+            candidates.append({
+                "src": src,
+                "dst": dst,
+                "reachable_samples": reachable_samples,
+                "samples_with_overlap": samples_with_overlap,
+                "sampled_timestamps": list(sampled_timestamps),
+                "reachable_timestamps": reachable_timestamps,
+                "middle_isl_overlap_score": middle_isl_overlap_score,
+                "path_stability_score": path_stability_score,
+                "first_hop_conflict": first_hop_conflict,
+                "last_hop_conflict": last_hop_conflict,
+                "edge_conflict": first_hop_conflict or last_hop_conflict,
+                "shared_edges": shared_edges,
+                "candidate_middle_edges": candidate_middle_edges,
+                "focus_middle_edges_count": len(focus_middle_edges_union),
+                "candidate_middle_edges_count": len(candidate_middle_edges),
+                "selected": False,
+                "selection_rank": "",
+                "selection_phase": "",
+                "selection_score": "",
+                "corridor_concentration_score": 0,
+            })
+
+    return {
+        "sampled_timestamps": sampled_timestamps,
+        "focus_middle_edges_union": focus_middle_edges_union,
+        "focus_middle_edges_by_pair": focus_middle_edges_by_pair,
+        "candidates": candidates,
+    }
+
+
+def _candidate_corridor_concentration_score(candidate, selected_edge_counts):
+    return sum(selected_edge_counts[edge] for edge in candidate["shared_edges"])
+
+
+def _candidate_selection_score(candidate, selected_edge_counts):
+    corridor_score = _candidate_corridor_concentration_score(
+        candidate,
+        selected_edge_counts,
+    )
+    return (
+        float(candidate["middle_isl_overlap_score"])
+        + float(corridor_score)
+        + 0.1 * float(candidate["path_stability_score"])
+    )
+
+
+def _max_endpoint_count_allows(current_count, max_count):
+    return max_count == 0 or current_count < max_count
+
+
+def _candidate_feasible_for_phase(
+    candidate,
+    phase,
+    per_flow_rate,
+    src_load_mbps,
+    dst_load_mbps,
+    background_src_counts,
+    background_dst_counts,
+    max_background_flows_per_src,
+    max_background_flows_per_dst,
+):
+    if phase["avoid_edge_conflict"] and candidate["edge_conflict"]:
+        return False
+    if phase["require_reachable"] and candidate["reachable_samples"] <= 0:
+        return False
+    if phase["require_overlap"] and candidate["middle_isl_overlap_score"] <= 0:
+        return False
+
+    if phase["enforce_endpoint_flow_limits"]:
+        if not _max_endpoint_count_allows(
+            background_src_counts[candidate["src"]],
+            max_background_flows_per_src,
+        ):
+            return False
+        if not _max_endpoint_count_allows(
+            background_dst_counts[candidate["dst"]],
+            max_background_flows_per_dst,
+        ):
+            return False
+
+    endpoint_cap_mbps = phase["endpoint_cap_mbps"]
+    if endpoint_cap_mbps is not None:
+        epsilon = 1e-9
+        if src_load_mbps[candidate["src"]] + per_flow_rate > endpoint_cap_mbps + epsilon:
+            return False
+        if dst_load_mbps[candidate["dst"]] + per_flow_rate > endpoint_cap_mbps + epsilon:
+            return False
+
+    return True
+
+
+def _select_core_isl_hotspot_candidates(run, context):
+    target_count = run["background_flow_count"]
+    if target_count <= 0:
+        return [], []
+
+    expected_pair_count = len(_generate_focus_only_pairs(run)) + target_count
+    per_flow_rate = compute_per_flow_rate_mbps(run, expected_pair_count)
+    gsl_capacity_mbps = run["data_rate_megabit_per_s"]
+    endpoint_cap_mbps = run["endpoint_load_cap_ratio"] * gsl_capacity_mbps
+    max_per_src = run["max_background_flows_per_src"]
+    max_per_dst = run["max_background_flows_per_dst"]
+
+    src_load_mbps = defaultdict(float)
+    dst_load_mbps = defaultdict(float)
+    for pair in _generate_focus_only_pairs(run):
+        src_load_mbps[pair["src"]] += per_flow_rate
+        dst_load_mbps[pair["dst"]] += per_flow_rate
+
+    phases = [
+        {
+            "name": "strict",
+            "require_reachable": True,
+            "require_overlap": True,
+            "avoid_edge_conflict": True,
+            "enforce_endpoint_flow_limits": True,
+            "endpoint_cap_mbps": endpoint_cap_mbps,
+        },
+        {
+            "name": "fallback_relax_endpoint_flow_limits",
+            "require_reachable": True,
+            "require_overlap": True,
+            "avoid_edge_conflict": True,
+            "enforce_endpoint_flow_limits": False,
+            "endpoint_cap_mbps": endpoint_cap_mbps,
+        },
+        {
+            "name": "fallback_allow_zero_overlap",
+            "require_reachable": True,
+            "require_overlap": False,
+            "avoid_edge_conflict": True,
+            "enforce_endpoint_flow_limits": False,
+            "endpoint_cap_mbps": endpoint_cap_mbps,
+        },
+    ]
+    if endpoint_cap_mbps < gsl_capacity_mbps:
+        phases.append({
+            "name": "fallback_endpoint_cap_to_gsl_capacity",
+            "require_reachable": True,
+            "require_overlap": False,
+            "avoid_edge_conflict": True,
+            "enforce_endpoint_flow_limits": False,
+            "endpoint_cap_mbps": gsl_capacity_mbps,
+        })
+    phases.append({
+        "name": "fallback_endpoint_cap_exceeded",
+        "require_reachable": True,
+        "require_overlap": False,
+        "avoid_edge_conflict": True,
+        "enforce_endpoint_flow_limits": False,
+        "endpoint_cap_mbps": None,
+    })
+
+    selected = []
+    selected_pairs = set()
+    selected_edge_counts = defaultdict(int)
+    background_src_counts = defaultdict(int)
+    background_dst_counts = defaultdict(int)
+    warnings = []
+
+    for phase in phases:
+        while len(selected) < target_count:
+            feasible = []
+            for candidate in context["candidates"]:
+                pair = (candidate["src"], candidate["dst"])
+                if pair in selected_pairs:
+                    continue
+                if not _candidate_feasible_for_phase(
+                    candidate,
+                    phase,
+                    per_flow_rate,
+                    src_load_mbps,
+                    dst_load_mbps,
+                    background_src_counts,
+                    background_dst_counts,
+                    max_per_src,
+                    max_per_dst,
+                ):
+                    continue
+                corridor_score = _candidate_corridor_concentration_score(
+                    candidate,
+                    selected_edge_counts,
+                )
+                score = _candidate_selection_score(candidate, selected_edge_counts)
+                feasible.append((
+                    -score,
+                    -candidate["middle_isl_overlap_score"],
+                    -corridor_score,
+                    -candidate["samples_with_overlap"],
+                    -candidate["reachable_samples"],
+                    candidate["src"],
+                    candidate["dst"],
+                    candidate,
+                    score,
+                    corridor_score,
+                ))
+
+            if not feasible:
+                break
+
+            feasible.sort()
+            chosen = feasible[0][7]
+            score = feasible[0][8]
+            corridor_score = feasible[0][9]
+            chosen["selected"] = True
+            chosen["selection_rank"] = len(selected) + 1
+            chosen["selection_phase"] = phase["name"]
+            chosen["selection_score"] = score
+            chosen["corridor_concentration_score"] = corridor_score
+
+            selected.append(chosen)
+            selected_pairs.add((chosen["src"], chosen["dst"]))
+            background_src_counts[chosen["src"]] += 1
+            background_dst_counts[chosen["dst"]] += 1
+            src_load_mbps[chosen["src"]] += per_flow_rate
+            dst_load_mbps[chosen["dst"]] += per_flow_rate
+            for edge in chosen["shared_edges"]:
+                selected_edge_counts[edge] += 1
+
+        if len(selected) >= target_count:
+            break
+
+    if len(selected) < target_count:
+        warnings.append(
+            "Only %d/%d non-edge-conflicting background candidates could be selected."
+            % (len(selected), target_count)
+        )
+    fallback_phases = sorted(
+        set(
+            candidate["selection_phase"]
+            for candidate in selected
+            if candidate["selection_phase"] != "strict"
+        )
+    )
+    for phase_name in fallback_phases:
+        warnings.append("Selection used fallback phase: %s" % phase_name)
+
+    return selected, warnings
+
+
+def _core_isl_candidate_reject_reason(candidate, run, final_src_load, final_dst_load):
+    if candidate["selected"]:
+        if candidate["selection_phase"] == "strict":
+            return "selected"
+        return "selected_%s" % candidate["selection_phase"]
+    if candidate["edge_conflict"]:
+        return "edge_conflict"
+    if candidate["reachable_samples"] <= 0:
+        return "unreachable"
+    if candidate["middle_isl_overlap_score"] <= 0:
+        return "zero_middle_isl_overlap"
+
+    max_per_src = run["max_background_flows_per_src"]
+    max_per_dst = run["max_background_flows_per_dst"]
+    selected_src_count = sum(
+        1
+        for value in final_src_load.get("_selected_background_srcs", [])
+        if value == candidate["src"]
+    )
+    selected_dst_count = sum(
+        1
+        for value in final_dst_load.get("_selected_background_dsts", [])
+        if value == candidate["dst"]
+    )
+    if max_per_src > 0 and selected_src_count >= max_per_src:
+        return "max_background_flows_per_src"
+    if max_per_dst > 0 and selected_dst_count >= max_per_dst:
+        return "max_background_flows_per_dst"
+
+    per_flow_rate = final_src_load["_per_flow_rate"]
+    endpoint_cap_mbps = run["endpoint_load_cap_ratio"] * run["data_rate_megabit_per_s"]
+    if final_src_load[candidate["src"]] + per_flow_rate > endpoint_cap_mbps + 1e-9:
+        return "src_endpoint_load_cap"
+    if final_dst_load[candidate["dst"]] + per_flow_rate > endpoint_cap_mbps + 1e-9:
+        return "dst_endpoint_load_cap"
+    return "not_selected_lower_score"
+
+
+def _build_core_isl_diagnostics(run, context, selected, warnings, pairs):
+    per_flow_rate = compute_per_flow_rate_mbps(run, len(pairs))
+    gsl_capacity_mbps = run["data_rate_megabit_per_s"]
+    endpoint_cap_mbps = run["endpoint_load_cap_ratio"] * gsl_capacity_mbps
+
+    flow_ids = {
+        (pair["src"], pair["dst"]): idx
+        for idx, pair in enumerate(pairs)
+    }
+    selected_background_srcs = [
+        candidate["src"]
+        for candidate in selected
+    ]
+    selected_background_dsts = [
+        candidate["dst"]
+        for candidate in selected
+    ]
+
+    final_src_load = defaultdict(float)
+    final_dst_load = defaultdict(float)
+    final_src_flow_ids = defaultdict(list)
+    final_dst_flow_ids = defaultdict(list)
+    for idx, pair in enumerate(pairs):
+        final_src_load[pair["src"]] += per_flow_rate
+        final_dst_load[pair["dst"]] += per_flow_rate
+        final_src_flow_ids[pair["src"]].append(idx)
+        final_dst_flow_ids[pair["dst"]].append(idx)
+
+    reject_src_load = defaultdict(float, final_src_load)
+    reject_dst_load = defaultdict(float, final_dst_load)
+    reject_src_load["_per_flow_rate"] = per_flow_rate
+    reject_dst_load["_per_flow_rate"] = per_flow_rate
+    reject_src_load["_selected_background_srcs"] = selected_background_srcs
+    reject_dst_load["_selected_background_dsts"] = selected_background_dsts
+
+    selection_rows = []
+    for pair in pairs[:2]:
+        src = pair["src"]
+        dst = pair["dst"]
+        selection_rows.append({
+            "flow_id": flow_ids[(src, dst)],
+            "src": src,
+            "dst": dst,
+            "flow_class": "focus",
+            "selected": "true",
+            "selection_rank": 0,
+            "selection_phase": "focus",
+            "middle_isl_overlap_score": "",
+            "reachable_samples": len(context["sampled_timestamps"]),
+            "sampled_timestamps": _format_timestamps(context["sampled_timestamps"]),
+            "first_hop_conflict": "false",
+            "last_hop_conflict": "false",
+            "src_endpoint_load_mbps_after_selection": final_src_load[src],
+            "dst_endpoint_load_mbps_after_selection": final_dst_load[dst],
+            "src_endpoint_load_ratio": final_src_load[src] / gsl_capacity_mbps,
+            "dst_endpoint_load_ratio": final_dst_load[dst] / gsl_capacity_mbps,
+            "candidate_reject_reason": "selected_focus",
+            "corridor_concentration_score": "",
+            "path_stability_score": "",
+            "selection_score": "",
+        })
+
+    for candidate in sorted(
+        context["candidates"],
+        key=lambda item: (
+            not item["selected"],
+            item["selection_rank"] if item["selection_rank"] != "" else 10**9,
+            -item["middle_isl_overlap_score"],
+            item["src"],
+            item["dst"],
+        ),
+    ):
+        src = candidate["src"]
+        dst = candidate["dst"]
+        selected_flag = bool(candidate["selected"])
+        projected_src_load = final_src_load[src]
+        projected_dst_load = final_dst_load[dst]
+        if not selected_flag:
+            projected_src_load += per_flow_rate
+            projected_dst_load += per_flow_rate
+        selection_rows.append({
+            "flow_id": flow_ids.get((src, dst), ""),
+            "src": src,
+            "dst": dst,
+            "flow_class": "background",
+            "selected": _format_bool(selected_flag),
+            "selection_rank": candidate["selection_rank"],
+            "selection_phase": candidate["selection_phase"],
+            "middle_isl_overlap_score": candidate["middle_isl_overlap_score"],
+            "reachable_samples": candidate["reachable_samples"],
+            "sampled_timestamps": _format_timestamps(candidate["sampled_timestamps"]),
+            "first_hop_conflict": _format_bool(candidate["first_hop_conflict"]),
+            "last_hop_conflict": _format_bool(candidate["last_hop_conflict"]),
+            "src_endpoint_load_mbps_after_selection": projected_src_load,
+            "dst_endpoint_load_mbps_after_selection": projected_dst_load,
+            "src_endpoint_load_ratio": projected_src_load / gsl_capacity_mbps,
+            "dst_endpoint_load_ratio": projected_dst_load / gsl_capacity_mbps,
+            "candidate_reject_reason": _core_isl_candidate_reject_reason(
+                candidate,
+                run,
+                reject_src_load,
+                reject_dst_load,
+            ),
+            "corridor_concentration_score": candidate[
+                "corridor_concentration_score"
+            ],
+            "path_stability_score": candidate["path_stability_score"],
+            "selection_score": candidate["selection_score"],
+        })
+
+    overlap_rows = []
+    for candidate in sorted(
+        context["candidates"],
+        key=lambda item: (
+            not item["selected"],
+            item["selection_rank"] if item["selection_rank"] != "" else 10**9,
+            -item["middle_isl_overlap_score"],
+            item["src"],
+            item["dst"],
+        ),
+    ):
+        overlap_rows.append({
+            "src": candidate["src"],
+            "dst": candidate["dst"],
+            "selected": _format_bool(candidate["selected"]),
+            "selection_rank": candidate["selection_rank"],
+            "overlap_edges_count": len(candidate["shared_edges"]),
+            "overlap_score": candidate["middle_isl_overlap_score"],
+            "sampled_timestamp_count": candidate["reachable_samples"],
+            "focus_middle_edges_count": candidate["focus_middle_edges_count"],
+            "candidate_middle_edges_count": candidate["candidate_middle_edges_count"],
+            "shared_edges": _format_edges(candidate["shared_edges"]),
+        })
+
+    gsl_rows = []
+    endpoint_keys = sorted(set(final_src_flow_ids.keys()) | set(final_dst_flow_ids.keys()))
+    for endpoint in endpoint_keys:
+        for direction, load_map, flow_map in [
+            ("src", final_src_load, final_src_flow_ids),
+            ("dst", final_dst_load, final_dst_flow_ids),
+        ]:
+            flow_ids_for_endpoint = flow_map.get(endpoint, [])
+            if not flow_ids_for_endpoint:
+                continue
+            total_load = load_map[endpoint]
+            gsl_rows.append({
+                "endpoint_node": endpoint,
+                "direction": direction,
+                "flow_count": len(flow_ids_for_endpoint),
+                "total_offered_rate_mbps": total_load,
+                "gsl_capacity_mbps": gsl_capacity_mbps,
+                "load_ratio": total_load / gsl_capacity_mbps,
+                "over_capacity": _format_bool(total_load > gsl_capacity_mbps + 1e-9),
+                "endpoint_load_cap_ratio": run["endpoint_load_cap_ratio"],
+                "endpoint_load_cap_mbps": endpoint_cap_mbps,
+                "over_endpoint_load_cap": _format_bool(
+                    total_load > endpoint_cap_mbps + 1e-9
+                ),
+                "selected_flow_ids": ";".join(str(value) for value in flow_ids_for_endpoint),
+            })
+
+    selected_candidates_by_pair = {
+        (candidate["src"], candidate["dst"]): candidate
+        for candidate in selected
+    }
+    edge_flow_ids = defaultdict(set)
+    for pair in pairs:
+        pair_key = (pair["src"], pair["dst"])
+        flow_id = flow_ids[pair_key]
+        if pair["class"] == "focus":
+            flow_edges = context["focus_middle_edges_by_pair"].get(pair_key, set())
+        else:
+            flow_edges = selected_candidates_by_pair[pair_key]["candidate_middle_edges"]
+        for edge in flow_edges:
+            edge_flow_ids[edge].add(flow_id)
+
+    corridor_rows = []
+    all_edges = set(edge_flow_ids.keys()) | set(context["focus_middle_edges_union"])
+    for edge in sorted(all_edges):
+        flow_ids_for_edge = sorted(edge_flow_ids.get(edge, set()))
+        estimated_load = per_flow_rate * len(flow_ids_for_edge)
+        corridor_rows.append({
+            "edge_from": edge[0],
+            "edge_to": edge[1],
+            "selected_flow_count": len(flow_ids_for_edge),
+            "estimated_offered_rate_mbps": estimated_load,
+            "isl_capacity_mbps": gsl_capacity_mbps,
+            "load_ratio": estimated_load / gsl_capacity_mbps,
+            "on_focus_middle_corridor": _format_bool(
+                edge in context["focus_middle_edges_union"]
+            ),
+            "selected_flow_ids": ";".join(str(value) for value in flow_ids_for_edge),
+        })
+    corridor_rows.sort(
+        key=lambda row: (
+            row["on_focus_middle_corridor"] != "true",
+            -row["estimated_offered_rate_mbps"],
+            row["edge_from"],
+            row["edge_to"],
+        )
+    )
+
+    return {
+        "flow_selection_diagnostics.csv": selection_rows,
+        "corridor_overlap_summary.csv": overlap_rows,
+        "gsl_load_by_endpoint.csv": gsl_rows,
+        "isl_corridor_load_summary.csv": corridor_rows,
+        "warnings": warnings,
+    }
+
+
+def _generate_core_isl_hotspot_pairs(run, sample_count):
+    context = _evaluate_core_isl_hotspot_candidates(run, sample_count)
+    selected, warnings = _select_core_isl_hotspot_candidates(run, context)
+    pairs = _generate_focus_only_pairs(run)
+    for candidate in selected:
+        pairs.append({
+            "src": candidate["src"],
+            "dst": candidate["dst"],
+            "class": "background",
+            "score": candidate["middle_isl_overlap_score"],
+            "selection_phase": candidate["selection_phase"],
+            "corridor_concentration_score": candidate[
+                "corridor_concentration_score"
+            ],
+            "path_stability_score": candidate["path_stability_score"],
+        })
+    diagnostics = _build_core_isl_diagnostics(run, context, selected, warnings, pairs)
+    return pairs, diagnostics
+
+
+def generate_pairs_and_diagnostics(run, hotspot_sample_count):
     if run["traffic_mode"] == "focus_only":
-        return _generate_focus_only_pairs(run)
+        return _generate_focus_only_pairs(run), None
     if run["traffic_mode"] == "core_hotspot_specific":
-        return _generate_core_hotspot_pairs(run, hotspot_sample_count)
+        return _generate_core_hotspot_pairs(run, hotspot_sample_count), None
+    if run["traffic_mode"] == "core_isl_hotspot_specific":
+        return _generate_core_isl_hotspot_pairs(run, hotspot_sample_count)
     if run["traffic_mode"] == "random_general":
-        return _generate_random_general_pairs(run)
+        return _generate_random_general_pairs(run), None
     raise ValueError("Unknown traffic mode: %s" % run["traffic_mode"])
+
+
+def generate_pairs(run, hotspot_sample_count):
+    pairs, _ = generate_pairs_and_diagnostics(run, hotspot_sample_count)
+    return pairs
 
 
 def compute_per_flow_rate_mbps(run, pair_count):
@@ -396,6 +1016,7 @@ def write_run_metadata(run_dir, run, pairs, per_flow_rate):
         "notes": [
             "UDP/PDR experiment generated outside paper/lohi_replication/traffic_matrix.",
             "core_hotspot_specific uses baseline shortest-path middle-ISL overlap heuristic.",
+            "core_isl_hotspot_specific adds endpoint load caps and per-endpoint spread constraints before selecting middle-ISL-overlapping background flows.",
             "UDP packets are generated only until traffic_stop_time_s; NS-3 continues until simulation_end_time_s to drain in-flight packets.",
         ],
     }
@@ -403,6 +1024,91 @@ def write_run_metadata(run_dir, run, pairs, per_flow_rate):
         os.path.join(run_dir, "run_metadata.json"),
         json.dumps(metadata, indent=2, sort_keys=True),
     )
+
+
+def _write_csv(path, rows, fieldnames):
+    with open(path, "w", newline="") as f_out:
+        writer = csv.DictWriter(f_out, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def write_selection_diagnostics(run_parent_dir, diagnostics):
+    if diagnostics is None:
+        return []
+    os.makedirs(run_parent_dir, exist_ok=True)
+    written = []
+    schemas = {
+        "flow_selection_diagnostics.csv": [
+            "flow_id",
+            "src",
+            "dst",
+            "flow_class",
+            "selected",
+            "selection_rank",
+            "selection_phase",
+            "middle_isl_overlap_score",
+            "reachable_samples",
+            "sampled_timestamps",
+            "first_hop_conflict",
+            "last_hop_conflict",
+            "src_endpoint_load_mbps_after_selection",
+            "dst_endpoint_load_mbps_after_selection",
+            "src_endpoint_load_ratio",
+            "dst_endpoint_load_ratio",
+            "candidate_reject_reason",
+            "corridor_concentration_score",
+            "path_stability_score",
+            "selection_score",
+        ],
+        "corridor_overlap_summary.csv": [
+            "src",
+            "dst",
+            "selected",
+            "selection_rank",
+            "overlap_edges_count",
+            "overlap_score",
+            "sampled_timestamp_count",
+            "focus_middle_edges_count",
+            "candidate_middle_edges_count",
+            "shared_edges",
+        ],
+        "gsl_load_by_endpoint.csv": [
+            "endpoint_node",
+            "direction",
+            "flow_count",
+            "total_offered_rate_mbps",
+            "gsl_capacity_mbps",
+            "load_ratio",
+            "over_capacity",
+            "endpoint_load_cap_ratio",
+            "endpoint_load_cap_mbps",
+            "over_endpoint_load_cap",
+            "selected_flow_ids",
+        ],
+        "isl_corridor_load_summary.csv": [
+            "edge_from",
+            "edge_to",
+            "selected_flow_count",
+            "estimated_offered_rate_mbps",
+            "isl_capacity_mbps",
+            "load_ratio",
+            "on_focus_middle_corridor",
+            "selected_flow_ids",
+        ],
+    }
+    for filename in SELECTION_DIAGNOSTIC_FILENAMES:
+        path = os.path.join(run_parent_dir, filename)
+        _write_csv(path, diagnostics.get(filename, []), schemas[filename])
+        written.append(path)
+    warnings = diagnostics.get("warnings", [])
+    if warnings:
+        _write_text(
+            os.path.join(run_parent_dir, "flow_selection_warnings.txt"),
+            "\n".join(warnings) + "\n",
+        )
+    return written
 
 
 def prepare_run_dir(run_dir, force):
@@ -448,11 +1154,16 @@ def main():
         args.queue_size_pkt,
         args.background_flow_count,
         args.random_flow_count,
+        args.endpoint_load_cap_ratio,
+        args.max_background_flows_per_dst,
+        args.max_background_flows_per_src,
     )
 
     generated_pairs_by_run_name = {}
+    diagnostics_written_run_names = set()
     for run in runs:
         run_dir = os.path.join("runs", run["name"], run["dynamic_state_algorithm"])
+        run_parent_dir = os.path.join("runs", run["name"])
         print("\nPlanned run: %s" % run_dir)
         print(
             "  simulation_end=%.6fs, traffic_stop=%.6fs, drain=%.6fs"
@@ -462,8 +1173,6 @@ def main():
                 run["drain_time_s"],
             )
         )
-        if args.dry_run:
-            continue
 
         pair_key = (
             run["name"],
@@ -473,15 +1182,50 @@ def main():
             run["traffic_stop_time_ns"],
             run["background_flow_count"],
             run["random_flow_count"],
+            run["endpoint_load_cap_ratio"],
+            run["max_background_flows_per_dst"],
+            run["max_background_flows_per_src"],
         )
         if pair_key not in generated_pairs_by_run_name:
-            generated_pairs_by_run_name[pair_key] = generate_pairs(
+            generated_pairs_by_run_name[pair_key] = generate_pairs_and_diagnostics(
                 run,
                 args.hotspot_sample_count,
             )
-        pairs = generated_pairs_by_run_name[pair_key]
+        pairs, diagnostics = generated_pairs_by_run_name[pair_key]
+
+        if args.dry_run:
+            per_flow_rate = compute_per_flow_rate_mbps(run, len(pairs))
+            print(
+                "  dry-run selection: %d flows, %.6f Mbps/flow"
+                % (len(pairs), per_flow_rate)
+            )
+            for idx, pair in enumerate(pairs):
+                print(
+                    "    flow %d: %s -> %s class=%s score=%s"
+                    % (
+                        idx,
+                        pair["src"],
+                        pair["dst"],
+                        pair["class"],
+                        pair.get("score", ""),
+                    )
+                )
+            if diagnostics is not None:
+                print(
+                    "  dry-run diagnostics would write: %s"
+                    % ", ".join(SELECTION_DIAGNOSTIC_FILENAMES)
+                )
+            continue
 
         prepare_run_dir(run_dir, args.force)
+        if diagnostics is not None and run["name"] not in diagnostics_written_run_names:
+            written = write_selection_diagnostics(run_parent_dir, diagnostics)
+            diagnostics_written_run_names.add(run["name"])
+            if written:
+                print(
+                    "  > Wrote selection diagnostics under %s"
+                    % run_parent_dir
+                )
         udp_logging_ids = list(range(min(run["packet_trace_flow_count"], len(pairs))))
         _write_text(
             os.path.join(run_dir, "config_ns3.properties"),

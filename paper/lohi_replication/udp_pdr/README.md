@@ -63,6 +63,27 @@ shortest-path overlap heuristic. The selector prefers background pairs whose
 paths overlap the focus pair's middle ISL corridor while avoiding the focus
 first-hop and last-hop satellites.
 
+`core_isl_hotspot_specific`
+
+Runs the same two focus flows plus background UDP flows selected for a cleaner
+ISL-bottleneck scenario. It starts from the `core_hotspot_specific`
+middle-ISL overlap idea, but adds endpoint load controls so selected background
+flows do not all terminate at the same ground-station endpoint. By default it
+uses:
+
+```text
+endpoint_load_cap_ratio = 0.8
+max_background_flows_per_dst = 1
+max_background_flows_per_src = 1
+hotspot_sample_count = 3
+```
+
+This keeps source and destination offered load below the configured GSL
+capacity target while still selecting flows that share the baseline focus
+middle-ISL corridor. The goal is to make baseline shortest-path routing stress
+the ISL corridor, while leaving adaptive algorithms room to reroute around ISL
+congestion rather than simply moving the bottleneck to a destination GSL.
+
 `random_general`
 
 Runs focus flows plus random endpoint traffic. This is intended for robustness
@@ -174,11 +195,61 @@ Small syntax/smoke generation check without running NS-3:
 
 ```bash
 python step_1_generate_runs.py \
-  --traffic-mode focus_only \
-  --load-level smoke \
-  --simulation-end-time-s 1 \
-  --algorithms algorithm_free_one_only_over_isls \
+  --traffic-mode core_isl_hotspot_specific \
+  --load-level 1.2 \
+  --simulation-end-time-s 10 \
+  --traffic-stop-time-s 8 \
+  --background-flow-count 4 \
+  --algorithms algorithm_free_one_only_over_isls algorithm_queue_aware_over_isls algorithm_lohi algorithm_lhtr \
+  --endpoint-load-cap-ratio 0.8 \
+  --max-background-flows-per-dst 1 \
+  --max-background-flows-per-src 1 \
   --dry-run
+```
+
+Generate a short 10 s smoke run without launching NS-3:
+
+```bash
+python step_1_generate_runs.py \
+  --traffic-mode core_isl_hotspot_specific \
+  --load-level 1.2 \
+  --simulation-end-time-s 10 \
+  --traffic-stop-time-s 8 \
+  --background-flow-count 4 \
+  --algorithms algorithm_free_one_only_over_isls algorithm_queue_aware_over_isls algorithm_lohi algorithm_lhtr \
+  --force
+```
+
+Then run and analyze that smoke case:
+
+```bash
+python step_2_run.py \
+  --traffic-mode core_isl_hotspot_specific \
+  --load-level 1.2 \
+  --simulation-end-time-s 10 \
+  --traffic-stop-time-s 8 \
+  --background-flow-count 4 \
+  --algorithms algorithm_free_one_only_over_isls algorithm_queue_aware_over_isls algorithm_lohi algorithm_lhtr
+
+python step_3_generate_plots.py \
+  --traffic-mode core_isl_hotspot_specific \
+  --load-level 1.2 \
+  --simulation-end-time-s 10 \
+  --traffic-stop-time-s 8 \
+  --background-flow-count 4 \
+  --algorithms algorithm_free_one_only_over_isls algorithm_queue_aware_over_isls algorithm_lohi algorithm_lhtr
+```
+
+For 60 s validation after the 10 s smoke succeeds:
+
+```bash
+ALGS="algorithm_free_one_only_over_isls algorithm_queue_aware_over_isls algorithm_lohi algorithm_lhtr"
+
+for load in 1.2 1.4 1.6; do
+  python step_1_generate_runs.py --traffic-mode core_isl_hotspot_specific --load-level "$load" --simulation-end-time-s 60 --traffic-stop-time-s 58 --background-flow-count 4 --algorithms $ALGS --force
+  python step_2_run.py            --traffic-mode core_isl_hotspot_specific --load-level "$load" --simulation-end-time-s 60 --traffic-stop-time-s 58 --background-flow-count 4 --algorithms $ALGS
+  python step_3_generate_plots.py --traffic-mode core_isl_hotspot_specific --load-level "$load" --simulation-end-time-s 60 --traffic-stop-time-s 58 --background-flow-count 4 --algorithms $ALGS
+done
 ```
 
 Backward-compatible no-drain runs can omit `--traffic-stop-time-s`, or set it
@@ -241,6 +312,26 @@ runs/<run_name>/comparison_packet_delivery/gsl_queue_summary.csv
 runs/<run_name>/comparison_packet_delivery/loss_attribution_summary.csv
 runs/<run_name>/comparison_packet_delivery/max_queue_occupancy_by_algorithm.csv
 ```
+
+For `core_isl_hotspot_specific`, step 1 also writes flow-selection diagnostics
+under the parent run folder, and step 3 copies them into
+`comparison_packet_delivery/` when present:
+
+```text
+runs/<run_name>/flow_selection_diagnostics.csv
+runs/<run_name>/corridor_overlap_summary.csv
+runs/<run_name>/gsl_load_by_endpoint.csv
+runs/<run_name>/isl_corridor_load_summary.csv
+```
+
+Use `gsl_load_by_endpoint.csv` to verify selected source and destination
+offered load stays below the endpoint cap/GSL capacity. Use
+`corridor_overlap_summary.csv` and `isl_corridor_load_summary.csv` to check
+that selected background flows still overlap the focus middle-ISL corridor and
+that the estimated offered load on that corridor approaches or exceeds ISL
+capacity. `flow_selection_diagnostics.csv` records selected and rejected
+candidates, including edge-conflict flags, endpoint load ratios, selection
+rank, and fallback phase if strict constraints were relaxed.
 
 Basic plots:
 

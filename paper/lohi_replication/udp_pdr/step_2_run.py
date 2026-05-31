@@ -108,6 +108,9 @@ def main():
         args.queue_size_pkt,
         args.background_flow_count,
         args.random_flow_count,
+        args.endpoint_load_cap_ratio,
+        args.max_background_flows_per_dst,
+        args.max_background_flows_per_src,
     ):
         run_dir = os.path.join("runs", run["name"], run["dynamic_state_algorithm"])
         validate_run_dir(run_dir)

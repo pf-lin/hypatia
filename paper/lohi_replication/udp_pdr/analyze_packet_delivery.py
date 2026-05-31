@@ -2,6 +2,7 @@ import csv
 import json
 import math
 import os
+import shutil
 import sys
 from itertools import combinations
 
@@ -131,6 +132,13 @@ PHYSICAL_DROP_TRACE_COVERAGE = (
     "double-counting queue overflow"
 )
 
+SELECTION_DIAGNOSTIC_FILENAMES = [
+    "flow_selection_diagnostics.csv",
+    "corridor_overlap_summary.csv",
+    "gsl_load_by_endpoint.csv",
+    "isl_corridor_load_summary.csv",
+]
+
 
 def run_timing_fields(run):
     return {
@@ -179,6 +187,25 @@ def load_run_metadata(algorithm_run_dir):
         return {}
     with open(path) as f_in:
         return json.load(f_in)
+
+
+def copy_selection_diagnostics(run, comparison_dir):
+    run_dir = os.path.join("runs", run["name"])
+    copied = []
+    for filename in SELECTION_DIAGNOSTIC_FILENAMES:
+        src = os.path.join(run_dir, filename)
+        if not os.path.exists(src):
+            continue
+        dst = os.path.join(comparison_dir, filename)
+        shutil.copyfile(src, dst)
+        copied.append(dst)
+    warnings_src = os.path.join(run_dir, "flow_selection_warnings.txt")
+    if os.path.exists(warnings_src):
+        shutil.copyfile(
+            warnings_src,
+            os.path.join(comparison_dir, "flow_selection_warnings.txt"),
+        )
+    return copied
 
 
 def to_float_or_none(value):
@@ -1152,6 +1179,9 @@ def write_statistics(
 def analyze_run(run, algorithms):
     comparison_dir = os.path.join("runs", run["name"], "comparison_packet_delivery")
     os.makedirs(comparison_dir, exist_ok=True)
+    copied_diagnostics = copy_selection_diagnostics(run, comparison_dir)
+    if copied_diagnostics:
+        print("  > Copied flow-selection diagnostics into %s" % comparison_dir)
 
     per_flow_frames = []
     summary_rows = []
@@ -1350,6 +1380,9 @@ def main():
         args.queue_size_pkt,
         args.background_flow_count,
         args.random_flow_count,
+        args.endpoint_load_cap_ratio,
+        args.max_background_flows_per_dst,
+        args.max_background_flows_per_src,
     )
 
     seen_run_names = set()

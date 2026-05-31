@@ -26,6 +26,9 @@ focus_dst_node_id = 793
 default_background_flow_count = 10
 default_random_flow_count = 20
 default_packet_trace_flow_count = 2
+default_endpoint_load_cap_ratio = 0.8
+default_max_background_flows_per_dst = 1
+default_max_background_flows_per_src = 1
 
 # Link/load defaults
 data_rate_megabit_per_s = 10.0
@@ -44,7 +47,12 @@ default_algorithms = [
     "algorithm_lhtr",
 ]
 
-traffic_modes = ["focus_only", "core_hotspot_specific", "random_general"]
+traffic_modes = [
+    "focus_only",
+    "core_hotspot_specific",
+    "core_isl_hotspot_specific",
+    "random_general",
+]
 traffic_mode_selections = traffic_modes + ["all"]
 default_traffic_mode_selection = "core_hotspot_specific"
 
@@ -129,7 +137,7 @@ def add_traffic_mode_argument(parser):
         default=None,
         help=(
             "Traffic mode to use: focus_only, core_hotspot_specific, "
-            "random_general, or all. Default: %s"
+            "core_isl_hotspot_specific, random_general, or all. Default: %s"
         ) % default_traffic_mode_selection,
     )
 
@@ -187,13 +195,44 @@ def add_runtime_override_arguments(parser):
         "--background-flow-count",
         type=int,
         default=None,
-        help="Override number of background flows for core_hotspot_specific.",
+        help=(
+            "Override number of background flows for core_hotspot_specific "
+            "and core_isl_hotspot_specific."
+        ),
     )
     parser.add_argument(
         "--random-flow-count",
         type=int,
         default=None,
         help="Override number of flows for random_general.",
+    )
+    parser.add_argument(
+        "--endpoint-load-cap-ratio",
+        type=float,
+        default=None,
+        help=(
+            "Maximum selected source/destination endpoint offered load as a "
+            "fraction of GSL capacity for core_isl_hotspot_specific. "
+            "Default: %.2f"
+        ) % default_endpoint_load_cap_ratio,
+    )
+    parser.add_argument(
+        "--max-background-flows-per-dst",
+        type=int,
+        default=None,
+        help=(
+            "Maximum selected background flows per destination for "
+            "core_isl_hotspot_specific. Use 0 to disable. Default: %d"
+        ) % default_max_background_flows_per_dst,
+    )
+    parser.add_argument(
+        "--max-background-flows-per-src",
+        type=int,
+        default=None,
+        help=(
+            "Maximum selected background flows per source for "
+            "core_isl_hotspot_specific. Use 0 to disable. Default: %d"
+        ) % default_max_background_flows_per_src,
     )
 
 
@@ -233,6 +272,9 @@ def get_udp_pdr_run_list(
     queue_size_pkt_override=None,
     background_flow_count_override=None,
     random_flow_count_override=None,
+    endpoint_load_cap_ratio_override=None,
+    max_background_flows_per_dst_override=None,
+    max_background_flows_per_src_override=None,
 ):
     load_levels = parse_load_levels(load_levels)
     algorithms = normalize_algorithms(algorithms)
@@ -266,6 +308,21 @@ def get_udp_pdr_run_list(
         if random_flow_count_override is None
         else int(random_flow_count_override)
     )
+    endpoint_load_cap_ratio = (
+        default_endpoint_load_cap_ratio
+        if endpoint_load_cap_ratio_override is None
+        else float(endpoint_load_cap_ratio_override)
+    )
+    max_background_flows_per_dst = (
+        default_max_background_flows_per_dst
+        if max_background_flows_per_dst_override is None
+        else int(max_background_flows_per_dst_override)
+    )
+    max_background_flows_per_src = (
+        default_max_background_flows_per_src
+        if max_background_flows_per_src_override is None
+        else int(max_background_flows_per_src_override)
+    )
 
     if sim_end_s <= 0:
         raise ValueError("simulation_end_time_s must be positive")
@@ -284,6 +341,12 @@ def get_udp_pdr_run_list(
         raise ValueError("background_flow_count must be non-negative")
     if random_flow_count <= 0:
         raise ValueError("random_flow_count must be positive")
+    if endpoint_load_cap_ratio <= 0:
+        raise ValueError("endpoint_load_cap_ratio must be positive")
+    if max_background_flows_per_dst < 0:
+        raise ValueError("max_background_flows_per_dst must be non-negative")
+    if max_background_flows_per_src < 0:
+        raise ValueError("max_background_flows_per_src must be non-negative")
 
     sim_end_ns = seconds_to_ns(sim_end_s)
     traffic_stop_ns = seconds_to_ns(traffic_stop_s)
@@ -320,6 +383,9 @@ def get_udp_pdr_run_list(
                     "load_level": float(load_level),
                     "background_flow_count": background_flow_count,
                     "random_flow_count": random_flow_count,
+                    "endpoint_load_cap_ratio": endpoint_load_cap_ratio,
+                    "max_background_flows_per_dst": max_background_flows_per_dst,
+                    "max_background_flows_per_src": max_background_flows_per_src,
                     "enable_isl_utilization_tracking": enable_isl_utilization_tracking,
                     "isl_utilization_tracking_interval_ns": isl_utilization_tracking_interval_ns,
                     "enable_link_queue_tracking": enable_link_queue_tracking,
