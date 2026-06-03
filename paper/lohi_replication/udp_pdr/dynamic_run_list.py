@@ -23,7 +23,9 @@ endpoint_node_ids = list(range(720, 820))
 # Traffic defaults
 focus_src_node_id = 738
 focus_dst_node_id = 793
-default_background_flow_count = 10
+default_background_flow_count = 4
+default_background_flow_count_sweep = [4, 8, 16, 32, 64]
+default_per_flow_rate_reference_background_flow_count = 4
 default_random_flow_count = 20
 default_packet_trace_flow_count = 2
 default_endpoint_load_cap_ratio = 0.8
@@ -53,6 +55,10 @@ traffic_modes = [
     "core_isl_hotspot_specific",
     "random_general",
 ]
+background_flow_traffic_modes = {
+    "core_hotspot_specific",
+    "core_isl_hotspot_specific",
+}
 traffic_mode_selections = traffic_modes + ["all"]
 default_traffic_mode_selection = "core_hotspot_specific"
 
@@ -104,6 +110,33 @@ def parse_load_levels(values):
         if key not in seen:
             deduped.append(item)
             seen.add(key)
+    return deduped
+
+
+def parse_background_flow_counts(values):
+    if values is None:
+        return [default_background_flow_count]
+    if isinstance(values, int):
+        values = [values]
+    elif isinstance(values, str):
+        values = [values]
+
+    result = []
+    for value in values:
+        if str(value).lower() == "sweep":
+            result.extend(default_background_flow_count_sweep)
+            continue
+        count = int(value)
+        if count < 0:
+            raise ValueError("Background flow count must be non-negative: %s" % value)
+        result.append(count)
+
+    deduped = []
+    seen = set()
+    for item in result:
+        if item not in seen:
+            deduped.append(item)
+            seen.add(item)
     return deduped
 
 
@@ -193,12 +226,24 @@ def add_runtime_override_arguments(parser):
     )
     parser.add_argument(
         "--background-flow-count",
+        nargs="+",
+        default=None,
+        help=(
+            "One or more background-flow counts for core_hotspot_specific "
+            "and core_isl_hotspot_specific. Use 'sweep' for %s. Default: %d"
+        ) % (
+            default_background_flow_count_sweep,
+            default_background_flow_count,
+        ),
+    )
+    parser.add_argument(
+        "--per-flow-rate-reference-background-flow-count",
         type=int,
         default=None,
         help=(
-            "Override number of background flows for core_hotspot_specific "
-            "and core_isl_hotspot_specific."
-        ),
+            "Background-flow count used to compute the fixed per-flow UDP "
+            "rate in background-flow sweeps. Default: %d"
+        ) % default_per_flow_rate_reference_background_flow_count,
     )
     parser.add_argument(
         "--random-flow-count",
@@ -255,10 +300,14 @@ def describe_selection(args):
     return selected_traffic_mode, selected_traffic_modes, selected_load_levels, selected_algorithms
 
 
-def run_name_for(traffic_mode, load_level):
-    return "run_%s_load_%s_oneweb_isls_moving_udp_pdr" % (
+def run_name_for(traffic_mode, load_level, background_flow_count=None):
+    bg_tag = ""
+    if background_flow_count is not None:
+        bg_tag = "_bg_flow_count_%d" % int(background_flow_count)
+    return "run_%s_load_%s%s_oneweb_isls_moving_udp_pdr" % (
         traffic_mode,
         load_level_to_tag(load_level),
+        bg_tag,
     )
 
 
@@ -275,6 +324,7 @@ def get_udp_pdr_run_list(
     endpoint_load_cap_ratio_override=None,
     max_background_flows_per_dst_override=None,
     max_background_flows_per_src_override=None,
+    per_flow_rate_reference_background_flow_count_override=None,
 ):
     load_levels = parse_load_levels(load_levels)
     algorithms = normalize_algorithms(algorithms)
@@ -298,15 +348,16 @@ def get_udp_pdr_run_list(
         if queue_size_pkt_override is None
         else int(queue_size_pkt_override)
     )
-    background_flow_count = (
-        default_background_flow_count
-        if background_flow_count_override is None
-        else int(background_flow_count_override)
-    )
+    background_flow_counts = parse_background_flow_counts(background_flow_count_override)
     random_flow_count = (
         default_random_flow_count
         if random_flow_count_override is None
         else int(random_flow_count_override)
+    )
+    per_flow_rate_reference_background_flow_count = (
+        default_per_flow_rate_reference_background_flow_count
+        if per_flow_rate_reference_background_flow_count_override is None
+        else int(per_flow_rate_reference_background_flow_count_override)
     )
     endpoint_load_cap_ratio = (
         default_endpoint_load_cap_ratio
@@ -337,10 +388,12 @@ def get_udp_pdr_run_list(
         raise ValueError("dynamic_state_update_interval_ms must be positive")
     if queue_pkts <= 0:
         raise ValueError("queue_size_pkt must be positive")
-    if background_flow_count < 0:
-        raise ValueError("background_flow_count must be non-negative")
     if random_flow_count <= 0:
         raise ValueError("random_flow_count must be positive")
+    if per_flow_rate_reference_background_flow_count < 0:
+        raise ValueError(
+            "per_flow_rate_reference_background_flow_count must be non-negative"
+        )
     if endpoint_load_cap_ratio <= 0:
         raise ValueError("endpoint_load_cap_ratio must be positive")
     if max_background_flows_per_dst < 0:
@@ -361,39 +414,57 @@ def get_udp_pdr_run_list(
 
     run_list = []
     for traffic_mode in get_traffic_modes(selected_mode):
-        for load_level in load_levels:
-            for algorithm in algorithms:
-                run_list.append({
-                    "name": run_name_for(traffic_mode, load_level),
-                    "traffic_mode": traffic_mode,
-                    "movement": "moving",
-                    "satellite_network": full_satellite_network_isls,
-                    "dynamic_state": "dynamic_state",
-                    "dynamic_state_algorithm": algorithm,
-                    "dynamic_state_update_interval_ns": int(update_ms * 1000 * 1000),
-                    "simulation_end_time_ns": sim_end_ns,
-                    "simulation_end_time_s": sim_end_s,
-                    "traffic_stop_time_ns": traffic_stop_ns,
-                    "traffic_stop_time_s": traffic_stop_s,
-                    "drain_time_ns": drain_time_ns,
-                    "drain_time_s": drain_time_s,
-                    "drain_time_enabled": drain_time_ns > 0,
-                    "data_rate_megabit_per_s": data_rate_megabit_per_s,
-                    "queue_size_pkt": queue_pkts,
-                    "load_level": float(load_level),
-                    "background_flow_count": background_flow_count,
-                    "random_flow_count": random_flow_count,
-                    "endpoint_load_cap_ratio": endpoint_load_cap_ratio,
-                    "max_background_flows_per_dst": max_background_flows_per_dst,
-                    "max_background_flows_per_src": max_background_flows_per_src,
-                    "enable_isl_utilization_tracking": enable_isl_utilization_tracking,
-                    "isl_utilization_tracking_interval_ns": isl_utilization_tracking_interval_ns,
-                    "enable_link_queue_tracking": enable_link_queue_tracking,
-                    "enable_physical_link_drop_tracking": enable_physical_link_drop_tracking,
-                    "src_node_id": focus_src_node_id,
-                    "dst_node_id": focus_dst_node_id,
-                    "packet_trace_flow_count": default_packet_trace_flow_count,
-                })
+        mode_background_flow_counts = (
+            background_flow_counts
+            if traffic_mode in background_flow_traffic_modes
+            else [background_flow_counts[0]]
+        )
+        for background_flow_count in mode_background_flow_counts:
+            name_background_flow_count = (
+                background_flow_count
+                if traffic_mode in background_flow_traffic_modes
+                else None
+            )
+            for load_level in load_levels:
+                for algorithm in algorithms:
+                    run_list.append({
+                        "name": run_name_for(
+                            traffic_mode,
+                            load_level,
+                            name_background_flow_count,
+                        ),
+                        "traffic_mode": traffic_mode,
+                        "movement": "moving",
+                        "satellite_network": full_satellite_network_isls,
+                        "dynamic_state": "dynamic_state",
+                        "dynamic_state_algorithm": algorithm,
+                        "dynamic_state_update_interval_ns": int(update_ms * 1000 * 1000),
+                        "simulation_end_time_ns": sim_end_ns,
+                        "simulation_end_time_s": sim_end_s,
+                        "traffic_stop_time_ns": traffic_stop_ns,
+                        "traffic_stop_time_s": traffic_stop_s,
+                        "drain_time_ns": drain_time_ns,
+                        "drain_time_s": drain_time_s,
+                        "drain_time_enabled": drain_time_ns > 0,
+                        "data_rate_megabit_per_s": data_rate_megabit_per_s,
+                        "queue_size_pkt": queue_pkts,
+                        "load_level": float(load_level),
+                        "background_flow_count": background_flow_count,
+                        "per_flow_rate_reference_background_flow_count": (
+                            per_flow_rate_reference_background_flow_count
+                        ),
+                        "random_flow_count": random_flow_count,
+                        "endpoint_load_cap_ratio": endpoint_load_cap_ratio,
+                        "max_background_flows_per_dst": max_background_flows_per_dst,
+                        "max_background_flows_per_src": max_background_flows_per_src,
+                        "enable_isl_utilization_tracking": enable_isl_utilization_tracking,
+                        "isl_utilization_tracking_interval_ns": isl_utilization_tracking_interval_ns,
+                        "enable_link_queue_tracking": enable_link_queue_tracking,
+                        "enable_physical_link_drop_tracking": enable_physical_link_drop_tracking,
+                        "src_node_id": focus_src_node_id,
+                        "dst_node_id": focus_dst_node_id,
+                        "packet_trace_flow_count": default_packet_trace_flow_count,
+                    })
     return run_list
 
 

@@ -33,6 +33,7 @@ UDP_FLOW_COLUMNS = [
 
 AFFECTED_FLOW_COLUMNS = [
     "load_level",
+    "background_flow_count",
     "algorithm",
     "flow_id",
     "src",
@@ -53,10 +54,11 @@ AFFECTED_FLOW_COLUMNS = [
 
 DESTINATION_LOSS_COLUMNS = [
     "load_level",
+    "background_flow_count",
     "algorithm",
     "dst",
     "flow_count",
-    "background_flow_count",
+    "destination_background_flow_count",
     "focus_flow_count",
     "total_sent_packets",
     "total_received_packets",
@@ -467,6 +469,10 @@ def summarize_algorithm(run, algorithm, flows):
         "run_name": run["name"],
         "traffic_mode": run["traffic_mode"],
         "load_level": run["load_level"],
+        "background_flow_count": run["background_flow_count"],
+        "per_flow_rate_reference_background_flow_count": run[
+            "per_flow_rate_reference_background_flow_count"
+        ],
         "algorithm": algorithm,
     }
     summary.update(run_timing_fields(run))
@@ -483,6 +489,13 @@ def summarize_algorithm(run, algorithm, flows):
         "total_received_bytes": total_received_bytes,
         "offered_rate_mbps": float(flows["offered_rate_mbps"].sum()),
         "received_rate_mbps": float(flows["received_rate_mbps"].sum()),
+        "per_flow_target_rate_mbps": (
+            float(flows["target_rate_mbps"].iloc[0]) if len(flows) else 0.0
+        ),
+        "total_target_rate_mbps": float(flows["target_rate_mbps"].sum()),
+        "background_target_rate_mbps": float(
+            flows[flows["flow_class"] == "background"]["target_rate_mbps"].sum()
+        ),
         "mean_flow_pdr": float(pdr_values.mean()) if len(pdr_values) else 0.0,
         "median_flow_pdr": float(pdr_values.median()) if len(pdr_values) else 0.0,
         "p5_flow_pdr": float(pdr_values.quantile(0.05)) if len(pdr_values) else 0.0,
@@ -741,7 +754,8 @@ def build_top_loss_flows(affected_df, top_k=TOP_LOSS_FLOW_COUNT):
 
 def build_destination_loss_summary(per_flow_df, gsl_capacity_by_algorithm):
     rows = []
-    for (load_level, algorithm, dst), group in per_flow_df.groupby(["load_level", "algorithm", "dst"]):
+    group_columns = ["load_level", "background_flow_count", "algorithm", "dst"]
+    for (load_level, background_flow_count, algorithm, dst), group in per_flow_df.groupby(group_columns):
         total_sent_packets = int(group["sent_packets"].sum())
         total_received_packets = int(group["received_packets"].sum())
         total_lost_packets = int(group["lost_packets"].sum())
@@ -770,10 +784,13 @@ def build_destination_loss_summary(per_flow_df, gsl_capacity_by_algorithm):
             observed_gap = math.nan
         rows.append({
             "load_level": load_level,
+            "background_flow_count": int(background_flow_count),
             "algorithm": algorithm,
             "dst": int(dst),
             "flow_count": int(len(group)),
-            "background_flow_count": int((group["flow_class"] == "background").sum()),
+            "destination_background_flow_count": int(
+                (group["flow_class"] == "background").sum()
+            ),
             "focus_flow_count": int((group["flow_class"] == "focus").sum()),
             "total_sent_packets": total_sent_packets,
             "total_received_packets": total_received_packets,
@@ -791,7 +808,7 @@ def build_destination_loss_summary(per_flow_df, gsl_capacity_by_algorithm):
         return pd.DataFrame(columns=DESTINATION_LOSS_COLUMNS)
     return (
         pd.DataFrame(rows, columns=DESTINATION_LOSS_COLUMNS)
-        .sort_values(["load_level", "algorithm", "dst"])
+        .sort_values(["load_level", "background_flow_count", "algorithm", "dst"])
         .reset_index(drop=True)
     )
 
@@ -1076,6 +1093,11 @@ def write_statistics(
             "drain_time_enabled = %s\n"
             % ("true" if run["drain_time_enabled"] else "false")
         )
+        f_out.write("background_flow_count = %d\n" % run["background_flow_count"])
+        f_out.write(
+            "per_flow_rate_reference_background_flow_count = %d\n"
+            % run["per_flow_rate_reference_background_flow_count"]
+        )
         f_out.write(
             "PDR definition: packets received by simulation end divided by "
             "packets sent during the active traffic interval.\n\n"
@@ -1121,6 +1143,8 @@ def write_statistics(
             f_out.write("algorithm: %s\n" % row["algorithm"])
             for key in [
                 "flow_count",
+                "background_flow_count",
+                "per_flow_rate_reference_background_flow_count",
                 "simulation_end_time_s",
                 "traffic_stop_time_s",
                 "drain_time_s",
@@ -1135,6 +1159,9 @@ def write_statistics(
                 "total_received_bytes",
                 "offered_rate_mbps",
                 "received_rate_mbps",
+                "per_flow_target_rate_mbps",
+                "total_target_rate_mbps",
+                "background_target_rate_mbps",
                 "mean_flow_pdr",
                 "median_flow_pdr",
                 "p5_flow_pdr",
@@ -1222,6 +1249,12 @@ def analyze_run(run, algorithms):
         print("  > Wrote %s" % udp_flows_path)
 
         flows.insert(0, "algorithm", algorithm)
+        flows.insert(0, "background_flow_count", run["background_flow_count"])
+        flows.insert(
+            0,
+            "per_flow_rate_reference_background_flow_count",
+            run["per_flow_rate_reference_background_flow_count"],
+        )
         flows.insert(0, "load_level", run["load_level"])
         flows.insert(0, "traffic_mode", run["traffic_mode"])
         flows.insert(0, "run_name", run["name"])
@@ -1236,6 +1269,8 @@ def analyze_run(run, algorithms):
         if len(focus):
             focus_rows.append(focus[[
                 "run_name",
+                "background_flow_count",
+                "per_flow_rate_reference_background_flow_count",
                 "algorithm",
                 "flow_id",
                 "simulation_end_time_s",
@@ -1383,6 +1418,7 @@ def main():
         args.endpoint_load_cap_ratio,
         args.max_background_flows_per_dst,
         args.max_background_flows_per_src,
+        args.per_flow_rate_reference_background_flow_count,
     )
 
     seen_run_names = set()

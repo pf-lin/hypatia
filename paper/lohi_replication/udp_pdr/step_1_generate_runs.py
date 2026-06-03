@@ -13,6 +13,7 @@ os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
 sys.path.append(os.path.join(os.path.dirname(__file__)))
 from dynamic_run_list import (
     add_force_and_dry_run_arguments,
+    background_flow_traffic_modes,
     build_arg_parser,
     describe_selection,
     endpoint_node_ids,
@@ -904,6 +905,10 @@ def _build_core_isl_diagnostics(run, context, selected, warnings, pairs):
             row["edge_to"],
         )
     )
+    for rows in [selection_rows, overlap_rows, gsl_rows, corridor_rows]:
+        for row in rows:
+            row["background_flow_count"] = run["background_flow_count"]
+            row["per_flow_rate_mbps"] = per_flow_rate
 
     return {
         "flow_selection_diagnostics.csv": selection_rows,
@@ -955,7 +960,24 @@ def compute_per_flow_rate_mbps(run, pair_count):
     if pair_count <= 0:
         raise ValueError("Cannot compute rate for zero flows")
     aggregate_rate = run["load_level"] * run["data_rate_megabit_per_s"]
-    return aggregate_rate / float(pair_count)
+    reference_pair_count = pair_count
+    if run["traffic_mode"] in background_flow_traffic_modes:
+        reference_pair_count = (
+            len(_generate_focus_only_pairs(run))
+            + int(run["per_flow_rate_reference_background_flow_count"])
+        )
+    if reference_pair_count <= 0:
+        raise ValueError("Cannot compute rate for zero reference flows")
+    return aggregate_rate / float(reference_pair_count)
+
+
+def compute_reference_pair_count_for_per_flow_rate(run, pair_count):
+    if run["traffic_mode"] in background_flow_traffic_modes:
+        return (
+            len(_generate_focus_only_pairs(run))
+            + int(run["per_flow_rate_reference_background_flow_count"])
+        )
+    return pair_count
 
 
 def write_udp_schedule(run_dir, run, pairs):
@@ -974,6 +996,10 @@ def write_udp_schedule(run_dir, run, pairs):
                 "class=%s" % pair["class"],
                 "traffic_mode=%s" % run["traffic_mode"],
                 "load_level=%.3f" % run["load_level"],
+                "background_flow_count=%d" % run["background_flow_count"],
+                "per_flow_rate_mbps=%.10f" % per_flow_rate,
+                "per_flow_rate_reference_background_flow_count=%d"
+                % run["per_flow_rate_reference_background_flow_count"],
                 "traffic_stop_time_ns=%d" % run["traffic_stop_time_ns"],
                 "drain_time_ns=%d" % run["drain_time_ns"],
             ]
@@ -999,12 +1025,28 @@ def write_run_metadata(run_dir, run, pairs, per_flow_rate):
     by_class = defaultdict(int)
     for pair in pairs:
         by_class[pair["class"]] += 1
+    reference_pair_count = compute_reference_pair_count_for_per_flow_rate(
+        run,
+        len(pairs),
+    )
+    scheduled_total_rate = per_flow_rate * len(pairs)
     metadata = {
         "run": run,
         "flow_count": len(pairs),
         "flow_count_by_class": dict(by_class),
         "per_flow_rate_mbps": per_flow_rate,
-        "aggregate_offered_rate_mbps": per_flow_rate * len(pairs),
+        "per_flow_rate_reference_background_flow_count": run[
+            "per_flow_rate_reference_background_flow_count"
+        ],
+        "reference_flow_count_for_per_flow_rate": reference_pair_count,
+        "reference_aggregate_offered_rate_mbps": (
+            run["load_level"] * run["data_rate_megabit_per_s"]
+        ),
+        "aggregate_offered_rate_mbps": scheduled_total_rate,
+        "background_offered_rate_mbps": (
+            per_flow_rate * by_class.get("background", 0)
+        ),
+        "focus_offered_rate_mbps": per_flow_rate * by_class.get("focus", 0),
         "simulation_end_time_s": run["simulation_end_time_s"],
         "traffic_stop_time_s": run["traffic_stop_time_s"],
         "drain_time_s": run["drain_time_s"],
@@ -1017,12 +1059,70 @@ def write_run_metadata(run_dir, run, pairs, per_flow_rate):
             "UDP/PDR experiment generated outside paper/lohi_replication/traffic_matrix.",
             "core_hotspot_specific uses baseline shortest-path middle-ISL overlap heuristic.",
             "core_isl_hotspot_specific adds endpoint load caps and per-endpoint spread constraints before selecting middle-ISL-overlapping background flows.",
+            "In background-flow sweeps, per-flow rate is computed from the configured reference background-flow count, not from the current background-flow count.",
             "UDP packets are generated only until traffic_stop_time_s; NS-3 continues until simulation_end_time_s to drain in-flight packets.",
         ],
     }
     _write_text(
         os.path.join(run_dir, "run_metadata.json"),
         json.dumps(metadata, indent=2, sort_keys=True),
+    )
+
+
+def write_schedule_summary(run_parent_dir, run, pairs, per_flow_rate):
+    by_class = defaultdict(int)
+    for pair in pairs:
+        by_class[pair["class"]] += 1
+    reference_pair_count = compute_reference_pair_count_for_per_flow_rate(
+        run,
+        len(pairs),
+    )
+    traffic_duration_s = (
+        run["traffic_stop_time_ns"] / 1e9
+        if run["traffic_stop_time_ns"] is not None
+        else 0.0
+    )
+    rows = [{
+        "run_name": run["name"],
+        "traffic_mode": run["traffic_mode"],
+        "load_level": run["load_level"],
+        "background_flow_count": run["background_flow_count"],
+        "generated_background_flow_count": by_class.get("background", 0),
+        "focus_flow_count": by_class.get("focus", 0),
+        "total_flow_count": len(pairs),
+        "per_flow_rate_mbps": per_flow_rate,
+        "per_flow_rate_reference_background_flow_count": run[
+            "per_flow_rate_reference_background_flow_count"
+        ],
+        "reference_flow_count_for_per_flow_rate": reference_pair_count,
+        "reference_aggregate_offered_rate_mbps": (
+            run["load_level"] * run["data_rate_megabit_per_s"]
+        ),
+        "total_offered_rate_mbps": per_flow_rate * len(pairs),
+        "background_offered_rate_mbps": per_flow_rate * by_class.get("background", 0),
+        "focus_offered_rate_mbps": per_flow_rate * by_class.get("focus", 0),
+        "traffic_duration_s": traffic_duration_s,
+    }]
+    _write_csv(
+        os.path.join(run_parent_dir, "schedule_summary.csv"),
+        rows,
+        [
+            "run_name",
+            "traffic_mode",
+            "load_level",
+            "background_flow_count",
+            "generated_background_flow_count",
+            "focus_flow_count",
+            "total_flow_count",
+            "per_flow_rate_mbps",
+            "per_flow_rate_reference_background_flow_count",
+            "reference_flow_count_for_per_flow_rate",
+            "reference_aggregate_offered_rate_mbps",
+            "total_offered_rate_mbps",
+            "background_offered_rate_mbps",
+            "focus_offered_rate_mbps",
+            "traffic_duration_s",
+        ],
     )
 
 
@@ -1041,6 +1141,8 @@ def write_selection_diagnostics(run_parent_dir, diagnostics):
     written = []
     schemas = {
         "flow_selection_diagnostics.csv": [
+            "background_flow_count",
+            "per_flow_rate_mbps",
             "flow_id",
             "src",
             "dst",
@@ -1063,6 +1165,8 @@ def write_selection_diagnostics(run_parent_dir, diagnostics):
             "selection_score",
         ],
         "corridor_overlap_summary.csv": [
+            "background_flow_count",
+            "per_flow_rate_mbps",
             "src",
             "dst",
             "selected",
@@ -1075,6 +1179,8 @@ def write_selection_diagnostics(run_parent_dir, diagnostics):
             "shared_edges",
         ],
         "gsl_load_by_endpoint.csv": [
+            "background_flow_count",
+            "per_flow_rate_mbps",
             "endpoint_node",
             "direction",
             "flow_count",
@@ -1088,6 +1194,8 @@ def write_selection_diagnostics(run_parent_dir, diagnostics):
             "selected_flow_ids",
         ],
         "isl_corridor_load_summary.csv": [
+            "background_flow_count",
+            "per_flow_rate_mbps",
             "edge_from",
             "edge_to",
             "selected_flow_count",
@@ -1157,10 +1265,12 @@ def main():
         args.endpoint_load_cap_ratio,
         args.max_background_flows_per_dst,
         args.max_background_flows_per_src,
+        args.per_flow_rate_reference_background_flow_count,
     )
 
     generated_pairs_by_run_name = {}
     diagnostics_written_run_names = set()
+    schedule_summary_written_run_names = set()
     for run in runs:
         run_dir = os.path.join("runs", run["name"], run["dynamic_state_algorithm"])
         run_parent_dir = os.path.join("runs", run["name"])
@@ -1196,8 +1306,12 @@ def main():
         if args.dry_run:
             per_flow_rate = compute_per_flow_rate_mbps(run, len(pairs))
             print(
-                "  dry-run selection: %d flows, %.6f Mbps/flow"
-                % (len(pairs), per_flow_rate)
+                "  dry-run selection: %d flows, %.6f Mbps/flow (reference bg flows=%d)"
+                % (
+                    len(pairs),
+                    per_flow_rate,
+                    run["per_flow_rate_reference_background_flow_count"],
+                )
             )
             for idx, pair in enumerate(pairs):
                 print(
@@ -1233,6 +1347,9 @@ def main():
         )
         schedule_path, per_flow_rate = write_udp_schedule(run_dir, run, pairs)
         write_run_metadata(run_dir, run, pairs, per_flow_rate)
+        if run["name"] not in schedule_summary_written_run_names:
+            write_schedule_summary(run_parent_dir, run, pairs, per_flow_rate)
+            schedule_summary_written_run_names.add(run["name"])
         print(
             "Generated run: %s (%d flows, %.6f Mbps/flow, schedule=%s)"
             % (run_dir, len(pairs), per_flow_rate, schedule_path)

@@ -111,6 +111,7 @@ def main():
         args.endpoint_load_cap_ratio,
         args.max_background_flows_per_dst,
         args.max_background_flows_per_src,
+        args.per_flow_rate_reference_background_flow_count,
     ):
         run_dir = os.path.join("runs", run["name"], run["dynamic_state_algorithm"])
         validate_run_dir(run_dir)

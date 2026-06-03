@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib-udp-pdr")
@@ -51,6 +52,28 @@ def _timing_title(base_title, df):
     traffic_stop_time_s = float(df["traffic_stop_time_s"].iloc[0])
     drain_time_s = float(df["drain_time_s"].iloc[0])
     return "%s (stop %.3gs, drain %.3gs)" % (base_title, traffic_stop_time_s, drain_time_s)
+
+
+def _background_flow_count_tag(df):
+    if "background_flow_count" not in df.columns or len(df) == 0:
+        return None
+    values = sorted(set(int(value) for value in df["background_flow_count"].dropna()))
+    if len(values) != 1:
+        return None
+    return "bg_flow_count_%d" % values[0]
+
+
+def _copy_plots_with_background_flow_suffix(comparison_dir, df):
+    tag = _background_flow_count_tag(df)
+    if tag is None:
+        return
+    for filename in sorted(os.listdir(comparison_dir)):
+        if not filename.endswith(".png") or tag in filename:
+            continue
+        src = os.path.join(comparison_dir, filename)
+        base, ext = os.path.splitext(filename)
+        dst = os.path.join(comparison_dir, "%s_%s%s" % (base, tag, ext))
+        shutil.copyfile(src, dst)
 
 
 def _write_deprecated_link_drop_heatmap_notice(comparison_dir):
@@ -333,6 +356,7 @@ def plot_single_run(comparison_dir):
                 )
             plt.close()
 
+    _copy_plots_with_background_flow_suffix(comparison_dir, summary)
     print("  > Wrote plots under %s" % comparison_dir)
 
 
@@ -355,14 +379,25 @@ def plot_across_loads(runs_root, run_names):
     output_dir = os.path.join(runs_root, "comparison_packet_delivery_across_loads")
     os.makedirs(output_dir, exist_ok=True)
     plt.figure(figsize=(8, 5))
-    for algorithm, group in df.groupby("algorithm"):
+    label_columns = ["algorithm"]
+    if "background_flow_count" in df.columns and df["background_flow_count"].nunique() > 1:
+        label_columns = ["algorithm", "background_flow_count"]
+    for label_values, group in df.groupby(label_columns):
+        if not isinstance(label_values, tuple):
+            label_values = (label_values,)
+        algorithm = label_values[0]
+        bg_suffix = (
+            " bg=%s" % label_values[1]
+            if len(label_values) > 1
+            else ""
+        )
         group = group.sort_values("load_level")
         plt.plot(
             group["load_level"],
             group["aggregate_pdr"],
             marker="o",
             linewidth=2,
-            label=_short_label(algorithm),
+            label="%s%s" % (_short_label(algorithm), bg_suffix),
         )
     plt.xlabel("Offered load multiplier")
     plt.ylabel("Aggregate PDR")
@@ -374,6 +409,76 @@ def plot_across_loads(runs_root, run_names):
     plt.savefig(os.path.join(output_dir, "offered_load_vs_pdr.png"), dpi=180)
     plt.close()
     print("  > Wrote cross-load plot under %s" % output_dir)
+
+
+def plot_across_background_flow_counts(runs_root, run_names):
+    rows = []
+    for run_name in run_names:
+        summary_path = os.path.join(
+            runs_root,
+            run_name,
+            "comparison_packet_delivery",
+            "summary_by_algorithm.csv",
+        )
+        if os.path.exists(summary_path):
+            rows.append(pd.read_csv(summary_path))
+    if len(rows) <= 1:
+        return
+    df = pd.concat(rows, ignore_index=True)
+    if "background_flow_count" not in df.columns or df["background_flow_count"].nunique() <= 1:
+        return
+
+    output_dir = os.path.join(
+        runs_root,
+        "comparison_packet_delivery_across_background_flow_counts",
+    )
+    os.makedirs(output_dir, exist_ok=True)
+    df.to_csv(
+        os.path.join(output_dir, "summary_across_background_flow_counts.csv"),
+        index=False,
+    )
+
+    metrics = [
+        ("aggregate_pdr", "Aggregate PDR", "background_flow_count_vs_pdr.png"),
+        ("total_lost_packets", "Lost packets", "background_flow_count_vs_loss.png"),
+        ("total_sent_packets", "Sent packets", "background_flow_count_vs_sent_packets.png"),
+        ("offered_rate_mbps", "Offered rate (Mbps)", "background_flow_count_vs_offered_rate.png"),
+    ]
+    for metric, ylabel, filename in metrics:
+        if metric not in df.columns:
+            continue
+        plt.figure(figsize=(8, 5))
+        group_columns = ["algorithm"]
+        if df["load_level"].nunique() > 1:
+            group_columns = ["load_level", "algorithm"]
+        for label_values, group in df.groupby(group_columns):
+            if not isinstance(label_values, tuple):
+                label_values = (label_values,)
+            if group_columns[0] == "load_level":
+                load_level, algorithm = label_values
+                label = "load %.3g %s" % (load_level, _short_label(algorithm))
+            else:
+                algorithm = label_values[0]
+                label = _short_label(algorithm)
+            group = group.sort_values("background_flow_count")
+            plt.plot(
+                group["background_flow_count"],
+                group[metric],
+                marker="o",
+                linewidth=2,
+                label=label,
+            )
+        plt.xlabel("Background flow count")
+        plt.ylabel(ylabel)
+        if metric == "aggregate_pdr":
+            plt.ylim(0, 1.01)
+        plt.title(ylabel + " vs Background Flow Count")
+        plt.grid(True, alpha=0.25)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, filename), dpi=180)
+        plt.close()
+    print("  > Wrote cross-background-flow-count plots under %s" % output_dir)
 
 
 def main():
@@ -393,6 +498,7 @@ def main():
         args.endpoint_load_cap_ratio,
         args.max_background_flows_per_dst,
         args.max_background_flows_per_src,
+        args.per_flow_rate_reference_background_flow_count,
     )
     run_names = []
     seen = set()
@@ -404,6 +510,7 @@ def main():
         comparison_dir = os.path.join("runs", run["name"], "comparison_packet_delivery")
         plot_single_run(comparison_dir)
     plot_across_loads("runs", run_names)
+    plot_across_background_flow_counts("runs", run_names)
 
 
 if __name__ == "__main__":

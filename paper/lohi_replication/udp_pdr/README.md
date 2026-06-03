@@ -91,16 +91,28 @@ checks rather than a controlled hotspot.
 
 ## Load Mapping
 
-For a run with `N` UDP flows:
+For `focus_only` and `random_general`, the legacy mapping is still:
 
 ```text
 aggregate_offered_rate_mbps = load_level * isl_data_rate_megabit_per_s
 per_flow_rate_mbps = aggregate_offered_rate_mbps / N
 ```
 
-With the default 10 Mbps links and `load_level=1.0`, all UDP flows together
-offer about 10 Mbps along the selected workload. Higher load levels such as
-`1.4` intentionally push the bottleneck harder.
+For `core_hotspot_specific` and `core_isl_hotspot_specific`, background-flow
+count sweeps keep the per-flow UDP rate fixed. The per-flow rate is computed
+from a reference background-flow count, then reused for every generated
+background-flow count:
+
+```text
+reference_flow_count = 2 focus flows + per_flow_rate_reference_background_flow_count
+per_flow_rate_mbps = load_level * isl_data_rate_megabit_per_s / reference_flow_count
+scheduled_total_offered_rate_mbps = per_flow_rate_mbps * generated_flow_count
+```
+
+The default reference background-flow count is `4`, so `--background-flow-count
+4 8 16 32 64` increases total scheduled traffic while leaving each flow's
+target rate unchanged. The generated run folder includes the count, e.g.
+`run_core_isl_hotspot_specific_load_1p2x_bg_flow_count_16_oneweb_isls_moving_udp_pdr`.
 
 ## Traffic Timing and Drain Time
 
@@ -207,7 +219,8 @@ python step_1_generate_runs.py \
   --dry-run
 ```
 
-Generate a short 10 s smoke run without launching NS-3:
+Generate short 10 s smoke runs for a background-flow-count sweep without
+launching NS-3:
 
 ```bash
 python step_1_generate_runs.py \
@@ -215,7 +228,7 @@ python step_1_generate_runs.py \
   --load-level 1.2 \
   --simulation-end-time-s 10 \
   --traffic-stop-time-s 8 \
-  --background-flow-count 4 \
+  --background-flow-count 4 8 16 \
   --algorithms algorithm_free_one_only_over_isls algorithm_queue_aware_over_isls algorithm_lohi algorithm_lhtr \
   --force
 ```
@@ -246,9 +259,9 @@ For 60 s validation after the 10 s smoke succeeds:
 ALGS="algorithm_free_one_only_over_isls algorithm_queue_aware_over_isls algorithm_lohi algorithm_lhtr"
 
 for load in 1.2 1.4 1.6; do
-  python step_1_generate_runs.py --traffic-mode core_isl_hotspot_specific --load-level "$load" --simulation-end-time-s 60 --traffic-stop-time-s 58 --background-flow-count 4 --algorithms $ALGS --force
-  python step_2_run.py            --traffic-mode core_isl_hotspot_specific --load-level "$load" --simulation-end-time-s 60 --traffic-stop-time-s 58 --background-flow-count 4 --algorithms $ALGS
-  python step_3_generate_plots.py --traffic-mode core_isl_hotspot_specific --load-level "$load" --simulation-end-time-s 60 --traffic-stop-time-s 58 --background-flow-count 4 --algorithms $ALGS
+  python step_1_generate_runs.py --traffic-mode core_isl_hotspot_specific --load-level "$load" --simulation-end-time-s 60 --traffic-stop-time-s 58 --background-flow-count 4 8 16 32 64 --algorithms $ALGS --force
+  python step_2_run.py            --traffic-mode core_isl_hotspot_specific --load-level "$load" --simulation-end-time-s 60 --traffic-stop-time-s 58 --background-flow-count 4 8 16 32 64 --algorithms $ALGS
+  python step_3_generate_plots.py --traffic-mode core_isl_hotspot_specific --load-level "$load" --simulation-end-time-s 60 --traffic-stop-time-s 58 --background-flow-count 4 8 16 32 64 --algorithms $ALGS
 done
 ```
 
@@ -313,6 +326,17 @@ runs/<run_name>/comparison_packet_delivery/loss_attribution_summary.csv
 runs/<run_name>/comparison_packet_delivery/max_queue_occupancy_by_algorithm.csv
 ```
 
+Each run parent also includes:
+
+```text
+runs/<run_name>/schedule_summary.csv
+```
+
+This records `background_flow_count`, generated focus/background flow counts,
+fixed `per_flow_rate_mbps`, and scheduled total/background/focus offered rates.
+Use it to verify that increasing `background_flow_count` does not reduce the
+per-flow UDP target rate.
+
 For `core_isl_hotspot_specific`, step 1 also writes flow-selection diagnostics
 under the parent run folder, and step 3 copies them into
 `comparison_packet_delivery/` when present:
@@ -349,6 +373,15 @@ physical_drop_count_by_algorithm.png
 physical_drop_by_link_type.png
 gsl_queue_occupancy_by_algorithm.png
 loss_attribution_breakdown.png
+```
+
+For single-count runs, plot generation also writes copies with an explicit
+`bg_flow_count_<N>` suffix. When multiple background-flow counts are analyzed
+together, cross-count plots and `summary_across_background_flow_counts.csv`
+are written under:
+
+```text
+runs/comparison_packet_delivery_across_background_flow_counts/
 ```
 
 `affected_flows.csv` lists every flow with synthetic sent-minus-received loss,
