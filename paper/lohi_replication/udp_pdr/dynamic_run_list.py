@@ -31,6 +31,11 @@ default_packet_trace_flow_count = 2
 default_endpoint_load_cap_ratio = 0.8
 default_max_background_flows_per_dst = 1
 default_max_background_flows_per_src = 1
+default_satellite_interface_load_cap_ratio = 0.8
+default_min_middle_isl_overlap_score = 1
+default_min_reachable_overlap_samples = 1
+default_min_overlap_ratio = 0.0
+default_selection_sample_horizon_s = 60.0
 
 # Link/load defaults
 data_rate_megabit_per_s = 10.0
@@ -279,6 +284,63 @@ def add_runtime_override_arguments(parser):
             "core_isl_hotspot_specific. Use 0 to disable. Default: %d"
         ) % default_max_background_flows_per_src,
     )
+    parser.add_argument(
+        "--satellite-interface-load-cap-ratio",
+        type=float,
+        default=None,
+        help=(
+            "Maximum estimated source/destination satellite-interface load "
+            "as a fraction of GSL capacity for core_isl_hotspot_specific. "
+            "Use 0 to disable. Default: %.2f"
+        ) % default_satellite_interface_load_cap_ratio,
+    )
+    parser.add_argument(
+        "--min-middle-isl-overlap-score",
+        type=int,
+        default=None,
+        help=(
+            "Minimum effective directed/undirected middle-ISL corridor overlap "
+            "score required in strict core_isl_hotspot_specific selection. "
+            "Default: %d"
+        ) % default_min_middle_isl_overlap_score,
+    )
+    parser.add_argument(
+        "--min-reachable-overlap-samples",
+        type=int,
+        default=None,
+        help=(
+            "Minimum reachable samples with middle-ISL corridor overlap required "
+            "in strict core_isl_hotspot_specific selection. Default: %d"
+        ) % default_min_reachable_overlap_samples,
+    )
+    parser.add_argument(
+        "--min-overlap-ratio",
+        type=float,
+        default=None,
+        help=(
+            "Minimum effective middle-corridor overlap ratio required in strict "
+            "core_isl_hotspot_specific selection. Default: %.3f"
+        ) % default_min_overlap_ratio,
+    )
+    parser.add_argument(
+        "--selection-sample-horizon-s",
+        type=float,
+        default=None,
+        help=(
+            "Fixed time horizon used to sample baseline paths for "
+            "core_isl_hotspot_specific flow selection. This keeps selected "
+            "flows stable across different simulation durations. Default: %.1f"
+        ) % default_selection_sample_horizon_s,
+    )
+    parser.add_argument(
+        "--selection-sample-times-s",
+        nargs="+",
+        default=None,
+        help=(
+            "Explicit baseline path sample times in seconds for "
+            "core_isl_hotspot_specific. Overrides --selection-sample-horizon-s."
+        ),
+    )
 
 
 def add_common_run_arguments(parser):
@@ -325,6 +387,12 @@ def get_udp_pdr_run_list(
     max_background_flows_per_dst_override=None,
     max_background_flows_per_src_override=None,
     per_flow_rate_reference_background_flow_count_override=None,
+    satellite_interface_load_cap_ratio_override=None,
+    min_middle_isl_overlap_score_override=None,
+    min_reachable_overlap_samples_override=None,
+    min_overlap_ratio_override=None,
+    selection_sample_horizon_s_override=None,
+    selection_sample_times_s_override=None,
 ):
     load_levels = parse_load_levels(load_levels)
     algorithms = normalize_algorithms(algorithms)
@@ -374,6 +442,37 @@ def get_udp_pdr_run_list(
         if max_background_flows_per_src_override is None
         else int(max_background_flows_per_src_override)
     )
+    satellite_interface_load_cap_ratio = (
+        default_satellite_interface_load_cap_ratio
+        if satellite_interface_load_cap_ratio_override is None
+        else float(satellite_interface_load_cap_ratio_override)
+    )
+    min_middle_isl_overlap_score = (
+        default_min_middle_isl_overlap_score
+        if min_middle_isl_overlap_score_override is None
+        else int(min_middle_isl_overlap_score_override)
+    )
+    min_reachable_overlap_samples = (
+        default_min_reachable_overlap_samples
+        if min_reachable_overlap_samples_override is None
+        else int(min_reachable_overlap_samples_override)
+    )
+    min_overlap_ratio = (
+        default_min_overlap_ratio
+        if min_overlap_ratio_override is None
+        else float(min_overlap_ratio_override)
+    )
+    selection_sample_horizon_s = (
+        default_selection_sample_horizon_s
+        if selection_sample_horizon_s_override is None
+        else float(selection_sample_horizon_s_override)
+    )
+    selection_sample_times_s = None
+    if selection_sample_times_s_override is not None:
+        selection_sample_times_s = [
+            float(value)
+            for value in selection_sample_times_s_override
+        ]
 
     if sim_end_s <= 0:
         raise ValueError("simulation_end_time_s must be positive")
@@ -400,6 +499,22 @@ def get_udp_pdr_run_list(
         raise ValueError("max_background_flows_per_dst must be non-negative")
     if max_background_flows_per_src < 0:
         raise ValueError("max_background_flows_per_src must be non-negative")
+    if satellite_interface_load_cap_ratio < 0:
+        raise ValueError("satellite_interface_load_cap_ratio must be non-negative")
+    if min_middle_isl_overlap_score < 0:
+        raise ValueError("min_middle_isl_overlap_score must be non-negative")
+    if min_reachable_overlap_samples < 0:
+        raise ValueError("min_reachable_overlap_samples must be non-negative")
+    if min_overlap_ratio < 0:
+        raise ValueError("min_overlap_ratio must be non-negative")
+    if selection_sample_horizon_s <= 0:
+        raise ValueError("selection_sample_horizon_s must be positive")
+    if selection_sample_times_s is not None:
+        if len(selection_sample_times_s) == 0:
+            raise ValueError("selection_sample_times_s must not be empty")
+        for value in selection_sample_times_s:
+            if value < 0:
+                raise ValueError("selection_sample_times_s must be non-negative")
 
     sim_end_ns = seconds_to_ns(sim_end_s)
     traffic_stop_ns = seconds_to_ns(traffic_stop_s)
@@ -457,6 +572,16 @@ def get_udp_pdr_run_list(
                         "endpoint_load_cap_ratio": endpoint_load_cap_ratio,
                         "max_background_flows_per_dst": max_background_flows_per_dst,
                         "max_background_flows_per_src": max_background_flows_per_src,
+                        "satellite_interface_load_cap_ratio": (
+                            satellite_interface_load_cap_ratio
+                        ),
+                        "min_middle_isl_overlap_score": min_middle_isl_overlap_score,
+                        "min_reachable_overlap_samples": (
+                            min_reachable_overlap_samples
+                        ),
+                        "min_overlap_ratio": min_overlap_ratio,
+                        "selection_sample_horizon_s": selection_sample_horizon_s,
+                        "selection_sample_times_s": selection_sample_times_s,
                         "enable_isl_utilization_tracking": enable_isl_utilization_tracking,
                         "isl_utilization_tracking_interval_ns": isl_utilization_tracking_interval_ns,
                         "enable_link_queue_tracking": enable_link_queue_tracking,

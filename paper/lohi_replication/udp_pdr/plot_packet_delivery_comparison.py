@@ -118,6 +118,15 @@ def plot_single_run(comparison_dir):
     physical_drop_path = os.path.join(comparison_dir, "physical_drop_summary.csv")
     gsl_queue_path = os.path.join(comparison_dir, "gsl_queue_summary.csv")
     loss_attribution_path = os.path.join(comparison_dir, "loss_attribution_summary.csv")
+    corridor_concentration_path = os.path.join(
+        comparison_dir,
+        "corridor_concentration_summary.csv",
+    )
+    satellite_interface_path = os.path.join(
+        comparison_dir,
+        "satellite_interface_load_summary.csv",
+    )
+    fallback_phase_path = os.path.join(comparison_dir, "fallback_phase_summary.csv")
     if not os.path.exists(summary_path) or not os.path.exists(per_flow_path):
         print("Skipping plots; missing analysis outputs in %s" % comparison_dir)
         return
@@ -240,6 +249,68 @@ def plot_single_run(comparison_dir):
                 "Packets",
                 "Loss Attribution Breakdown",
             )
+
+    if os.path.exists(corridor_concentration_path):
+        concentration = pd.read_csv(corridor_concentration_path)
+        if len(concentration):
+            row = concentration.iloc[0]
+            values = [
+                float(row.get("target_corridor_max_load_ratio", 0.0)),
+                float(row.get("top_non_focus_edge_load_ratio", 0.0)),
+            ]
+            labels = ["target max", "top non-focus"]
+            plt.figure(figsize=(6.5, 4.2))
+            plt.bar(labels, values, color=["#1b9e77", "#d95f02"])
+            plt.ylabel("Estimated load / capacity")
+            plt.title("Corridor Concentration")
+            plt.tight_layout()
+            plt.savefig(
+                os.path.join(comparison_dir, "corridor_concentration_summary.png"),
+                dpi=180,
+            )
+            plt.close()
+
+    if os.path.exists(satellite_interface_path):
+        satellite_interface = pd.read_csv(satellite_interface_path)
+        if len(satellite_interface):
+            top = satellite_interface.sort_values(
+                ["load_ratio", "satellite_id"],
+                ascending=[False, True],
+            ).head(12)
+            labels = [
+                "%s %s" % (int(row["satellite_id"]), row["direction"])
+                for _, row in top.iterrows()
+            ]
+            plt.figure(figsize=(9, 4.8))
+            plt.bar(labels, top["load_ratio"].astype(float), color="#4c78a8")
+            plt.ylabel("Estimated load / GSL capacity")
+            plt.xticks(rotation=30, ha="right")
+            plt.title("Top Satellite Interface Proxy Load")
+            plt.tight_layout()
+            plt.savefig(
+                os.path.join(comparison_dir, "satellite_interface_load_summary.png"),
+                dpi=180,
+            )
+            plt.close()
+
+    if os.path.exists(fallback_phase_path):
+        fallback = pd.read_csv(fallback_phase_path)
+        if len(fallback):
+            plt.figure(figsize=(9, 4.8))
+            plt.bar(
+                fallback["phase"],
+                fallback["selected_count"].astype(float),
+                color="#6c5b7b",
+            )
+            plt.ylabel("Selected background flows")
+            plt.xticks(rotation=30, ha="right")
+            plt.title("Flow Selection by Fallback Phase")
+            plt.tight_layout()
+            plt.savefig(
+                os.path.join(comparison_dir, "fallback_phase_summary.png"),
+                dpi=180,
+            )
+            plt.close()
 
     plt.figure(figsize=(7.5, 5))
     for algorithm, group in per_flow.groupby("algorithm"):
@@ -499,6 +570,12 @@ def main():
         args.max_background_flows_per_dst,
         args.max_background_flows_per_src,
         args.per_flow_rate_reference_background_flow_count,
+        args.satellite_interface_load_cap_ratio,
+        args.min_middle_isl_overlap_score,
+        args.min_reachable_overlap_samples,
+        args.min_overlap_ratio,
+        args.selection_sample_horizon_s,
+        args.selection_sample_times_s,
     )
     run_names = []
     seen = set()

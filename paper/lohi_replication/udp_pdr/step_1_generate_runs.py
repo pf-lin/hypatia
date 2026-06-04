@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import json
 import os
 import random
@@ -33,6 +34,9 @@ SELECTION_DIAGNOSTIC_FILENAMES = [
     "corridor_overlap_summary.csv",
     "gsl_load_by_endpoint.csv",
     "isl_corridor_load_summary.csv",
+    "fallback_phase_summary.csv",
+    "corridor_concentration_summary.csv",
+    "satellite_interface_load_summary.csv",
 ]
 
 
@@ -107,6 +111,15 @@ def _directed_edges(path):
     return list(zip(path[:-1], path[1:]))
 
 
+def _undirected_edge(edge):
+    a, b = edge
+    return (a, b) if a <= b else (b, a)
+
+
+def _undirected_edges(edges):
+    return set(_undirected_edge(edge) for edge in edges)
+
+
 def _satellite_middle_edges(path):
     if path is None or len(path) < 4:
         return set()
@@ -137,6 +150,45 @@ def _last_sat(path):
     return path[-2]
 
 
+def _satellite_interface_keys_for_path(path):
+    keys = set()
+    first_sat = _first_sat(path)
+    last_sat = _last_sat(path)
+    if first_sat is not None:
+        keys.add((first_sat, "source"))
+    if last_sat is not None:
+        keys.add((last_sat, "destination"))
+    return keys
+
+
+def _primary_satellite_interface_keys(src_satellite_counts, dst_satellite_counts):
+    keys = set()
+    if src_satellite_counts:
+        max_count = max(src_satellite_counts.values())
+        satellite_id = min(
+            satellite_id
+            for satellite_id, count in src_satellite_counts.items()
+            if count == max_count
+        )
+        keys.add((satellite_id, "source"))
+    if dst_satellite_counts:
+        max_count = max(dst_satellite_counts.values())
+        satellite_id = min(
+            satellite_id
+            for satellite_id, count in dst_satellite_counts.items()
+            if count == max_count
+        )
+        keys.add((satellite_id, "destination"))
+    return keys
+
+
+def _format_satellite_interface_keys(keys):
+    return ";".join(
+        "%d:%s" % (satellite_id, direction)
+        for satellite_id, direction in sorted(keys)
+    )
+
+
 def _format_bool(value):
     return "true" if bool(value) else "false"
 
@@ -147,6 +199,11 @@ def _format_edges(edges):
 
 def _format_timestamps(timestamps):
     return ";".join(str(int(value)) for value in timestamps)
+
+
+def _json_hash(payload):
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
 
 
 def _read_fstate_delta(path, accumulated):
@@ -189,18 +246,33 @@ def _compute_baseline_snapshots(run, sample_count):
     max_gsl_length_m = float(lines[0].split("=")[1].strip())
     max_isl_length_m = float(lines[1].split("=")[1].strip())
 
-    sim_end = run["simulation_end_time_ns"]
-    if sample_count == 1:
+    explicit_sample_times_s = run.get("selection_sample_times_s")
+    update_interval = run["dynamic_state_update_interval_ns"]
+    if explicit_sample_times_s is not None:
+        sample_times = [
+            int(round(float(value) * 1000 * 1000 * 1000))
+            for value in explicit_sample_times_s
+        ]
+        sample_times = [
+            int((time_ns // update_interval) * update_interval)
+            for time_ns in sample_times
+        ]
+        sample_times = sorted(set(sample_times))
+    elif sample_count == 1:
         sample_times = [0]
     else:
-        span = max(sim_end - run["dynamic_state_update_interval_ns"], 0)
+        selection_horizon_ns = int(
+            round(float(run.get("selection_sample_horizon_s", 60.0)) * 1000 * 1000 * 1000)
+        )
+        span = max(selection_horizon_ns - update_interval, 0)
         sample_times = sorted(
             set(int(round(span * i / float(sample_count - 1))) for i in range(sample_count))
         )
-        update_interval = run["dynamic_state_update_interval_ns"]
         sample_times = [
             int((t // update_interval) * update_interval) for t in sample_times
         ]
+    if not sample_times:
+        sample_times = [0]
 
     snapshots = []
     accumulated = {}
@@ -363,19 +435,37 @@ def _evaluate_core_isl_hotspot_candidates(run, sample_count):
     sampled_timestamps = [time_ns for time_ns, _ in snapshots]
 
     focus_edges_by_time = {}
+    focus_undirected_edges_by_time = {}
     focus_conflict_sats_by_time = {}
     focus_middle_edges_by_pair = {
         (run["src_node_id"], run["dst_node_id"]): set(),
         (run["dst_node_id"], run["src_node_id"]): set(),
     }
+    focus_satellite_interfaces_by_pair = {
+        (run["src_node_id"], run["dst_node_id"]): set(),
+        (run["dst_node_id"], run["src_node_id"]): set(),
+    }
+    focus_satellite_interface_counts_by_pair = {
+        (run["src_node_id"], run["dst_node_id"]): {
+            "source": defaultdict(int),
+            "destination": defaultdict(int),
+        },
+        (run["dst_node_id"], run["src_node_id"]): {
+            "source": defaultdict(int),
+            "destination": defaultdict(int),
+        },
+    }
     focus_middle_edges_union = set()
+    focus_middle_undirected_edges_union = set()
     for time_ns, fstate in snapshots:
         path_a = get_path(run["src_node_id"], run["dst_node_id"], fstate)
         path_b = get_path(run["dst_node_id"], run["src_node_id"], fstate)
         path_a_middle = _satellite_middle_edges(path_a)
         path_b_middle = _satellite_middle_edges(path_b)
         focus_edges = path_a_middle | path_b_middle
+        focus_undirected_edges = _undirected_edges(focus_edges)
         focus_edges_by_time[time_ns] = focus_edges
+        focus_undirected_edges_by_time[time_ns] = focus_undirected_edges
         focus_conflict_sats_by_time[time_ns] = (
             _first_last_sats(path_a) | _first_last_sats(path_b)
         )
@@ -385,7 +475,28 @@ def _evaluate_core_isl_hotspot_candidates(run, sample_count):
         focus_middle_edges_by_pair[(run["dst_node_id"], run["src_node_id"])].update(
             path_b_middle
         )
+        for pair_key, path in [
+            ((run["src_node_id"], run["dst_node_id"]), path_a),
+            ((run["dst_node_id"], run["src_node_id"]), path_b),
+        ]:
+            first_sat = _first_sat(path)
+            last_sat = _last_sat(path)
+            if first_sat is not None:
+                focus_satellite_interface_counts_by_pair[pair_key]["source"][
+                    first_sat
+                ] += 1
+            if last_sat is not None:
+                focus_satellite_interface_counts_by_pair[pair_key]["destination"][
+                    last_sat
+                ] += 1
         focus_middle_edges_union.update(focus_edges)
+        focus_middle_undirected_edges_union.update(focus_undirected_edges)
+
+    for pair_key, counts in focus_satellite_interface_counts_by_pair.items():
+        focus_satellite_interfaces_by_pair[pair_key] = _primary_satellite_interface_keys(
+            counts["source"],
+            counts["destination"],
+        )
 
     candidates = []
     focus_endpoint_set = {run["src_node_id"], run["dst_node_id"]}
@@ -396,11 +507,19 @@ def _evaluate_core_isl_hotspot_candidates(run, sample_count):
 
             reachable_samples = 0
             samples_with_overlap = 0
-            middle_isl_overlap_score = 0
+            directed_overlap_score = 0
+            undirected_overlap_score = 0
+            candidate_middle_edge_sample_count = 0
             first_hop_conflict = False
             last_hop_conflict = False
             shared_edges = set()
+            shared_undirected_edges = set()
             candidate_middle_edges = set()
+            src_satellite_ids = set()
+            dst_satellite_ids = set()
+            satellite_interface_keys = set()
+            src_satellite_counts = defaultdict(int)
+            dst_satellite_counts = defaultdict(int)
             reachable_timestamps = []
 
             for time_ns, fstate in snapshots:
@@ -417,14 +536,50 @@ def _evaluate_core_isl_hotspot_candidates(run, sample_count):
                     last_hop_conflict = True
 
                 middle_edges = _satellite_middle_edges(path)
-                overlap_edges = middle_edges & focus_edges_by_time[time_ns]
-                if overlap_edges:
+                candidate_undirected_edges = _undirected_edges(middle_edges)
+                directed_overlap_edges = middle_edges & focus_edges_by_time[time_ns]
+                undirected_overlap_edges = (
+                    candidate_undirected_edges & focus_undirected_edges_by_time[time_ns]
+                )
+                target_corridor_edges = set(
+                    edge
+                    for edge in middle_edges
+                    if edge in focus_edges_by_time[time_ns]
+                    or _undirected_edge(edge) in focus_undirected_edges_by_time[time_ns]
+                )
+                if directed_overlap_edges or undirected_overlap_edges:
                     samples_with_overlap += 1
-                middle_isl_overlap_score += len(overlap_edges)
-                shared_edges.update(overlap_edges)
+                directed_overlap_score += len(directed_overlap_edges)
+                undirected_overlap_score += len(undirected_overlap_edges)
+                candidate_middle_edge_sample_count += len(middle_edges)
+                shared_edges.update(target_corridor_edges)
+                shared_undirected_edges.update(undirected_overlap_edges)
                 candidate_middle_edges.update(middle_edges)
+                first_sat = _first_sat(path)
+                last_sat = _last_sat(path)
+                if first_sat is not None:
+                    src_satellite_ids.add(first_sat)
+                    satellite_interface_keys.add((first_sat, "source"))
+                    src_satellite_counts[first_sat] += 1
+                if last_sat is not None:
+                    dst_satellite_ids.add(last_sat)
+                    satellite_interface_keys.add((last_sat, "destination"))
+                    dst_satellite_counts[last_sat] += 1
 
+            effective_overlap_score = max(
+                directed_overlap_score,
+                undirected_overlap_score,
+            )
+            overlap_ratio = (
+                effective_overlap_score / float(candidate_middle_edge_sample_count)
+                if candidate_middle_edge_sample_count > 0
+                else 0.0
+            )
             path_stability_score = reachable_samples + samples_with_overlap
+            primary_satellite_interface_keys = _primary_satellite_interface_keys(
+                src_satellite_counts,
+                dst_satellite_counts,
+            )
             candidates.append({
                 "src": src,
                 "dst": dst,
@@ -432,48 +587,105 @@ def _evaluate_core_isl_hotspot_candidates(run, sample_count):
                 "samples_with_overlap": samples_with_overlap,
                 "sampled_timestamps": list(sampled_timestamps),
                 "reachable_timestamps": reachable_timestamps,
-                "middle_isl_overlap_score": middle_isl_overlap_score,
+                "middle_isl_overlap_score": effective_overlap_score,
+                "directed_overlap_score": directed_overlap_score,
+                "undirected_overlap_score": undirected_overlap_score,
+                "effective_overlap_score": effective_overlap_score,
+                "middle_isl_edge_sample_count": candidate_middle_edge_sample_count,
+                "overlap_ratio": overlap_ratio,
                 "path_stability_score": path_stability_score,
                 "first_hop_conflict": first_hop_conflict,
                 "last_hop_conflict": last_hop_conflict,
                 "edge_conflict": first_hop_conflict or last_hop_conflict,
                 "shared_edges": shared_edges,
+                "shared_undirected_edges": shared_undirected_edges,
                 "candidate_middle_edges": candidate_middle_edges,
+                "non_focus_middle_edges": candidate_middle_edges - shared_edges,
                 "focus_middle_edges_count": len(focus_middle_edges_union),
+                "focus_middle_undirected_edges_count": (
+                    len(focus_middle_undirected_edges_union)
+                ),
                 "candidate_middle_edges_count": len(candidate_middle_edges),
+                "src_satellite_ids": src_satellite_ids,
+                "dst_satellite_ids": dst_satellite_ids,
+                "satellite_interface_keys": primary_satellite_interface_keys,
+                "sampled_satellite_interface_keys": satellite_interface_keys,
                 "selected": False,
                 "selection_rank": "",
                 "selection_phase": "",
+                "selected_phase": "",
+                "fallback_phase": "",
+                "fallback_reason": "",
+                "relaxed_constraints": "",
                 "selection_score": "",
                 "corridor_concentration_score": 0,
+                "candidate_rank_before_fallback": "",
+                "candidate_rank_after_fallback": "",
             })
 
     return {
         "sampled_timestamps": sampled_timestamps,
         "focus_middle_edges_union": focus_middle_edges_union,
+        "focus_middle_undirected_edges_union": focus_middle_undirected_edges_union,
         "focus_middle_edges_by_pair": focus_middle_edges_by_pair,
+        "focus_satellite_interfaces_by_pair": focus_satellite_interfaces_by_pair,
         "candidates": candidates,
     }
 
 
-def _candidate_corridor_concentration_score(candidate, selected_edge_counts):
-    return sum(selected_edge_counts[edge] for edge in candidate["shared_edges"])
+def _candidate_effective_overlap_score(candidate):
+    return float(candidate.get("effective_overlap_score", 0))
+
+
+def _candidate_corridor_concentration_score(candidate, selected_undirected_edge_counts):
+    return sum(
+        selected_undirected_edge_counts[edge]
+        for edge in candidate["shared_undirected_edges"]
+    )
+
+
+def _candidate_added_target_load_mbps(candidate, per_flow_rate):
+    return per_flow_rate * float(len(candidate["shared_edges"]))
+
+
+def _candidate_added_non_focus_load_mbps(candidate, per_flow_rate):
+    return per_flow_rate * float(len(candidate["non_focus_middle_edges"]))
 
 
 def _candidate_selection_score(candidate, selected_edge_counts):
+    return _candidate_selection_score_with_rate(candidate, selected_edge_counts, 0.0)
+
+
+def _candidate_selection_score_with_rate(candidate, selected_edge_counts, per_flow_rate):
     corridor_score = _candidate_corridor_concentration_score(
         candidate,
         selected_edge_counts,
     )
+    added_target_load = _candidate_added_target_load_mbps(candidate, per_flow_rate)
+    added_non_focus_load = _candidate_added_non_focus_load_mbps(candidate, per_flow_rate)
     return (
-        float(candidate["middle_isl_overlap_score"])
-        + float(corridor_score)
+        4.0 * _candidate_effective_overlap_score(candidate)
+        + 2.0 * float(corridor_score)
+        + 0.5 * added_target_load
         + 0.1 * float(candidate["path_stability_score"])
+        - 0.15 * added_non_focus_load
     )
 
 
 def _max_endpoint_count_allows(current_count, max_count):
     return max_count == 0 or current_count < max_count
+
+
+def _candidate_meets_overlap_thresholds(candidate, phase):
+    if not phase["require_overlap"]:
+        return True
+    if _candidate_effective_overlap_score(candidate) < phase["min_overlap_score"]:
+        return False
+    if candidate["samples_with_overlap"] < phase["min_overlap_samples"]:
+        return False
+    if candidate["overlap_ratio"] + 1e-12 < phase["min_overlap_ratio"]:
+        return False
+    return True
 
 
 def _candidate_feasible_for_phase(
@@ -482,6 +694,7 @@ def _candidate_feasible_for_phase(
     per_flow_rate,
     src_load_mbps,
     dst_load_mbps,
+    satellite_interface_load_mbps,
     background_src_counts,
     background_dst_counts,
     max_background_flows_per_src,
@@ -491,7 +704,7 @@ def _candidate_feasible_for_phase(
         return False
     if phase["require_reachable"] and candidate["reachable_samples"] <= 0:
         return False
-    if phase["require_overlap"] and candidate["middle_isl_overlap_score"] <= 0:
+    if not _candidate_meets_overlap_thresholds(candidate, phase):
         return False
 
     if phase["enforce_endpoint_flow_limits"]:
@@ -514,7 +727,46 @@ def _candidate_feasible_for_phase(
         if dst_load_mbps[candidate["dst"]] + per_flow_rate > endpoint_cap_mbps + epsilon:
             return False
 
+    satellite_interface_cap_mbps = phase["satellite_interface_cap_mbps"]
+    if satellite_interface_cap_mbps is not None:
+        epsilon = 1e-9
+        for key in candidate["satellite_interface_keys"]:
+            if (
+                satellite_interface_load_mbps[key] + per_flow_rate
+                > satellite_interface_cap_mbps + epsilon
+            ):
+                return False
+
     return True
+
+
+def _phase(
+    name,
+    require_overlap,
+    avoid_edge_conflict,
+    enforce_endpoint_flow_limits,
+    endpoint_cap_mbps,
+    satellite_interface_cap_mbps,
+    min_overlap_score,
+    min_overlap_samples,
+    min_overlap_ratio,
+    relaxed_constraints,
+    fallback_reason,
+):
+    return {
+        "name": name,
+        "require_reachable": True,
+        "require_overlap": require_overlap,
+        "avoid_edge_conflict": avoid_edge_conflict,
+        "enforce_endpoint_flow_limits": enforce_endpoint_flow_limits,
+        "endpoint_cap_mbps": endpoint_cap_mbps,
+        "satellite_interface_cap_mbps": satellite_interface_cap_mbps,
+        "min_overlap_score": min_overlap_score,
+        "min_overlap_samples": min_overlap_samples,
+        "min_overlap_ratio": min_overlap_ratio,
+        "relaxed_constraints": relaxed_constraints,
+        "fallback_reason": fallback_reason,
+    }
 
 
 def _select_core_isl_hotspot_candidates(run, context):
@@ -526,67 +778,178 @@ def _select_core_isl_hotspot_candidates(run, context):
     per_flow_rate = compute_per_flow_rate_mbps(run, expected_pair_count)
     gsl_capacity_mbps = run["data_rate_megabit_per_s"]
     endpoint_cap_mbps = run["endpoint_load_cap_ratio"] * gsl_capacity_mbps
+    relaxed_endpoint_cap_mbps = gsl_capacity_mbps
+    satellite_interface_cap_mbps = None
+    if run.get("satellite_interface_load_cap_ratio", 0.0) > 0:
+        satellite_interface_cap_mbps = (
+            run["satellite_interface_load_cap_ratio"] * gsl_capacity_mbps
+        )
+    relaxed_satellite_interface_cap_mbps = gsl_capacity_mbps
     max_per_src = run["max_background_flows_per_src"]
     max_per_dst = run["max_background_flows_per_dst"]
+    min_overlap_score = run["min_middle_isl_overlap_score"]
+    min_overlap_samples = run["min_reachable_overlap_samples"]
+    min_overlap_ratio = run["min_overlap_ratio"]
 
     src_load_mbps = defaultdict(float)
     dst_load_mbps = defaultdict(float)
+    satellite_interface_load_mbps = defaultdict(float)
     for pair in _generate_focus_only_pairs(run):
         src_load_mbps[pair["src"]] += per_flow_rate
         dst_load_mbps[pair["dst"]] += per_flow_rate
+        for key in context["focus_satellite_interfaces_by_pair"].get(
+            (pair["src"], pair["dst"]),
+            set(),
+        ):
+            satellite_interface_load_mbps[key] += per_flow_rate
 
     phases = [
-        {
-            "name": "strict",
-            "require_reachable": True,
-            "require_overlap": True,
-            "avoid_edge_conflict": True,
-            "enforce_endpoint_flow_limits": True,
-            "endpoint_cap_mbps": endpoint_cap_mbps,
-        },
-        {
-            "name": "fallback_relax_endpoint_flow_limits",
-            "require_reachable": True,
-            "require_overlap": True,
-            "avoid_edge_conflict": True,
-            "enforce_endpoint_flow_limits": False,
-            "endpoint_cap_mbps": endpoint_cap_mbps,
-        },
-        {
-            "name": "fallback_allow_zero_overlap",
-            "require_reachable": True,
-            "require_overlap": False,
-            "avoid_edge_conflict": True,
-            "enforce_endpoint_flow_limits": False,
-            "endpoint_cap_mbps": endpoint_cap_mbps,
-        },
+        _phase(
+            "strict",
+            True,
+            True,
+            True,
+            endpoint_cap_mbps,
+            satellite_interface_cap_mbps,
+            min_overlap_score,
+            min_overlap_samples,
+            min_overlap_ratio,
+            "",
+            "strict_constraints_satisfied",
+        ),
+        _phase(
+            "relax_per_src_dst_limit",
+            True,
+            True,
+            False,
+            endpoint_cap_mbps,
+            satellite_interface_cap_mbps,
+            min_overlap_score,
+            min_overlap_samples,
+            min_overlap_ratio,
+            "per_src_dst_limit",
+            "strict phase lacked enough candidates under per-src/per-dst limits",
+        ),
+        _phase(
+            "relax_endpoint_cap",
+            True,
+            True,
+            False,
+            relaxed_endpoint_cap_mbps,
+            relaxed_satellite_interface_cap_mbps,
+            min_overlap_score,
+            min_overlap_samples,
+            min_overlap_ratio,
+            "per_src_dst_limit;endpoint_cap_ratio_to_1.0;satellite_interface_cap_ratio_to_1.0",
+            "overlap candidates required endpoint cap relaxation to GSL capacity",
+        ),
+        _phase(
+            "relax_corridor_threshold",
+            True,
+            True,
+            False,
+            relaxed_endpoint_cap_mbps,
+            relaxed_satellite_interface_cap_mbps,
+            1,
+            1,
+            0.0,
+            "per_src_dst_limit;endpoint_cap_ratio_to_1.0;satellite_interface_cap_ratio_to_1.0;corridor_threshold",
+            "overlap candidates remained but did not meet strict overlap thresholds",
+        ),
+        _phase(
+            "relax_edge_conflict",
+            True,
+            False,
+            False,
+            relaxed_endpoint_cap_mbps,
+            relaxed_satellite_interface_cap_mbps,
+            1,
+            1,
+            0.0,
+            "per_src_dst_limit;endpoint_cap_ratio_to_1.0;satellite_interface_cap_ratio_to_1.0;edge_conflict",
+            "overlap candidates required allowing focus first/last-satellite conflicts under GSL/interface caps",
+        ),
+        _phase(
+            "fallback_allow_zero_overlap",
+            False,
+            True,
+            False,
+            relaxed_endpoint_cap_mbps,
+            relaxed_satellite_interface_cap_mbps,
+            0,
+            0,
+            0.0,
+            "per_src_dst_limit;endpoint_cap_ratio_to_1.0;satellite_interface_cap_ratio_to_1.0;allow_zero_overlap",
+            "nonzero-overlap candidates were insufficient under GSL/interface caps",
+        ),
+        _phase(
+            "fallback_insufficient_candidates",
+            False,
+            False,
+            False,
+            None,
+            None,
+            0,
+            0,
+            0.0,
+            "edge_conflict;endpoint_cap;satellite_interface_cap;allow_zero_overlap",
+            "insufficient reachable candidates remained after all constrained phases",
+        ),
     ]
-    if endpoint_cap_mbps < gsl_capacity_mbps:
-        phases.append({
-            "name": "fallback_endpoint_cap_to_gsl_capacity",
-            "require_reachable": True,
-            "require_overlap": False,
-            "avoid_edge_conflict": True,
-            "enforce_endpoint_flow_limits": False,
-            "endpoint_cap_mbps": gsl_capacity_mbps,
-        })
-    phases.append({
-        "name": "fallback_endpoint_cap_exceeded",
-        "require_reachable": True,
-        "require_overlap": False,
-        "avoid_edge_conflict": True,
-        "enforce_endpoint_flow_limits": False,
-        "endpoint_cap_mbps": None,
-    })
 
     selected = []
     selected_pairs = set()
-    selected_edge_counts = defaultdict(int)
+    selected_undirected_edge_counts = defaultdict(int)
+    for edge in context["focus_middle_edges_union"]:
+        selected_undirected_edge_counts[_undirected_edge(edge)] += 1
     background_src_counts = defaultdict(int)
     background_dst_counts = defaultdict(int)
     warnings = []
+    phase_stats = {
+        phase["name"]: {
+            "candidate_count": 0,
+            "selected_count": 0,
+        }
+        for phase in phases
+    }
+
+    initial_ranked = sorted(
+        context["candidates"],
+        key=lambda candidate: (
+            -_candidate_selection_score_with_rate(
+                candidate,
+                selected_undirected_edge_counts,
+                per_flow_rate,
+            ),
+            -_candidate_effective_overlap_score(candidate),
+            -candidate["samples_with_overlap"],
+            -candidate["reachable_samples"],
+            candidate["src"],
+            candidate["dst"],
+        ),
+    )
+    for rank, candidate in enumerate(initial_ranked, start=1):
+        candidate["candidate_rank_before_fallback"] = rank
 
     for phase in phases:
+        phase_candidates = [
+            candidate
+            for candidate in context["candidates"]
+            if (candidate["src"], candidate["dst"]) not in selected_pairs
+            and _candidate_feasible_for_phase(
+                candidate,
+                phase,
+                per_flow_rate,
+                src_load_mbps,
+                dst_load_mbps,
+                satellite_interface_load_mbps,
+                background_src_counts,
+                background_dst_counts,
+                max_per_src,
+                max_per_dst,
+            )
+        ]
+        phase_stats[phase["name"]]["candidate_count"] = len(phase_candidates)
         while len(selected) < target_count:
             feasible = []
             for candidate in context["candidates"]:
@@ -599,6 +962,7 @@ def _select_core_isl_hotspot_candidates(run, context):
                     per_flow_rate,
                     src_load_mbps,
                     dst_load_mbps,
+                    satellite_interface_load_mbps,
                     background_src_counts,
                     background_dst_counts,
                     max_per_src,
@@ -607,13 +971,18 @@ def _select_core_isl_hotspot_candidates(run, context):
                     continue
                 corridor_score = _candidate_corridor_concentration_score(
                     candidate,
-                    selected_edge_counts,
+                    selected_undirected_edge_counts,
                 )
-                score = _candidate_selection_score(candidate, selected_edge_counts)
+                score = _candidate_selection_score_with_rate(
+                    candidate,
+                    selected_undirected_edge_counts,
+                    per_flow_rate,
+                )
                 feasible.append((
                     -score,
-                    -candidate["middle_isl_overlap_score"],
+                    -_candidate_effective_overlap_score(candidate),
                     -corridor_score,
+                    _candidate_added_non_focus_load_mbps(candidate, per_flow_rate),
                     -candidate["samples_with_overlap"],
                     -candidate["reachable_samples"],
                     candidate["src"],
@@ -627,23 +996,30 @@ def _select_core_isl_hotspot_candidates(run, context):
                 break
 
             feasible.sort()
-            chosen = feasible[0][7]
-            score = feasible[0][8]
-            corridor_score = feasible[0][9]
+            chosen = feasible[0][8]
+            score = feasible[0][9]
+            corridor_score = feasible[0][10]
             chosen["selected"] = True
             chosen["selection_rank"] = len(selected) + 1
             chosen["selection_phase"] = phase["name"]
+            chosen["selected_phase"] = phase["name"]
+            chosen["fallback_phase"] = "" if phase["name"] == "strict" else phase["name"]
+            chosen["fallback_reason"] = phase["fallback_reason"]
+            chosen["relaxed_constraints"] = phase["relaxed_constraints"]
             chosen["selection_score"] = score
             chosen["corridor_concentration_score"] = corridor_score
 
             selected.append(chosen)
+            phase_stats[phase["name"]]["selected_count"] += 1
             selected_pairs.add((chosen["src"], chosen["dst"]))
             background_src_counts[chosen["src"]] += 1
             background_dst_counts[chosen["dst"]] += 1
             src_load_mbps[chosen["src"]] += per_flow_rate
             dst_load_mbps[chosen["dst"]] += per_flow_rate
-            for edge in chosen["shared_edges"]:
-                selected_edge_counts[edge] += 1
+            for key in chosen["satellite_interface_keys"]:
+                satellite_interface_load_mbps[key] += per_flow_rate
+            for edge in chosen["shared_undirected_edges"]:
+                selected_undirected_edge_counts[edge] += 1
 
         if len(selected) >= target_count:
             break
@@ -663,10 +1039,37 @@ def _select_core_isl_hotspot_candidates(run, context):
     for phase_name in fallback_phases:
         warnings.append("Selection used fallback phase: %s" % phase_name)
 
+    final_ranked = sorted(
+        context["candidates"],
+        key=lambda candidate: (
+            -_candidate_selection_score_with_rate(
+                candidate,
+                selected_undirected_edge_counts,
+                per_flow_rate,
+            ),
+            -_candidate_effective_overlap_score(candidate),
+            -candidate["samples_with_overlap"],
+            -candidate["reachable_samples"],
+            candidate["src"],
+            candidate["dst"],
+        ),
+    )
+    for rank, candidate in enumerate(final_ranked, start=1):
+        candidate["candidate_rank_after_fallback"] = rank
+
+    context["selection_phases"] = phases
+    context["phase_stats"] = phase_stats
+
     return selected, warnings
 
 
-def _core_isl_candidate_reject_reason(candidate, run, final_src_load, final_dst_load):
+def _core_isl_candidate_reject_reason(
+    candidate,
+    run,
+    final_src_load,
+    final_dst_load,
+    final_satellite_interface_load,
+):
     if candidate["selected"]:
         if candidate["selection_phase"] == "strict":
             return "selected"
@@ -675,8 +1078,17 @@ def _core_isl_candidate_reject_reason(candidate, run, final_src_load, final_dst_
         return "edge_conflict"
     if candidate["reachable_samples"] <= 0:
         return "unreachable"
-    if candidate["middle_isl_overlap_score"] <= 0:
+    if _candidate_effective_overlap_score(candidate) <= 0:
         return "zero_middle_isl_overlap"
+    if (
+        _candidate_effective_overlap_score(candidate)
+        < run["min_middle_isl_overlap_score"]
+    ):
+        return "below_min_middle_isl_overlap_score"
+    if candidate["samples_with_overlap"] < run["min_reachable_overlap_samples"]:
+        return "below_min_reachable_overlap_samples"
+    if candidate["overlap_ratio"] + 1e-12 < run["min_overlap_ratio"]:
+        return "below_min_overlap_ratio"
 
     max_per_src = run["max_background_flows_per_src"]
     max_per_dst = run["max_background_flows_per_dst"]
@@ -701,17 +1113,108 @@ def _core_isl_candidate_reject_reason(candidate, run, final_src_load, final_dst_
         return "src_endpoint_load_cap"
     if final_dst_load[candidate["dst"]] + per_flow_rate > endpoint_cap_mbps + 1e-9:
         return "dst_endpoint_load_cap"
+    satellite_interface_cap_ratio = run.get("satellite_interface_load_cap_ratio", 0.0)
+    if satellite_interface_cap_ratio > 0:
+        satellite_interface_cap_mbps = (
+            satellite_interface_cap_ratio * run["data_rate_megabit_per_s"]
+        )
+        for key in candidate["satellite_interface_keys"]:
+            if (
+                final_satellite_interface_load.get(key, 0.0) + per_flow_rate
+                > satellite_interface_cap_mbps + 1e-9
+            ):
+                return "satellite_interface_load_cap"
     return "not_selected_lower_score"
+
+
+def _max_projected_satellite_interface_ratio(
+    candidate,
+    final_satellite_interface_load,
+    per_flow_rate,
+    gsl_capacity_mbps,
+    direction,
+    selected_flag,
+):
+    keys = [
+        key
+        for key in candidate["satellite_interface_keys"]
+        if key[1] == direction
+    ]
+    if not keys or gsl_capacity_mbps <= 0:
+        return 0.0
+    ratios = []
+    for key in keys:
+        load = final_satellite_interface_load.get(key, 0.0)
+        if not selected_flag:
+            load += per_flow_rate
+        ratios.append(load / gsl_capacity_mbps)
+    return max(ratios) if ratios else 0.0
+
+
+def _selection_input_hash(run, context):
+    payload = {
+        "traffic_mode": run["traffic_mode"],
+        "load_level": run["load_level"],
+        "background_flow_count": run["background_flow_count"],
+        "per_flow_rate_reference_background_flow_count": (
+            run["per_flow_rate_reference_background_flow_count"]
+        ),
+        "focus_pair": [run["src_node_id"], run["dst_node_id"]],
+        "data_rate_megabit_per_s": run["data_rate_megabit_per_s"],
+        "endpoint_load_cap_ratio": run["endpoint_load_cap_ratio"],
+        "satellite_interface_load_cap_ratio": (
+            run.get("satellite_interface_load_cap_ratio", 0.0)
+        ),
+        "max_background_flows_per_src": run["max_background_flows_per_src"],
+        "max_background_flows_per_dst": run["max_background_flows_per_dst"],
+        "min_middle_isl_overlap_score": run["min_middle_isl_overlap_score"],
+        "min_reachable_overlap_samples": run["min_reachable_overlap_samples"],
+        "min_overlap_ratio": run["min_overlap_ratio"],
+        "dynamic_state_update_interval_ns": run["dynamic_state_update_interval_ns"],
+        "selection_sample_horizon_s": run.get("selection_sample_horizon_s"),
+        "selection_sample_times_s": run.get("selection_sample_times_s"),
+        "sampled_timestamps": context["sampled_timestamps"],
+        "focus_middle_edges": [
+            [edge[0], edge[1]]
+            for edge in sorted(context["focus_middle_edges_union"])
+        ],
+    }
+    return _json_hash(payload)
+
+
+def _flow_selection_hash(run, context, pairs):
+    payload = {
+        "selection_input_hash": context["selection_input_hash"],
+        "pairs": [
+            {
+                "src": pair["src"],
+                "dst": pair["dst"],
+                "class": pair["class"],
+                "selection_phase": pair.get("selection_phase", ""),
+            }
+            for pair in pairs
+        ],
+    }
+    return _json_hash(payload)
 
 
 def _build_core_isl_diagnostics(run, context, selected, warnings, pairs):
     per_flow_rate = compute_per_flow_rate_mbps(run, len(pairs))
     gsl_capacity_mbps = run["data_rate_megabit_per_s"]
     endpoint_cap_mbps = run["endpoint_load_cap_ratio"] * gsl_capacity_mbps
+    satellite_interface_cap_mbps = (
+        run.get("satellite_interface_load_cap_ratio", 0.0) * gsl_capacity_mbps
+    )
+    selection_input_hash = context.get("selection_input_hash", "")
+    flow_selection_hash = context.get("flow_selection_hash", "")
 
     flow_ids = {
         (pair["src"], pair["dst"]): idx
         for idx, pair in enumerate(pairs)
+    }
+    selected_candidates_by_pair = {
+        (candidate["src"], candidate["dst"]): candidate
+        for candidate in selected
     }
     selected_background_srcs = [
         candidate["src"]
@@ -726,14 +1229,33 @@ def _build_core_isl_diagnostics(run, context, selected, warnings, pairs):
     final_dst_load = defaultdict(float)
     final_src_flow_ids = defaultdict(list)
     final_dst_flow_ids = defaultdict(list)
+    final_satellite_interface_load = defaultdict(float)
+    final_satellite_interface_flow_ids = defaultdict(list)
     for idx, pair in enumerate(pairs):
         final_src_load[pair["src"]] += per_flow_rate
         final_dst_load[pair["dst"]] += per_flow_rate
         final_src_flow_ids[pair["src"]].append(idx)
         final_dst_flow_ids[pair["dst"]].append(idx)
+        pair_key = (pair["src"], pair["dst"])
+        if pair["class"] == "focus":
+            satellite_keys = context["focus_satellite_interfaces_by_pair"].get(
+                pair_key,
+                set(),
+            )
+        else:
+            satellite_keys = selected_candidates_by_pair[pair_key][
+                "satellite_interface_keys"
+            ]
+        for key in satellite_keys:
+            final_satellite_interface_load[key] += per_flow_rate
+            final_satellite_interface_flow_ids[key].append(idx)
 
     reject_src_load = defaultdict(float, final_src_load)
     reject_dst_load = defaultdict(float, final_dst_load)
+    reject_satellite_interface_load = defaultdict(
+        float,
+        final_satellite_interface_load,
+    )
     reject_src_load["_per_flow_rate"] = per_flow_rate
     reject_dst_load["_per_flow_rate"] = per_flow_rate
     reject_src_load["_selected_background_srcs"] = selected_background_srcs
@@ -743,7 +1265,29 @@ def _build_core_isl_diagnostics(run, context, selected, warnings, pairs):
     for pair in pairs[:2]:
         src = pair["src"]
         dst = pair["dst"]
+        satellite_keys = context["focus_satellite_interfaces_by_pair"].get(
+            (src, dst),
+            set(),
+        )
+        src_satellite_ratio = max(
+            [
+                final_satellite_interface_load[key] / gsl_capacity_mbps
+                for key in satellite_keys
+                if key[1] == "source"
+            ]
+            or [0.0]
+        )
+        dst_satellite_ratio = max(
+            [
+                final_satellite_interface_load[key] / gsl_capacity_mbps
+                for key in satellite_keys
+                if key[1] == "destination"
+            ]
+            or [0.0]
+        )
         selection_rows.append({
+            "flow_selection_hash": flow_selection_hash,
+            "selection_input_hash": selection_input_hash,
             "flow_id": flow_ids[(src, dst)],
             "src": src,
             "dst": dst,
@@ -751,19 +1295,37 @@ def _build_core_isl_diagnostics(run, context, selected, warnings, pairs):
             "selected": "true",
             "selection_rank": 0,
             "selection_phase": "focus",
+            "selected_phase": "focus",
+            "fallback_phase": "",
+            "fallback_reason": "selected_focus",
+            "relaxed_constraints": "",
             "middle_isl_overlap_score": "",
+            "directed_overlap_score": "",
+            "undirected_overlap_score": "",
+            "overlap_ratio": "",
             "reachable_samples": len(context["sampled_timestamps"]),
             "sampled_timestamps": _format_timestamps(context["sampled_timestamps"]),
             "first_hop_conflict": "false",
             "last_hop_conflict": "false",
+            "satellite_interface_keys": _format_satellite_interface_keys(
+                satellite_keys
+            ),
+            "adds_target_corridor_load_mbps": "",
+            "adds_non_focus_edge_load_mbps": "",
             "src_endpoint_load_mbps_after_selection": final_src_load[src],
             "dst_endpoint_load_mbps_after_selection": final_dst_load[dst],
             "src_endpoint_load_ratio": final_src_load[src] / gsl_capacity_mbps,
             "dst_endpoint_load_ratio": final_dst_load[dst] / gsl_capacity_mbps,
+            "src_endpoint_load_ratio_after": final_src_load[src] / gsl_capacity_mbps,
+            "dst_endpoint_load_ratio_after": final_dst_load[dst] / gsl_capacity_mbps,
+            "src_satellite_interface_load_ratio_after": src_satellite_ratio,
+            "dst_satellite_interface_load_ratio_after": dst_satellite_ratio,
             "candidate_reject_reason": "selected_focus",
             "corridor_concentration_score": "",
             "path_stability_score": "",
             "selection_score": "",
+            "candidate_rank_before_fallback": "",
+            "candidate_rank_after_fallback": "",
         })
 
     for candidate in sorted(
@@ -785,6 +1347,8 @@ def _build_core_isl_diagnostics(run, context, selected, warnings, pairs):
             projected_src_load += per_flow_rate
             projected_dst_load += per_flow_rate
         selection_rows.append({
+            "flow_selection_hash": flow_selection_hash,
+            "selection_input_hash": selection_input_hash,
             "flow_id": flow_ids.get((src, dst), ""),
             "src": src,
             "dst": dst,
@@ -792,26 +1356,73 @@ def _build_core_isl_diagnostics(run, context, selected, warnings, pairs):
             "selected": _format_bool(selected_flag),
             "selection_rank": candidate["selection_rank"],
             "selection_phase": candidate["selection_phase"],
+            "selected_phase": candidate["selected_phase"],
+            "fallback_phase": candidate["fallback_phase"],
+            "fallback_reason": candidate["fallback_reason"],
+            "relaxed_constraints": candidate["relaxed_constraints"],
             "middle_isl_overlap_score": candidate["middle_isl_overlap_score"],
+            "directed_overlap_score": candidate["directed_overlap_score"],
+            "undirected_overlap_score": candidate["undirected_overlap_score"],
+            "overlap_ratio": candidate["overlap_ratio"],
             "reachable_samples": candidate["reachable_samples"],
             "sampled_timestamps": _format_timestamps(candidate["sampled_timestamps"]),
             "first_hop_conflict": _format_bool(candidate["first_hop_conflict"]),
             "last_hop_conflict": _format_bool(candidate["last_hop_conflict"]),
+            "satellite_interface_keys": _format_satellite_interface_keys(
+                candidate["satellite_interface_keys"]
+            ),
+            "adds_target_corridor_load_mbps": _candidate_added_target_load_mbps(
+                candidate,
+                per_flow_rate,
+            ),
+            "adds_non_focus_edge_load_mbps": _candidate_added_non_focus_load_mbps(
+                candidate,
+                per_flow_rate,
+            ),
             "src_endpoint_load_mbps_after_selection": projected_src_load,
             "dst_endpoint_load_mbps_after_selection": projected_dst_load,
             "src_endpoint_load_ratio": projected_src_load / gsl_capacity_mbps,
             "dst_endpoint_load_ratio": projected_dst_load / gsl_capacity_mbps,
+            "src_endpoint_load_ratio_after": projected_src_load / gsl_capacity_mbps,
+            "dst_endpoint_load_ratio_after": projected_dst_load / gsl_capacity_mbps,
+            "src_satellite_interface_load_ratio_after": (
+                _max_projected_satellite_interface_ratio(
+                    candidate,
+                    final_satellite_interface_load,
+                    per_flow_rate,
+                    gsl_capacity_mbps,
+                    "source",
+                    selected_flag,
+                )
+            ),
+            "dst_satellite_interface_load_ratio_after": (
+                _max_projected_satellite_interface_ratio(
+                    candidate,
+                    final_satellite_interface_load,
+                    per_flow_rate,
+                    gsl_capacity_mbps,
+                    "destination",
+                    selected_flag,
+                )
+            ),
             "candidate_reject_reason": _core_isl_candidate_reject_reason(
                 candidate,
                 run,
                 reject_src_load,
                 reject_dst_load,
+                reject_satellite_interface_load,
             ),
             "corridor_concentration_score": candidate[
                 "corridor_concentration_score"
             ],
             "path_stability_score": candidate["path_stability_score"],
             "selection_score": candidate["selection_score"],
+            "candidate_rank_before_fallback": candidate[
+                "candidate_rank_before_fallback"
+            ],
+            "candidate_rank_after_fallback": candidate[
+                "candidate_rank_after_fallback"
+            ],
         })
 
     overlap_rows = []
@@ -826,16 +1437,29 @@ def _build_core_isl_diagnostics(run, context, selected, warnings, pairs):
         ),
     ):
         overlap_rows.append({
+            "flow_selection_hash": flow_selection_hash,
+            "selection_input_hash": selection_input_hash,
             "src": candidate["src"],
             "dst": candidate["dst"],
             "selected": _format_bool(candidate["selected"]),
             "selection_rank": candidate["selection_rank"],
             "overlap_edges_count": len(candidate["shared_edges"]),
             "overlap_score": candidate["middle_isl_overlap_score"],
+            "directed_overlap_score": candidate["directed_overlap_score"],
+            "undirected_overlap_score": candidate["undirected_overlap_score"],
+            "overlap_ratio": candidate["overlap_ratio"],
+            "samples_with_overlap": candidate["samples_with_overlap"],
             "sampled_timestamp_count": candidate["reachable_samples"],
             "focus_middle_edges_count": candidate["focus_middle_edges_count"],
+            "focus_middle_undirected_edges_count": candidate[
+                "focus_middle_undirected_edges_count"
+            ],
             "candidate_middle_edges_count": candidate["candidate_middle_edges_count"],
             "shared_edges": _format_edges(candidate["shared_edges"]),
+            "shared_undirected_edges": _format_edges(
+                candidate["shared_undirected_edges"]
+            ),
+            "non_focus_middle_edges": _format_edges(candidate["non_focus_middle_edges"]),
         })
 
     gsl_rows = []
@@ -865,10 +1489,38 @@ def _build_core_isl_diagnostics(run, context, selected, warnings, pairs):
                 "selected_flow_ids": ";".join(str(value) for value in flow_ids_for_endpoint),
             })
 
-    selected_candidates_by_pair = {
-        (candidate["src"], candidate["dst"]): candidate
-        for candidate in selected
-    }
+    satellite_interface_rows = []
+    for key in sorted(final_satellite_interface_load.keys()):
+        satellite_id, direction = key
+        total_load = final_satellite_interface_load[key]
+        flow_ids_for_interface = sorted(final_satellite_interface_flow_ids[key])
+        satellite_interface_rows.append({
+            "satellite_id": satellite_id,
+            "interface_type": (
+                "first_hop_satellite_proxy"
+                if direction == "source"
+                else "last_hop_satellite_proxy"
+            ),
+            "direction": direction,
+            "selected_flow_count": len(flow_ids_for_interface),
+            "estimated_offered_rate_mbps": total_load,
+            "gsl_capacity_mbps": gsl_capacity_mbps,
+            "load_ratio": total_load / gsl_capacity_mbps,
+            "over_capacity": _format_bool(total_load > gsl_capacity_mbps + 1e-9),
+            "satellite_interface_load_cap_ratio": run.get(
+                "satellite_interface_load_cap_ratio",
+                0.0,
+            ),
+            "satellite_interface_load_cap_mbps": satellite_interface_cap_mbps,
+            "over_satellite_interface_load_cap": _format_bool(
+                satellite_interface_cap_mbps > 0
+                and total_load > satellite_interface_cap_mbps + 1e-9
+            ),
+            "selected_flow_ids": ";".join(
+                str(value) for value in flow_ids_for_interface
+            ),
+        })
+
     edge_flow_ids = defaultdict(set)
     for pair in pairs:
         pair_key = (pair["src"], pair["dst"])
@@ -885,6 +1537,12 @@ def _build_core_isl_diagnostics(run, context, selected, warnings, pairs):
     for edge in sorted(all_edges):
         flow_ids_for_edge = sorted(edge_flow_ids.get(edge, set()))
         estimated_load = per_flow_rate * len(flow_ids_for_edge)
+        on_directed_focus_corridor = edge in context["focus_middle_edges_union"]
+        on_target_focus_corridor = (
+            on_directed_focus_corridor
+            or _undirected_edge(edge)
+            in context["focus_middle_undirected_edges_union"]
+        )
         corridor_rows.append({
             "edge_from": edge[0],
             "edge_to": edge[1],
@@ -893,19 +1551,187 @@ def _build_core_isl_diagnostics(run, context, selected, warnings, pairs):
             "isl_capacity_mbps": gsl_capacity_mbps,
             "load_ratio": estimated_load / gsl_capacity_mbps,
             "on_focus_middle_corridor": _format_bool(
-                edge in context["focus_middle_edges_union"]
+                on_directed_focus_corridor
             ),
+            "on_target_focus_corridor": _format_bool(on_target_focus_corridor),
             "selected_flow_ids": ";".join(str(value) for value in flow_ids_for_edge),
+            "selected_flow_ids_using_edge": ";".join(
+                str(value) for value in flow_ids_for_edge
+            ),
         })
+    ranked_corridor_rows = sorted(
+        corridor_rows,
+        key=lambda row: (
+            -row["estimated_offered_rate_mbps"],
+            row["edge_from"],
+            row["edge_to"],
+        ),
+    )
+    for rank, row in enumerate(ranked_corridor_rows, start=1):
+        row["edge_rank_by_load"] = rank
     corridor_rows.sort(
         key=lambda row: (
-            row["on_focus_middle_corridor"] != "true",
+            row["on_target_focus_corridor"] != "true",
             -row["estimated_offered_rate_mbps"],
             row["edge_from"],
             row["edge_to"],
         )
     )
-    for rows in [selection_rows, overlap_rows, gsl_rows, corridor_rows]:
+
+    fallback_rows = []
+    selected_by_phase = defaultdict(list)
+    for candidate in selected:
+        selected_by_phase[candidate["selection_phase"]].append(candidate)
+    for phase in context.get("selection_phases", []):
+        selected_in_phase = selected_by_phase.get(phase["name"], [])
+        overlaps = [
+            _candidate_effective_overlap_score(candidate)
+            for candidate in selected_in_phase
+        ]
+        candidate_count = context.get("phase_stats", {}).get(
+            phase["name"],
+            {},
+        ).get("candidate_count", 0)
+        fallback_rows.append({
+            "phase": phase["name"],
+            "selected_count": len(selected_in_phase),
+            "candidate_count": candidate_count,
+            "rejected_count": max(candidate_count - len(selected_in_phase), 0),
+            "zero_overlap_selected_count": sum(
+                1
+                for candidate in selected_in_phase
+                if _candidate_effective_overlap_score(candidate) <= 0
+            ),
+            "avg_overlap": (
+                sum(overlaps) / float(len(overlaps)) if overlaps else 0.0
+            ),
+            "min_overlap": min(overlaps) if overlaps else 0,
+            "max_overlap": max(overlaps) if overlaps else 0,
+            "notes": (
+                "relaxed_constraints=%s; fallback_reason=%s"
+                % (phase["relaxed_constraints"], phase["fallback_reason"])
+            ),
+        })
+
+    target_corridor_rows = [
+        row for row in corridor_rows if row["on_target_focus_corridor"] == "true"
+    ]
+    non_focus_rows = [
+        row for row in corridor_rows if row["on_target_focus_corridor"] != "true"
+    ]
+    top_loaded = ranked_corridor_rows[0] if ranked_corridor_rows else None
+    top_non_focus = sorted(
+        non_focus_rows,
+        key=lambda row: (
+            -row["estimated_offered_rate_mbps"],
+            row["edge_from"],
+            row["edge_to"],
+        ),
+    )
+    top_non_focus = top_non_focus[0] if top_non_focus else None
+    selected_overlaps = [
+        _candidate_effective_overlap_score(candidate)
+        for candidate in selected
+    ]
+    target_corridor_load = sum(
+        float(row["estimated_offered_rate_mbps"])
+        for row in target_corridor_rows
+    )
+    non_focus_load = sum(
+        float(row["estimated_offered_rate_mbps"])
+        for row in non_focus_rows
+    )
+    corridor_concentration_rows = [{
+        "flow_selection_hash": flow_selection_hash,
+        "selection_input_hash": selection_input_hash,
+        "sampled_timestamps": _format_timestamps(context["sampled_timestamps"]),
+        "target_corridor_edge_count": len(
+            context["focus_middle_undirected_edges_union"]
+        ),
+        "selected_flow_count": len(selected),
+        "avg_middle_isl_overlap": (
+            sum(selected_overlaps) / float(len(selected_overlaps))
+            if selected_overlaps
+            else 0.0
+        ),
+        "zero_overlap_selected_count": sum(
+            1
+            for candidate in selected
+            if _candidate_effective_overlap_score(candidate) <= 0
+        ),
+        "target_corridor_offered_load_mbps": target_corridor_load,
+        "target_corridor_max_load_ratio": (
+            max([float(row["load_ratio"]) for row in target_corridor_rows])
+            if target_corridor_rows
+            else 0.0
+        ),
+        "top_loaded_edge": (
+            "%d->%d" % (top_loaded["edge_from"], top_loaded["edge_to"])
+            if top_loaded
+            else ""
+        ),
+        "top_loaded_edge_on_target_corridor": (
+            top_loaded["on_target_focus_corridor"] if top_loaded else ""
+        ),
+        "top_non_focus_edge": (
+            "%d->%d" % (top_non_focus["edge_from"], top_non_focus["edge_to"])
+            if top_non_focus
+            else ""
+        ),
+        "top_non_focus_edge_load_ratio": (
+            top_non_focus["load_ratio"] if top_non_focus else 0.0
+        ),
+        "target_to_non_focus_load_ratio": (
+            target_corridor_load / non_focus_load
+            if non_focus_load > 0
+            else "inf"
+        ),
+    }]
+
+    zero_overlap_selected_count = corridor_concentration_rows[0][
+        "zero_overlap_selected_count"
+    ]
+    if zero_overlap_selected_count:
+        warnings.append(
+            "Selected %d zero-overlap background flows after fallback."
+            % zero_overlap_selected_count
+        )
+    if top_loaded and top_loaded["on_target_focus_corridor"] != "true":
+        warnings.append(
+            "Top estimated loaded ISL edge %d->%d is not on the target focus corridor."
+            % (top_loaded["edge_from"], top_loaded["edge_to"])
+        )
+    endpoint_cap_exceeded_rows = [
+        row for row in gsl_rows if row["over_endpoint_load_cap"] == "true"
+    ]
+    if endpoint_cap_exceeded_rows:
+        warnings.append(
+            "%d endpoint load rows exceed endpoint_load_cap_ratio=%.3f but remain below or equal to GSL capacity unless over_capacity=true."
+            % (len(endpoint_cap_exceeded_rows), run["endpoint_load_cap_ratio"])
+        )
+    satellite_cap_exceeded_rows = [
+        row
+        for row in satellite_interface_rows
+        if row["over_satellite_interface_load_cap"] == "true"
+    ]
+    if satellite_cap_exceeded_rows:
+        warnings.append(
+            "%d satellite-interface proxy rows exceed satellite_interface_load_cap_ratio=%.3f but remain below or equal to GSL capacity unless over_capacity=true."
+            % (
+                len(satellite_cap_exceeded_rows),
+                run.get("satellite_interface_load_cap_ratio", 0.0),
+            )
+        )
+
+    for rows in [
+        selection_rows,
+        overlap_rows,
+        gsl_rows,
+        corridor_rows,
+        fallback_rows,
+        corridor_concentration_rows,
+        satellite_interface_rows,
+    ]:
         for row in rows:
             row["background_flow_count"] = run["background_flow_count"]
             row["per_flow_rate_mbps"] = per_flow_rate
@@ -915,6 +1741,9 @@ def _build_core_isl_diagnostics(run, context, selected, warnings, pairs):
         "corridor_overlap_summary.csv": overlap_rows,
         "gsl_load_by_endpoint.csv": gsl_rows,
         "isl_corridor_load_summary.csv": corridor_rows,
+        "fallback_phase_summary.csv": fallback_rows,
+        "corridor_concentration_summary.csv": corridor_concentration_rows,
+        "satellite_interface_load_summary.csv": satellite_interface_rows,
         "warnings": warnings,
     }
 
@@ -935,6 +1764,14 @@ def _generate_core_isl_hotspot_pairs(run, sample_count):
             ],
             "path_stability_score": candidate["path_stability_score"],
         })
+    context["selection_input_hash"] = _selection_input_hash(run, context)
+    context["flow_selection_hash"] = _flow_selection_hash(run, context, pairs)
+    for pair in pairs:
+        pair["selection_input_hash"] = context["selection_input_hash"]
+        pair["flow_selection_hash"] = context["flow_selection_hash"]
+        pair["selection_sampled_timestamps"] = _format_timestamps(
+            context["sampled_timestamps"]
+        )
     diagnostics = _build_core_isl_diagnostics(run, context, selected, warnings, pairs)
     return pairs, diagnostics
 
@@ -1005,6 +1842,16 @@ def write_udp_schedule(run_dir, run, pairs):
             ]
             if pair.get("score") != "":
                 metadata_items.append("hotspot_score=%s" % pair["score"])
+            if pair.get("selection_phase"):
+                metadata_items.append("selected_phase=%s" % pair["selection_phase"])
+            if pair.get("flow_selection_hash"):
+                metadata_items.append(
+                    "flow_selection_hash=%s" % pair["flow_selection_hash"]
+                )
+            if pair.get("selection_input_hash"):
+                metadata_items.append(
+                    "selection_input_hash=%s" % pair["selection_input_hash"]
+                )
             metadata = "|".join(metadata_items)
             f_out.write(
                 "%d,%d,%d,%.10f,%d,%d,,%s\n"
@@ -1030,6 +1877,11 @@ def write_run_metadata(run_dir, run, pairs, per_flow_rate):
         len(pairs),
     )
     scheduled_total_rate = per_flow_rate * len(pairs)
+    flow_selection_hash = pairs[0].get("flow_selection_hash", "") if pairs else ""
+    selection_input_hash = pairs[0].get("selection_input_hash", "") if pairs else ""
+    selection_sampled_timestamps = (
+        pairs[0].get("selection_sampled_timestamps", "") if pairs else ""
+    )
     metadata = {
         "run": run,
         "flow_count": len(pairs),
@@ -1054,11 +1906,36 @@ def write_run_metadata(run_dir, run, pairs, per_flow_rate):
         "traffic_stop_time_ns": run["traffic_stop_time_ns"],
         "drain_time_ns": run["drain_time_ns"],
         "drain_time_enabled": run["drain_time_enabled"],
+        "flow_selection_hash": flow_selection_hash,
+        "selection_input_hash": selection_input_hash,
+        "selection_sampled_timestamps": selection_sampled_timestamps,
+        "flow_selection_settings": {
+            "endpoint_load_cap_ratio": run.get("endpoint_load_cap_ratio"),
+            "satellite_interface_load_cap_ratio": run.get(
+                "satellite_interface_load_cap_ratio"
+            ),
+            "max_background_flows_per_src": run.get(
+                "max_background_flows_per_src"
+            ),
+            "max_background_flows_per_dst": run.get(
+                "max_background_flows_per_dst"
+            ),
+            "min_middle_isl_overlap_score": run.get(
+                "min_middle_isl_overlap_score"
+            ),
+            "min_reachable_overlap_samples": run.get(
+                "min_reachable_overlap_samples"
+            ),
+            "min_overlap_ratio": run.get("min_overlap_ratio"),
+            "selection_sample_horizon_s": run.get("selection_sample_horizon_s"),
+            "selection_sample_times_s": run.get("selection_sample_times_s"),
+        },
         "pairs": pairs,
         "notes": [
             "UDP/PDR experiment generated outside paper/lohi_replication/traffic_matrix.",
             "core_hotspot_specific uses baseline shortest-path middle-ISL overlap heuristic.",
-            "core_isl_hotspot_specific adds endpoint load caps and per-endpoint spread constraints before selecting middle-ISL-overlapping background flows.",
+            "core_isl_hotspot_specific adds endpoint, satellite-interface, and per-endpoint spread constraints before selecting middle-ISL-overlapping background flows.",
+            "core_isl_hotspot_specific flow selection samples a fixed baseline time horizon by default, so selected pairs can remain stable across different simulation durations.",
             "In background-flow sweeps, per-flow rate is computed from the configured reference background-flow count, not from the current background-flow count.",
             "UDP packets are generated only until traffic_stop_time_s; NS-3 continues until simulation_end_time_s to drain in-flight packets.",
         ],
@@ -1082,6 +1959,8 @@ def write_schedule_summary(run_parent_dir, run, pairs, per_flow_rate):
         if run["traffic_stop_time_ns"] is not None
         else 0.0
     )
+    flow_selection_hash = pairs[0].get("flow_selection_hash", "") if pairs else ""
+    selection_input_hash = pairs[0].get("selection_input_hash", "") if pairs else ""
     rows = [{
         "run_name": run["name"],
         "traffic_mode": run["traffic_mode"],
@@ -1102,6 +1981,8 @@ def write_schedule_summary(run_parent_dir, run, pairs, per_flow_rate):
         "background_offered_rate_mbps": per_flow_rate * by_class.get("background", 0),
         "focus_offered_rate_mbps": per_flow_rate * by_class.get("focus", 0),
         "traffic_duration_s": traffic_duration_s,
+        "flow_selection_hash": flow_selection_hash,
+        "selection_input_hash": selection_input_hash,
     }]
     _write_csv(
         os.path.join(run_parent_dir, "schedule_summary.csv"),
@@ -1122,6 +2003,8 @@ def write_schedule_summary(run_parent_dir, run, pairs, per_flow_rate):
             "background_offered_rate_mbps",
             "focus_offered_rate_mbps",
             "traffic_duration_s",
+            "flow_selection_hash",
+            "selection_input_hash",
         ],
     )
 
@@ -1143,6 +2026,8 @@ def write_selection_diagnostics(run_parent_dir, diagnostics):
         "flow_selection_diagnostics.csv": [
             "background_flow_count",
             "per_flow_rate_mbps",
+            "flow_selection_hash",
+            "selection_input_hash",
             "flow_id",
             "src",
             "dst",
@@ -1150,33 +2035,58 @@ def write_selection_diagnostics(run_parent_dir, diagnostics):
             "selected",
             "selection_rank",
             "selection_phase",
+            "selected_phase",
+            "fallback_phase",
+            "fallback_reason",
+            "relaxed_constraints",
             "middle_isl_overlap_score",
+            "directed_overlap_score",
+            "undirected_overlap_score",
+            "overlap_ratio",
             "reachable_samples",
             "sampled_timestamps",
             "first_hop_conflict",
             "last_hop_conflict",
+            "satellite_interface_keys",
+            "adds_target_corridor_load_mbps",
+            "adds_non_focus_edge_load_mbps",
             "src_endpoint_load_mbps_after_selection",
             "dst_endpoint_load_mbps_after_selection",
             "src_endpoint_load_ratio",
             "dst_endpoint_load_ratio",
+            "src_endpoint_load_ratio_after",
+            "dst_endpoint_load_ratio_after",
+            "src_satellite_interface_load_ratio_after",
+            "dst_satellite_interface_load_ratio_after",
             "candidate_reject_reason",
             "corridor_concentration_score",
             "path_stability_score",
             "selection_score",
+            "candidate_rank_before_fallback",
+            "candidate_rank_after_fallback",
         ],
         "corridor_overlap_summary.csv": [
             "background_flow_count",
             "per_flow_rate_mbps",
+            "flow_selection_hash",
+            "selection_input_hash",
             "src",
             "dst",
             "selected",
             "selection_rank",
             "overlap_edges_count",
             "overlap_score",
+            "directed_overlap_score",
+            "undirected_overlap_score",
+            "overlap_ratio",
+            "samples_with_overlap",
             "sampled_timestamp_count",
             "focus_middle_edges_count",
+            "focus_middle_undirected_edges_count",
             "candidate_middle_edges_count",
             "shared_edges",
+            "shared_undirected_edges",
+            "non_focus_middle_edges",
         ],
         "gsl_load_by_endpoint.csv": [
             "background_flow_count",
@@ -1203,6 +2113,56 @@ def write_selection_diagnostics(run_parent_dir, diagnostics):
             "isl_capacity_mbps",
             "load_ratio",
             "on_focus_middle_corridor",
+            "on_target_focus_corridor",
+            "selected_flow_ids",
+            "selected_flow_ids_using_edge",
+            "edge_rank_by_load",
+        ],
+        "fallback_phase_summary.csv": [
+            "background_flow_count",
+            "per_flow_rate_mbps",
+            "phase",
+            "selected_count",
+            "candidate_count",
+            "rejected_count",
+            "zero_overlap_selected_count",
+            "avg_overlap",
+            "min_overlap",
+            "max_overlap",
+            "notes",
+        ],
+        "corridor_concentration_summary.csv": [
+            "background_flow_count",
+            "per_flow_rate_mbps",
+            "flow_selection_hash",
+            "selection_input_hash",
+            "sampled_timestamps",
+            "target_corridor_edge_count",
+            "selected_flow_count",
+            "avg_middle_isl_overlap",
+            "zero_overlap_selected_count",
+            "target_corridor_offered_load_mbps",
+            "target_corridor_max_load_ratio",
+            "top_loaded_edge",
+            "top_loaded_edge_on_target_corridor",
+            "top_non_focus_edge",
+            "top_non_focus_edge_load_ratio",
+            "target_to_non_focus_load_ratio",
+        ],
+        "satellite_interface_load_summary.csv": [
+            "background_flow_count",
+            "per_flow_rate_mbps",
+            "satellite_id",
+            "interface_type",
+            "direction",
+            "selected_flow_count",
+            "estimated_offered_rate_mbps",
+            "gsl_capacity_mbps",
+            "load_ratio",
+            "over_capacity",
+            "satellite_interface_load_cap_ratio",
+            "satellite_interface_load_cap_mbps",
+            "over_satellite_interface_load_cap",
             "selected_flow_ids",
         ],
     }
@@ -1266,6 +2226,12 @@ def main():
         args.max_background_flows_per_dst,
         args.max_background_flows_per_src,
         args.per_flow_rate_reference_background_flow_count,
+        args.satellite_interface_load_cap_ratio,
+        args.min_middle_isl_overlap_score,
+        args.min_reachable_overlap_samples,
+        args.min_overlap_ratio,
+        args.selection_sample_horizon_s,
+        args.selection_sample_times_s,
     )
 
     generated_pairs_by_run_name = {}
@@ -1288,13 +2254,18 @@ def main():
             run["name"],
             run["traffic_mode"],
             run["load_level"],
-            run["simulation_end_time_ns"],
-            run["traffic_stop_time_ns"],
             run["background_flow_count"],
             run["random_flow_count"],
             run["endpoint_load_cap_ratio"],
             run["max_background_flows_per_dst"],
             run["max_background_flows_per_src"],
+            run["per_flow_rate_reference_background_flow_count"],
+            run.get("satellite_interface_load_cap_ratio"),
+            run.get("min_middle_isl_overlap_score"),
+            run.get("min_reachable_overlap_samples"),
+            run.get("min_overlap_ratio"),
+            run.get("selection_sample_horizon_s"),
+            tuple(run.get("selection_sample_times_s") or []),
         )
         if pair_key not in generated_pairs_by_run_name:
             generated_pairs_by_run_name[pair_key] = generate_pairs_and_diagnostics(

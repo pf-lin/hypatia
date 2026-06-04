@@ -112,6 +112,12 @@ def main():
         args.max_background_flows_per_dst,
         args.max_background_flows_per_src,
         args.per_flow_rate_reference_background_flow_count,
+        args.satellite_interface_load_cap_ratio,
+        args.min_middle_isl_overlap_score,
+        args.min_reachable_overlap_samples,
+        args.min_overlap_ratio,
+        args.selection_sample_horizon_s,
+        args.selection_sample_times_s,
     ):
         run_dir = os.path.join("runs", run["name"], run["dynamic_state_algorithm"])
         validate_run_dir(run_dir)

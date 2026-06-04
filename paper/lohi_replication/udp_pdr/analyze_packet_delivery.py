@@ -139,6 +139,9 @@ SELECTION_DIAGNOSTIC_FILENAMES = [
     "corridor_overlap_summary.csv",
     "gsl_load_by_endpoint.csv",
     "isl_corridor_load_summary.csv",
+    "fallback_phase_summary.csv",
+    "corridor_concentration_summary.csv",
+    "satellite_interface_load_summary.csv",
 ]
 
 
@@ -1419,6 +1422,12 @@ def main():
         args.max_background_flows_per_dst,
         args.max_background_flows_per_src,
         args.per_flow_rate_reference_background_flow_count,
+        args.satellite_interface_load_cap_ratio,
+        args.min_middle_isl_overlap_score,
+        args.min_reachable_overlap_samples,
+        args.min_overlap_ratio,
+        args.selection_sample_horizon_s,
+        args.selection_sample_times_s,
     )
 
     seen_run_names = set()

@@ -67,22 +67,56 @@ first-hop and last-hop satellites.
 
 Runs the same two focus flows plus background UDP flows selected for a cleaner
 ISL-bottleneck scenario. It starts from the `core_hotspot_specific`
-middle-ISL overlap idea, but adds endpoint load controls so selected background
-flows do not all terminate at the same ground-station endpoint. By default it
-uses:
+middle-ISL overlap idea, but adds target-corridor concentration, endpoint load
+controls, and satellite-interface load controls. The selector tries to load the
+focus pair's middle ISL corridor without moving the bottleneck to incidental
+non-focus ISLs or to a GSL/access interface. By default it uses:
 
 ```text
 endpoint_load_cap_ratio = 0.8
+satellite_interface_load_cap_ratio = 0.8
 max_background_flows_per_dst = 1
 max_background_flows_per_src = 1
+min_middle_isl_overlap_score = 1
+min_reachable_overlap_samples = 1
+min_overlap_ratio = 0.0
+selection_sample_horizon_s = 60.0
 hotspot_sample_count = 3
 ```
 
-This keeps source and destination offered load below the configured GSL
-capacity target while still selecting flows that share the baseline focus
-middle-ISL corridor. The goal is to make baseline shortest-path routing stress
-the ISL corridor, while leaving adaptive algorithms room to reroute around ISL
-congestion rather than simply moving the bottleneck to a destination GSL.
+Endpoint caps alone are not enough because many endpoints can still share the
+same first-hop or last-hop satellite interface. The satellite-interface cap uses
+the selected baseline first-hop and last-hop satellites as a proxy for
+source-side and destination-side GSL/interface load. It is conservative when a
+flow uses several sampled first/last satellites, but it helps keep access-side
+queues from becoming the dominant bottleneck.
+
+The selector separates directed and undirected middle-ISL overlap. Directed
+overlap is recorded explicitly, while undirected overlap lets a flow count as
+using the same physical corridor even if the sampled direction is reversed.
+Zero-overlap fallback is intentionally delayed until after per-source/per-dest,
+endpoint-cap, and corridor-threshold relaxations, because zero-overlap flows
+can dilute high background-flow-count cases into unrelated non-focus edges.
+
+The intended clean scenario has these properties:
+
+```text
+zero_overlap_selected_count = 0
+top_loaded_edge_on_target_corridor = true
+target_to_non_focus_load_ratio is high
+endpoint and satellite-interface load ratios stay at or below their caps
+fallback_phase_summary.csv shows strict or overlap-preserving relax phases
+```
+
+Flow selection samples a fixed baseline horizon by default, rather than the
+simulation duration. This means a 10 s smoke generation, a 60 s sanity run, and
+a 200 s formal run can share the same selected background pairs when their
+traffic mode, load level, background-flow count, focus pair, seedless selection
+settings, and per-flow-rate reference count are unchanged. Compare
+`flow_selection_hash` and `selection_input_hash` in `schedule_summary.csv`,
+`udp_burst_schedule.csv` metadata, or `run_metadata.json` to verify schedule
+stability. If explicit duration-dependent sampling is desired, pass
+`--selection-sample-times-s` and record those timestamps with the run.
 
 `random_general`
 
@@ -346,16 +380,51 @@ runs/<run_name>/flow_selection_diagnostics.csv
 runs/<run_name>/corridor_overlap_summary.csv
 runs/<run_name>/gsl_load_by_endpoint.csv
 runs/<run_name>/isl_corridor_load_summary.csv
+runs/<run_name>/fallback_phase_summary.csv
+runs/<run_name>/corridor_concentration_summary.csv
+runs/<run_name>/satellite_interface_load_summary.csv
 ```
 
 Use `gsl_load_by_endpoint.csv` to verify selected source and destination
 offered load stays below the endpoint cap/GSL capacity. Use
-`corridor_overlap_summary.csv` and `isl_corridor_load_summary.csv` to check
-that selected background flows still overlap the focus middle-ISL corridor and
-that the estimated offered load on that corridor approaches or exceeds ISL
-capacity. `flow_selection_diagnostics.csv` records selected and rejected
-candidates, including edge-conflict flags, endpoint load ratios, selection
-rank, and fallback phase if strict constraints were relaxed.
+`satellite_interface_load_summary.csv` to check the first-hop/last-hop
+satellite-interface proxy load; `over_satellite_interface_load_cap=true`
+indicates a selected schedule may recreate a GSL/interface bottleneck even if
+endpoint load is spread out.
+
+Use `corridor_overlap_summary.csv` to compare directed overlap, undirected
+overlap, overlap ratio, and non-focus middle edges for each candidate. Use
+`isl_corridor_load_summary.csv` to check per-edge estimated offered load,
+`on_target_focus_corridor`, `selected_flow_ids_using_edge`, and
+`edge_rank_by_load`. `corridor_concentration_summary.csv` is the quick
+scenario-quality check: the top loaded edge should ideally be on the target
+focus corridor, `zero_overlap_selected_count` should be zero, and
+`target_to_non_focus_load_ratio` should be high enough that non-focus spillover
+is not the dominant story.
+
+`fallback_phase_summary.csv` reports how many flows were selected by each phase:
+
+```text
+strict
+relax_per_src_dst_limit
+relax_endpoint_cap
+relax_corridor_threshold
+relax_edge_conflict
+fallback_allow_zero_overlap
+fallback_insufficient_candidates
+```
+
+Treat `fallback_allow_zero_overlap` and `fallback_insufficient_candidates` as
+warnings for formal runs. They mean the requested background-flow count could
+not be filled while preserving target-corridor overlap under the active caps.
+
+`flow_selection_diagnostics.csv` records selected and rejected candidates,
+including directed/undirected overlap, fallback reason, relaxed constraints,
+endpoint load ratios, satellite-interface load ratios, candidate ranks before
+and after fallback, and the added target/non-focus load estimates. The
+`flow_selection_hash` identifies the selected pair set independent of
+simulation duration; `selection_input_hash` identifies the selector settings
+and sampled baseline timestamps.
 
 Basic plots:
 
@@ -373,6 +442,9 @@ physical_drop_count_by_algorithm.png
 physical_drop_by_link_type.png
 gsl_queue_occupancy_by_algorithm.png
 loss_attribution_breakdown.png
+corridor_concentration_summary.png
+satellite_interface_load_summary.png
+fallback_phase_summary.png
 ```
 
 For single-count runs, plot generation also writes copies with an explicit
