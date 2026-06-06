@@ -357,6 +357,11 @@ runs/<run_name>/comparison_packet_delivery/link_drops.csv
 runs/<run_name>/comparison_packet_delivery/physical_drop_summary.csv
 runs/<run_name>/comparison_packet_delivery/gsl_queue_summary.csv
 runs/<run_name>/comparison_packet_delivery/loss_attribution_summary.csv
+runs/<run_name>/comparison_packet_delivery/loss_attribution_detailed.csv
+runs/<run_name>/comparison_packet_delivery/congested_interfaces_summary.csv
+runs/<run_name>/comparison_packet_delivery/loss_attribution_breakdown_v2.csv
+runs/<run_name>/comparison_packet_delivery/queue_saturation_timeline.csv
+runs/<run_name>/comparison_packet_delivery/routing_drops.csv
 runs/<run_name>/comparison_packet_delivery/max_queue_occupancy_by_algorithm.csv
 ```
 
@@ -478,10 +483,28 @@ NS-3 -> calculate_routes.py -> NS-3 -> calculate_routes.py ...
 ```
 
 Queue statistics are read from `logs_ns3/isl_queue_pkt.csv` and summarized into
-`queue_stats/queue_stats_<time_ns>.csv` for queue-aware algorithms.
+`queue_stats/queue_stats_<time_ns>.csv` for queue-aware algorithms. The
+`isl_queue_pkt.csv` and `isl_queue_byte.csv` files contain only the current
+routing-update window and are overwritten every window.
+
+Queue tracking also appends every completed window to full-history files:
+
+```text
+logs_ns3/isl_queue_pkt_history.csv
+logs_ns3/isl_queue_byte_history.csv
+logs_ns3/gsl_queue_pkt_history.csv
+logs_ns3/gsl_queue_byte_history.csv
+```
+
+After both scratch and history files are written, the ISL and GSL trackers are
+reset to begin a new measurement window. Resetting the trackers does not clear
+the actual NetDevice queues; the new window is initialized with the current
+queue occupancy. Routing continues to consume only the per-window
+`isl_queue_pkt.csv`, so `queue_stats/queue_stats_<time_ns>.csv` remains a
+per-window maximum rather than a cumulative maximum.
 
 GSL/access queue tracking is enabled for UDP/PDR runs through
-`enable_link_queue_tracking=true`. It writes:
+`enable_link_queue_tracking=true`. Its per-window scratch files are:
 
 ```text
 logs_ns3/gsl_queue_pkt.csv
@@ -493,23 +516,110 @@ These files use the same interval format as the ISL queue logs:
 access interfaces rather than fixed point-to-point links, so `to=-1` means the
 destination peer is not fixed at the queue object. Routing algorithms still
 consume only the ISL `queue_stats/*.csv`; GSL queues are for analysis and loss
-attribution only.
+attribution only. Post-run analysis prefers the append-only history files and
+falls back to the scratch files for older runs.
 
 Physical drop tracing is enabled by
 `enable_physical_link_drop_tracking=true`. It writes:
 
 ```text
 logs_ns3/physical_link_drops.csv
+logs_ns3/interface_queue_drops.csv
+logs_ns3/routing_drops.csv
 logs_ns3/udp_send_failures.csv
 logs_ns3/udp_bursts_outgoing_send_summary.csv
 ```
 
 `physical_link_drops.csv` records queue `DropBeforeEnqueue` plus
-`PhyTxDrop`/`PhyRxDrop` callbacks on tracked ISL and GSL net devices.
-`MacTxDrop` is not counted separately in this first pass because queue overflow
-also triggers `MacTxDrop` in these devices, which would double-count the same
-drop. `udp_send_failures.csv` is header-only when all `Socket::SendTo()` calls
-are accepted.
+`MacTxDrop`, `PhyTxDrop`, and `PhyRxDrop` callbacks on tracked ISL and GSL net
+devices. `interface_queue_drops.csv` keeps the queue-facing subset of those
+events. `MacTxDrop` is useful diagnostic coverage, but queue overflow in the
+current ISL/GSL devices also triggers queue `DropBeforeEnqueue`, so analysis
+does not add `MacTxDrop` to physical queue-drop counts when queue events are
+present. `routing_drops.csv` records arbiter route lookup failures from
+`RouteOutput` and `RouteInput`. `udp_send_failures.csv` is header-only when all
+`Socket::SendTo()` calls are accepted.
+
+The drop trace schema includes:
+
+```text
+time_ns, link_type, interface_type, from_node, to_node,
+satellite_id, ground_station_id, interface_key,
+drop_source, drop_reason, packet_size_bytes,
+queue_occupancy_pkt_if_available,
+queue_occupancy_byte_if_available,
+queue_capacity_pkt_if_available,
+flow_id_if_available, trace_hook
+```
+
+`interface_key` uses `LINK:from->to`, for example `ISL:240->241` or
+`GSL:720->-1`. GSL queues are shared access queues, so `to=-1` means the queue
+object is not tied to a fixed peer. If the queue is attached to a satellite
+side GSL interface, `from` is the satellite node id. If it is attached to a
+ground-station side interface, `from` is the endpoint node id and
+`ground_station_id` is the local ground-station index when available.
+
+## Detailed Loss Attribution
+
+The original attribution view was intentionally simple:
+
+```text
+physical_drop_packets
+send_failed_packets
+unexplained_loss
+```
+
+That view is still written for backward compatibility, but it cannot answer
+whether remaining end-to-end loss correlates with ISL or GSL queue saturation.
+The v2 diagnostics split the remaining loss into physical trace categories and
+conservative association categories:
+
+```text
+Physical Queue Drop
+Physical PHY Drop
+UDP Send Failure
+Routing / No-route Drop
+IPv4 L3 Drop
+ISL Queue Saturation Associated Loss
+GSL Queue Saturation Associated Loss
+Mixed Queue Saturation Associated Loss
+Tail / Drain Possible Loss
+Unclassified Unexplained Loss
+```
+
+Only an actual trace event such as `DropBeforeEnqueue` is called a physical
+queue drop. Queue occupancy reaching configured capacity is reported as
+`queue_saturation_associated_loss`, not as physical proof. This warning is
+written into `loss_diagnostics.txt`:
+
+```text
+Queue-saturation-associated loss is a conservative correlation based on queue
+occupancy and flow/path context. It should not be interpreted as a physical drop
+proof unless matching physical drop trace events are present.
+```
+
+`loss_attribution_detailed.csv` is flow-level. For each lossy flow it records
+synthetic loss, per-flow trace counts when a flow id is available, ISL/GSL/mixed
+queue-saturation-associated loss, tail/drain possible loss, unclassified loss,
+the dominant association, and the associated interface keys.
+
+`congested_interfaces_summary.csv` is interface-level. It lists every interface
+that reached configured packet capacity, the first and last saturation times,
+max/mean queue occupancy, how many samples were at capacity, and the flow ids
+that may have passed that interface when existing diagnostics can provide them.
+
+`queue_saturation_timeline.csv` is interval-level. It records ISL/GSL queue
+occupancy, capacity, whether the interval is at capacity, and estimated active
+and lossy flow counts for the interface.
+
+`loss_attribution_breakdown_v2.csv` is algorithm-level. Its
+`attribution_coverage_ratio` is:
+
+```text
+1 - unclassified_unexplained_loss / synthetic_lost_packets
+```
+
+When `synthetic_lost_packets` is zero, coverage is reported as `1.0`.
 
 ## Current Limitations
 
@@ -517,8 +627,8 @@ PDR remains the primary end-to-end metric. The synthetic loss value
 `sent_packets - received_packets` says that a packet did not reach the UDP
 receiver by simulation end; it is not, by itself, a physical link drop.
 
-The analysis now compares synthetic loss against physical drop trace events and
-UDP send failures:
+The compatibility analysis still compares synthetic loss against physical drop
+trace events and UDP send failures:
 
 ```text
 unexplained_loss = synthetic_lost_packets
@@ -527,10 +637,11 @@ unexplained_loss = synthetic_lost_packets
 ```
 
 `unexplained_loss` can remain positive when loss occurs in an untraced layer,
-for example no-route/forwarding drops, socket/internal buffering, or a trace
-hook not covered by the first pass. It can also become negative if future trace
+for example generic IPv4 L3 drops, socket/internal buffering, or a trace hook
+not covered by the current pass. It can also become negative if future trace
 coverage double-counts the same packet, so the diagnostics should be read
-together with the stated coverage.
+together with the stated coverage. Use the v2 CSV files above for the more
+useful split of remaining loss.
 
 `link_drops.csv` and `synthetic_link_drops.csv` remain synthetic flow-loss
 summaries for backward compatibility. True physical events are reported in
@@ -538,7 +649,16 @@ summaries for backward compatibility. True physical events are reported in
 
 Queue attribution for routing still uses `queue_stats/*.csv` to report max
 queue occupancy per ISL. GSL/access queues are summarized separately in
-`gsl_queue_summary.csv` and are not fed back into queue-aware routing.
+`gsl_queue_summary.csv`, `congested_interfaces_summary.csv`, and
+`queue_saturation_timeline.csv`; they are not fed back into queue-aware routing.
+
+ISL queue-saturation association uses existing `isl_corridor_load_summary.csv`
+edge-to-flow diagnostics. GSL queue-saturation association uses
+`satellite_interface_load_summary.csv`, `flow_selection_diagnostics.csv`, and an
+endpoint access-side fallback. These are flow/path context proxies. The
+`dynamic_state/fstate_*.txt` files are delta updates, and this analysis does not
+perform complete per-packet path replay. If a flow-to-interface mapping is
+missing, the flow remains unclassified rather than being forced into ISL or GSL.
 
 `loss_diagnostics.txt` and `statistics.txt` explicitly record the current
 attribution scope:
@@ -547,9 +667,11 @@ attribution scope:
 physical_drop_trace_available = true/false
 loss_attribution = physical_drop_trace or synthetic_sent_minus_received
 max_queue_scope = sampled/event-derived ISL net-device queue; GSL queue summarized separately when available
-physical_drop_trace_coverage = DropBeforeEnqueue queue callbacks and PhyTxDrop/PhyRxDrop on tracked ISL/GSL NetDevices
+physical_drop_trace_coverage = DropBeforeEnqueue queue callbacks, MacTxDrop diagnostics, and PhyTxDrop/PhyRxDrop on tracked ISL/GSL NetDevices
 gsl_queue_tracking_available = true/false
 udp_send_failure_trace_available = true/false
+routing_drop_trace_available = true/false
+ipv4_l3_drop_trace_available = true/false
 ```
 
 PDR remains an end-to-end delivery metric. Queue occupancy and utilization logs

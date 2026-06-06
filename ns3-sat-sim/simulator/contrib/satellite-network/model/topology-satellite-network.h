@@ -102,14 +102,18 @@ namespace ns3 {
                 std::string link_type,
                 int32_t from_node,
                 int32_t to_node,
+                std::string drop_source,
                 std::string drop_reason,
+                std::string trace_hook,
                 Ptr<Queue<Packet>> queue
             );
 
             std::string m_link_type;
             int32_t m_from_node;
             int32_t m_to_node;
+            std::string m_drop_source;
             std::string m_drop_reason;
+            std::string m_trace_hook;
             Ptr<Queue<Packet>> m_queue;
         };
 
@@ -124,6 +128,7 @@ namespace ns3 {
 
         // Helper
         void EnsureValidNodeId(uint32_t node_id);
+        void InitializeQueueTrackingHistoryFiles();
         void InitializePhysicalDropTraceFile();
         void ConnectPhysicalDropTraces(
             Ptr<Object> trace_source,
@@ -132,6 +137,10 @@ namespace ns3 {
             int32_t from_node,
             int32_t to_node
         );
+        std::string GetPhysicalDropTraceCsvHeader();
+        std::string BuildInterfaceKey(std::string link_type, int32_t from_node, int32_t to_node);
+        std::string FormatOptionalNodeId(int32_t node_id);
+        std::string GetQueueCapacityPackets(Ptr<Queue<Packet>> queue);
         void RecordPhysicalDrop(Ptr<PhysicalLinkTraceContext> context, Ptr<const Packet> packet);
         void WriteGSLQueueTrackingResults();
         static void PhysicalDropTraceCallback(
@@ -173,7 +182,12 @@ namespace ns3 {
         bool m_enable_queue_traces;
         bool m_enable_physical_link_drop_tracking;
         std::string m_queue_trace_file;
+        std::string m_isl_queue_pkt_history_csv_filename;
+        std::string m_isl_queue_byte_history_csv_filename;
+        std::string m_gsl_queue_pkt_history_csv_filename;
+        std::string m_gsl_queue_byte_history_csv_filename;
         std::string m_physical_link_drops_csv_filename;
+        std::string m_interface_queue_drops_csv_filename;
 
         // ISL queue trackers
         std::vector<std::pair<std::pair<int32_t, int32_t>, Ptr<PtopLinkQueueTracker>>> m_isl_queue_trackers;

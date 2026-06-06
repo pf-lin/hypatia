@@ -118,6 +118,9 @@ def plot_single_run(comparison_dir):
     physical_drop_path = os.path.join(comparison_dir, "physical_drop_summary.csv")
     gsl_queue_path = os.path.join(comparison_dir, "gsl_queue_summary.csv")
     loss_attribution_path = os.path.join(comparison_dir, "loss_attribution_summary.csv")
+    loss_attribution_v2_path = os.path.join(comparison_dir, "loss_attribution_breakdown_v2.csv")
+    congested_interfaces_path = os.path.join(comparison_dir, "congested_interfaces_summary.csv")
+    queue_saturation_timeline_path = os.path.join(comparison_dir, "queue_saturation_timeline.csv")
     corridor_concentration_path = os.path.join(
         comparison_dir,
         "corridor_concentration_summary.csv",
@@ -196,10 +199,10 @@ def plot_single_run(comparison_dir):
             by_algorithm = algorithms.copy()
             by_algorithm["drop_count"] = 0
             by_link_type = algorithms.copy()
-        for link_type in ["isl", "gsl", "unknown"]:
+        for link_type in ["ISL", "GSL", "UNKNOWN"]:
             if link_type not in by_link_type.columns:
                 by_link_type[link_type] = 0
-        value_cols = [col for col in ["isl", "gsl", "unknown"] if col in by_link_type.columns]
+        value_cols = [col for col in ["ISL", "GSL", "UNKNOWN"] if col in by_link_type.columns]
         by_link_type[value_cols] = by_link_type[value_cols].fillna(0)
         _bar_plot(
             by_algorithm,
@@ -249,6 +252,131 @@ def plot_single_run(comparison_dir):
                 "Packets",
                 "Loss Attribution Breakdown",
             )
+
+    if os.path.exists(loss_attribution_v2_path):
+        attribution_v2 = pd.read_csv(loss_attribution_v2_path)
+        if len(attribution_v2):
+            value_cols = [
+                "physical_queue_drop_packets",
+                "physical_phy_drop_packets",
+                "udp_send_failed_packets",
+                "routing_drop_packets",
+                "ipv4_l3_drop_packets",
+                "isl_queue_saturation_associated_loss",
+                "gsl_queue_saturation_associated_loss",
+                "mixed_queue_saturation_associated_loss",
+                "tail_in_flight_possible_loss",
+                "unclassified_unexplained_loss",
+            ]
+            for col in value_cols:
+                if col not in attribution_v2.columns:
+                    attribution_v2[col] = 0
+            _stacked_bar(
+                attribution_v2,
+                "algorithm",
+                value_cols,
+                os.path.join(comparison_dir, "loss_attribution_breakdown_v2.png"),
+                "Packets",
+                "Loss Attribution Breakdown v2 (Physical and Associated)",
+            )
+
+    if os.path.exists(congested_interfaces_path):
+        congested = pd.read_csv(congested_interfaces_path)
+        if len(congested):
+            by_link = (
+                congested.pivot_table(
+                    index="algorithm",
+                    columns="link_type",
+                    values="samples_at_capacity",
+                    aggfunc="sum",
+                    fill_value=0,
+                )
+                .reset_index()
+            )
+            for link_type in ["ISL", "GSL", "UNKNOWN"]:
+                if link_type not in by_link.columns:
+                    by_link[link_type] = 0
+            _stacked_bar(
+                by_link,
+                "algorithm",
+                ["ISL", "GSL", "UNKNOWN"],
+                os.path.join(comparison_dir, "queue_saturation_by_link_type.png"),
+                "Queue samples at capacity",
+                "Queue Saturation by Link Type",
+            )
+
+            top = congested.sort_values(
+                ["samples_at_capacity", "max_queue_pkt"],
+                ascending=[False, False],
+            ).head(20).copy()
+            top["interface"] = (
+                top["algorithm"].map(_short_label)
+                + " "
+                + top["interface_key"].astype(str)
+            )
+            plt.figure(figsize=(11, 6))
+            plt.barh(
+                top["interface"][::-1],
+                top["samples_at_capacity"][::-1].astype(float),
+                color="#2a9d8f",
+            )
+            plt.xlabel("Samples at queue capacity")
+            plt.title("Top Congested Interfaces")
+            plt.tight_layout()
+            plt.savefig(os.path.join(comparison_dir, "top_congested_interfaces.png"), dpi=180)
+            plt.close()
+
+    if os.path.exists(queue_saturation_timeline_path):
+        timeline = pd.read_csv(queue_saturation_timeline_path)
+        if len(timeline):
+            if os.path.exists(congested_interfaces_path):
+                congested = pd.read_csv(congested_interfaces_path)
+            else:
+                congested = pd.DataFrame()
+            if len(congested):
+                top_keys = (
+                    congested.sort_values(
+                        ["samples_at_capacity", "max_queue_pkt"],
+                        ascending=[False, False],
+                    )
+                    .head(8)[["algorithm", "interface_key"]]
+                    .apply(lambda row: "%s|%s" % (row["algorithm"], row["interface_key"]), axis=1)
+                    .tolist()
+                )
+            else:
+                top_keys = (
+                    timeline[timeline["is_at_capacity"].astype(str).str.lower() == "true"]
+                    [["algorithm", "interface_key"]]
+                    .drop_duplicates()
+                    .head(8)
+                    .apply(lambda row: "%s|%s" % (row["algorithm"], row["interface_key"]), axis=1)
+                    .tolist()
+                )
+            if top_keys:
+                timeline = timeline.copy()
+                timeline["plot_key"] = timeline.apply(
+                    lambda row: "%s|%s" % (row["algorithm"], row["interface_key"]),
+                    axis=1,
+                )
+                plt.figure(figsize=(11, 5.8))
+                for plot_key, group in timeline[timeline["plot_key"].isin(top_keys)].groupby("plot_key"):
+                    algorithm, interface_key = plot_key.split("|", 1)
+                    label = "%s %s" % (_short_label(algorithm), interface_key)
+                    group = group.sort_values("time_ns")
+                    plt.plot(
+                        group["time_ns"].astype(float) / 1e9,
+                        group["queue_pkt"].astype(float),
+                        linewidth=1.7,
+                        label=label,
+                    )
+                plt.xlabel("Simulation time (s)")
+                plt.ylabel("Queue occupancy (packets)")
+                plt.title("Queue Saturation Timeline")
+                plt.grid(True, alpha=0.25)
+                plt.legend(fontsize=8)
+                plt.tight_layout()
+                plt.savefig(os.path.join(comparison_dir, "queue_saturation_timeline.png"), dpi=180)
+                plt.close()
 
     if os.path.exists(corridor_concentration_path):
         concentration = pd.read_csv(corridor_concentration_path)

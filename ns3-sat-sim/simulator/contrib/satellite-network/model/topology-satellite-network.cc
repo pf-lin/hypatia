@@ -20,6 +20,8 @@
  */
 
 #include "topology-satellite-network.h"
+#include "ns3/ipv4-arbiter-routing.h"
+#include "ns3/queue-size.h"
 
 namespace ns3 {
 
@@ -27,13 +29,17 @@ namespace ns3 {
         std::string link_type,
         int32_t from_node,
         int32_t to_node,
+        std::string drop_source,
         std::string drop_reason,
+        std::string trace_hook,
         Ptr<Queue<Packet>> queue
     ) {
         m_link_type = link_type;
         m_from_node = from_node;
         m_to_node = to_node;
+        m_drop_source = drop_source;
         m_drop_reason = drop_reason;
+        m_trace_hook = trace_hook;
         m_queue = queue;
     }
 
@@ -108,6 +114,19 @@ namespace ns3 {
                 m_enable_queue_traces ? "true" : "false"
             )
         );
+        bool enable_routing_drop_tracking = parse_boolean(
+            m_basicSimulation->GetConfigParamOrDefault(
+                "enable_routing_drop_tracking",
+                m_enable_physical_link_drop_tracking ? "true" : "false"
+            )
+        );
+        Ipv4ArbiterRouting::ConfigureDropTrace(
+            m_basicSimulation->GetLogsDir(),
+            enable_routing_drop_tracking
+        );
+        if (m_enable_queue_traces) {
+            InitializeQueueTrackingHistoryFiles();
+        }
         if (m_enable_physical_link_drop_tracking) {
             InitializePhysicalDropTraceFile();
         }
@@ -259,14 +278,79 @@ namespace ns3 {
     }
 
     void
+    TopologySatelliteNetwork::InitializeQueueTrackingHistoryFiles() {
+        std::string logs_dir = m_basicSimulation->GetLogsDir();
+        m_isl_queue_pkt_history_csv_filename = logs_dir + "/isl_queue_pkt_history.csv";
+        m_isl_queue_byte_history_csv_filename = logs_dir + "/isl_queue_byte_history.csv";
+        m_gsl_queue_pkt_history_csv_filename = logs_dir + "/gsl_queue_pkt_history.csv";
+        m_gsl_queue_byte_history_csv_filename = logs_dir + "/gsl_queue_byte_history.csv";
+
+        for (const std::string& filename : {
+                m_isl_queue_pkt_history_csv_filename,
+                m_isl_queue_byte_history_csv_filename,
+                m_gsl_queue_pkt_history_csv_filename,
+                m_gsl_queue_byte_history_csv_filename
+        }) {
+            std::ofstream ofs(filename, std::ofstream::out | std::ofstream::trunc);
+            if (!ofs.is_open()) {
+                NS_ABORT_MSG("Failed to initialize queue tracking history file: " << filename);
+            }
+        }
+    }
+
+    void
     TopologySatelliteNetwork::InitializePhysicalDropTraceFile() {
         m_physical_link_drops_csv_filename = m_basicSimulation->GetLogsDir() + "/physical_link_drops.csv";
+        m_interface_queue_drops_csv_filename = m_basicSimulation->GetLogsDir() + "/interface_queue_drops.csv";
         std::ofstream ofs;
         ofs.open(m_physical_link_drops_csv_filename, std::ofstream::out | std::ofstream::trunc);
-        ofs << "time_ns,link_type,from_node,to_node,drop_reason,packet_size_bytes,"
-            << "queue_occupancy_pkt_if_available,queue_occupancy_byte_if_available,"
-            << "flow_id_if_available" << std::endl;
+        ofs << GetPhysicalDropTraceCsvHeader() << std::endl;
         ofs.close();
+        ofs.open(m_interface_queue_drops_csv_filename, std::ofstream::out | std::ofstream::trunc);
+        ofs << GetPhysicalDropTraceCsvHeader() << std::endl;
+        ofs.close();
+    }
+
+    std::string
+    TopologySatelliteNetwork::GetPhysicalDropTraceCsvHeader() {
+        return "time_ns,link_type,interface_type,from_node,to_node,satellite_id,"
+               "ground_station_id,interface_key,drop_source,drop_reason,"
+               "packet_size_bytes,queue_occupancy_pkt_if_available,"
+               "queue_occupancy_byte_if_available,queue_capacity_pkt_if_available,"
+               "flow_id_if_available,trace_hook";
+    }
+
+    std::string
+    TopologySatelliteNetwork::BuildInterfaceKey(
+        std::string link_type,
+        int32_t from_node,
+        int32_t to_node
+    ) {
+        return link_type + ":" + std::to_string(from_node) + "->" + std::to_string(to_node);
+    }
+
+    std::string
+    TopologySatelliteNetwork::FormatOptionalNodeId(int32_t node_id) {
+        if (node_id < 0) {
+            return "";
+        }
+        return std::to_string(node_id);
+    }
+
+    std::string
+    TopologySatelliteNetwork::GetQueueCapacityPackets(Ptr<Queue<Packet>> queue) {
+        if (queue == nullptr) {
+            return "";
+        }
+        Ptr<QueueBase> queue_base = queue->GetObject<QueueBase>();
+        if (queue_base == nullptr) {
+            return "";
+        }
+        QueueSize max_size = queue_base->GetMaxSize();
+        if (max_size.GetUnit() != PACKETS) {
+            return "";
+        }
+        return std::to_string(max_size.GetValue());
     }
 
     void
@@ -290,26 +374,50 @@ namespace ns3 {
         std::ofstream ofs;
         ofs.open(m_physical_link_drops_csv_filename, std::ofstream::out | std::ofstream::app);
         uint32_t packet_size = packet == nullptr ? 0 : packet->GetSize();
-        if (context->m_queue != nullptr) {
-            ofs << Simulator::Now().GetNanoSeconds()
-                << "," << context->m_link_type
-                << "," << context->m_from_node
-                << "," << context->m_to_node
-                << "," << context->m_drop_reason
-                << "," << packet_size
-                << "," << context->m_queue->GetNPackets()
-                << "," << context->m_queue->GetNBytes()
-                << "," << std::endl;
-        } else {
-            ofs << Simulator::Now().GetNanoSeconds()
-                << "," << context->m_link_type
-                << "," << context->m_from_node
-                << "," << context->m_to_node
-                << "," << context->m_drop_reason
-                << "," << packet_size
-                << ",,," << std::endl;
+        std::string satellite_id = "";
+        std::string ground_station_id = "";
+        if (context->m_from_node >= 0) {
+            if ((uint32_t) context->m_from_node < GetNumSatellites()) {
+                satellite_id = std::to_string(context->m_from_node);
+            } else if ((uint32_t) context->m_from_node < GetNumNodes()) {
+                ground_station_id = std::to_string(NodeToGroundStationId(context->m_from_node));
+            }
         }
+        std::string queue_pkt = "";
+        std::string queue_byte = "";
+        if (context->m_queue != nullptr) {
+            queue_pkt = std::to_string(context->m_queue->GetNPackets());
+            queue_byte = std::to_string(context->m_queue->GetNBytes());
+        }
+        std::string row =
+            std::to_string(Simulator::Now().GetNanoSeconds()) + "," +
+            context->m_link_type + "," +
+            "NetDeviceTxQueue" + "," +
+            std::to_string(context->m_from_node) + "," +
+            std::to_string(context->m_to_node) + "," +
+            satellite_id + "," +
+            ground_station_id + "," +
+            BuildInterfaceKey(context->m_link_type, context->m_from_node, context->m_to_node) + "," +
+            context->m_drop_source + "," +
+            context->m_drop_reason + "," +
+            std::to_string(packet_size) + "," +
+            queue_pkt + "," +
+            queue_byte + "," +
+            GetQueueCapacityPackets(context->m_queue) + "," +
+            "" + "," +
+            context->m_trace_hook;
+        ofs << row << std::endl;
         ofs.close();
+        if (
+            context->m_drop_source == "QueueDrop" ||
+            context->m_trace_hook == "DropBeforeEnqueue" ||
+            context->m_drop_source == "MacTxDrop"
+        ) {
+            std::ofstream queue_ofs;
+            queue_ofs.open(m_interface_queue_drops_csv_filename, std::ofstream::out | std::ofstream::app);
+            queue_ofs << row << std::endl;
+            queue_ofs.close();
+        }
     }
 
     void
@@ -326,7 +434,13 @@ namespace ns3 {
 
         if (queue != nullptr) {
             Ptr<PhysicalLinkTraceContext> queue_context = new PhysicalLinkTraceContext(
-                link_type, from_node, to_node, "QueueDrop", queue
+                link_type,
+                from_node,
+                to_node,
+                "QueueDrop",
+                "DropBeforeEnqueue",
+                "DropBeforeEnqueue",
+                queue
             );
             m_physical_drop_trace_contexts.push_back(queue_context);
             queue->TraceConnectWithoutContext(
@@ -339,8 +453,33 @@ namespace ns3 {
             );
         }
 
+        Ptr<PhysicalLinkTraceContext> mac_tx_context = new PhysicalLinkTraceContext(
+            link_type,
+            from_node,
+            to_node,
+            "MacTxDrop",
+            "NetDeviceSendFailedOrQueueOverflow",
+            "MacTxDrop",
+            queue
+        );
+        m_physical_drop_trace_contexts.push_back(mac_tx_context);
+        trace_source->TraceConnectWithoutContext(
+            "MacTxDrop",
+            MakeBoundCallback(
+                &TopologySatelliteNetwork::PhysicalDropTraceCallback,
+                this,
+                mac_tx_context
+            )
+        );
+
         Ptr<PhysicalLinkTraceContext> phy_tx_context = new PhysicalLinkTraceContext(
-            link_type, from_node, to_node, "PhyTxDrop", queue
+            link_type,
+            from_node,
+            to_node,
+            "PhyTxDrop",
+            "PhyTxDrop",
+            "PhyTxDrop",
+            queue
         );
         m_physical_drop_trace_contexts.push_back(phy_tx_context);
         trace_source->TraceConnectWithoutContext(
@@ -353,7 +492,13 @@ namespace ns3 {
         );
 
         Ptr<PhysicalLinkTraceContext> phy_rx_context = new PhysicalLinkTraceContext(
-            link_type, from_node, to_node, "PhyRxDrop", queue
+            link_type,
+            from_node,
+            to_node,
+            "PhyRxDrop",
+            "PhyRxDrop",
+            "PhyRxDrop",
+            queue
         );
         m_physical_drop_trace_contexts.push_back(phy_rx_context);
         trace_source->TraceConnectWithoutContext(
@@ -728,8 +873,21 @@ namespace ns3 {
             std::cout << "    >> Opened: " << filename_pkt << std::endl;
             FILE* file_queue_byte_csv = fopen(filename_byte.c_str(), "w+");
             std::cout << "    >> Opened: " << filename_byte << std::endl;
+            FILE* file_queue_pkt_history_csv = fopen(
+                m_isl_queue_pkt_history_csv_filename.c_str(),
+                "a"
+            );
+            FILE* file_queue_byte_history_csv = fopen(
+                m_isl_queue_byte_history_csv_filename.c_str(),
+                "a"
+            );
 
-            if (!file_queue_pkt_csv || !file_queue_byte_csv) {
+            if (
+                !file_queue_pkt_csv ||
+                !file_queue_byte_csv ||
+                !file_queue_pkt_history_csv ||
+                !file_queue_byte_history_csv
+            ) {
                 NS_ABORT_MSG("Failed to open ISL queue tracking output files");
             }
 
@@ -759,6 +917,13 @@ namespace ns3 {
                             std::get<1>(log_entries_pkt[j]),  // interval end (ns)
                             std::get<2>(log_entries_pkt[j])   // number of packets
                     );
+                    fprintf(file_queue_pkt_history_csv,
+                            "%d,%d,%" PRId64 ",%" PRId64 ",%" PRId64 "\n",
+                            from, to,
+                            std::get<0>(log_entries_pkt[j]),
+                            std::get<1>(log_entries_pkt[j]),
+                            std::get<2>(log_entries_pkt[j])
+                    );
                 }
 
                 // 寫入 bytes 資料
@@ -771,6 +936,13 @@ namespace ns3 {
                             std::get<1>(log_entries_byte[j]),  // interval end (ns)
                             std::get<2>(log_entries_byte[j])   // number of bytes
                     );
+                    fprintf(file_queue_byte_history_csv,
+                            "%d,%d,%" PRId64 ",%" PRId64 ",%" PRId64 "\n",
+                            from, to,
+                            std::get<0>(log_entries_byte[j]),
+                            std::get<1>(log_entries_byte[j]),
+                            std::get<2>(log_entries_byte[j])
+                    );
                 }
             }
 
@@ -780,6 +952,8 @@ namespace ns3 {
             std::cout << "    >> Closed: " << filename_pkt << std::endl;
             fclose(file_queue_byte_csv);
             std::cout << "    >> Closed: " << filename_byte << std::endl;
+            fclose(file_queue_pkt_history_csv);
+            fclose(file_queue_byte_history_csv);
 
             // Register completion
             std::cout << "  > ISL queue tracking files written successfully" << std::endl;
@@ -808,8 +982,21 @@ namespace ns3 {
         std::cout << "    >> Opened: " << filename_pkt << std::endl;
         FILE* file_queue_byte_csv = fopen(filename_byte.c_str(), "w+");
         std::cout << "    >> Opened: " << filename_byte << std::endl;
+        FILE* file_queue_pkt_history_csv = fopen(
+            m_gsl_queue_pkt_history_csv_filename.c_str(),
+            "a"
+        );
+        FILE* file_queue_byte_history_csv = fopen(
+            m_gsl_queue_byte_history_csv_filename.c_str(),
+            "a"
+        );
 
-        if (!file_queue_pkt_csv || !file_queue_byte_csv) {
+        if (
+            !file_queue_pkt_csv ||
+            !file_queue_byte_csv ||
+            !file_queue_pkt_history_csv ||
+            !file_queue_byte_history_csv
+        ) {
             NS_ABORT_MSG("Failed to open GSL queue tracking output files");
         }
 
@@ -836,11 +1023,25 @@ namespace ns3 {
                         std::get<1>(log_entries_pkt[j]),
                         std::get<2>(log_entries_pkt[j])
                 );
+                fprintf(file_queue_pkt_history_csv,
+                        "%d,%d,%" PRId64 ",%" PRId64 ",%" PRId64 "\n",
+                        from, to,
+                        std::get<0>(log_entries_pkt[j]),
+                        std::get<1>(log_entries_pkt[j]),
+                        std::get<2>(log_entries_pkt[j])
+                );
             }
 
             const std::vector<std::tuple<int64_t, int64_t, int64_t>>& log_entries_byte = tracker->GetIntervalsNumBytes();
             for (size_t j = 0; j < log_entries_byte.size(); j++) {
                 fprintf(file_queue_byte_csv,
+                        "%d,%d,%" PRId64 ",%" PRId64 ",%" PRId64 "\n",
+                        from, to,
+                        std::get<0>(log_entries_byte[j]),
+                        std::get<1>(log_entries_byte[j]),
+                        std::get<2>(log_entries_byte[j])
+                );
+                fprintf(file_queue_byte_history_csv,
                         "%d,%d,%" PRId64 ",%" PRId64 ",%" PRId64 "\n",
                         from, to,
                         std::get<0>(log_entries_byte[j]),
@@ -855,6 +1056,8 @@ namespace ns3 {
         std::cout << "    >> Closed: " << filename_pkt << std::endl;
         fclose(file_queue_byte_csv);
         std::cout << "    >> Closed: " << filename_byte << std::endl;
+        fclose(file_queue_pkt_history_csv);
+        fclose(file_queue_byte_history_csv);
 
         std::cout << "  > GSL queue tracking files written successfully" << std::endl;
         m_basicSimulation->RegisterTimestamp("Write GSL queue tracking files");
@@ -865,18 +1068,24 @@ namespace ns3 {
             return;
         }
         
-        std::cout << "  > Resetting " << m_isl_queue_trackers.size() << " ISL queue trackers..." << std::endl;
-        
-        // 遍歷所有 queue trackers 並重置
+        std::cout << "  > Resetting " << m_isl_queue_trackers.size()
+                  << " ISL and " << m_gsl_queue_trackers.size()
+                  << " GSL queue trackers..." << std::endl;
+
         for (auto& entry : m_isl_queue_trackers) {
             Ptr<PtopLinkQueueTracker> tracker = entry.second;
-            
             if (tracker != nullptr) {
-                // 重置 tracker 的內部狀態
                 tracker->Reset();
             }
         }
-        
+
+        for (auto& entry : m_gsl_queue_trackers) {
+            Ptr<PtopLinkQueueTracker> tracker = entry.second;
+            if (tracker != nullptr) {
+                tracker->Reset();
+            }
+        }
+
         std::cout << "  > Queue trackers reset completed" << std::endl;
     }
 

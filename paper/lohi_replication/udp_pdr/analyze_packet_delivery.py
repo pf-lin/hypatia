@@ -76,18 +76,26 @@ DESTINATION_LOSS_COLUMNS = [
 PHYSICAL_DROP_COLUMNS = [
     "time_ns",
     "link_type",
+    "interface_type",
     "from_node",
     "to_node",
+    "satellite_id",
+    "ground_station_id",
+    "interface_key",
+    "drop_source",
     "drop_reason",
     "packet_size_bytes",
     "queue_occupancy_pkt_if_available",
     "queue_occupancy_byte_if_available",
+    "queue_capacity_pkt_if_available",
     "flow_id_if_available",
+    "trace_hook",
 ]
 
 PHYSICAL_DROP_SUMMARY_COLUMNS = [
     "algorithm",
     "link_type",
+    "drop_source",
     "drop_reason",
     "drop_count",
     "drop_bytes",
@@ -115,6 +123,19 @@ LOSS_ATTRIBUTION_COLUMNS = [
     "unknown_drop_packets",
 ]
 
+ROUTING_DROP_COLUMNS = [
+    "time_ns",
+    "drop_source",
+    "drop_reason",
+    "node_id",
+    "src",
+    "dst",
+    "next_hop_if_available",
+    "packet_size_bytes",
+    "flow_id_if_available",
+    "details",
+]
+
 UDP_SEND_FAILURE_COLUMNS = [
     "time_ns",
     "flow_id",
@@ -125,13 +146,92 @@ UDP_SEND_FAILURE_COLUMNS = [
     "error_message_if_available",
 ]
 
+LOSS_ATTRIBUTION_DETAILED_COLUMNS = [
+    "algorithm",
+    "flow_id",
+    "src",
+    "dst",
+    "flow_class",
+    "sent_packets",
+    "received_packets",
+    "lost_packets",
+    "pdr",
+    "physical_queue_drop_packets",
+    "physical_phy_drop_packets",
+    "udp_send_failed_packets",
+    "routing_drop_packets",
+    "ipv4_l3_drop_packets",
+    "isl_queue_saturation_associated_loss",
+    "gsl_queue_saturation_associated_loss",
+    "mixed_queue_saturation_associated_loss",
+    "tail_in_flight_possible_loss",
+    "unclassified_unexplained_loss",
+    "dominant_association",
+    "associated_interfaces",
+    "notes",
+]
+
+CONGESTED_INTERFACE_COLUMNS = [
+    "algorithm",
+    "link_type",
+    "interface_key",
+    "from_node",
+    "to_node",
+    "satellite_id",
+    "ground_station_id",
+    "max_queue_pkt",
+    "mean_queue_pkt",
+    "samples_at_capacity",
+    "first_saturation_time_ns",
+    "last_saturation_time_ns",
+    "estimated_affected_flow_count",
+    "estimated_affected_lost_packets",
+    "flow_ids_passing_interface_if_available",
+]
+
+LOSS_ATTRIBUTION_BREAKDOWN_V2_COLUMNS = [
+    "algorithm",
+    "synthetic_lost_packets",
+    "physical_queue_drop_packets",
+    "physical_phy_drop_packets",
+    "udp_send_failed_packets",
+    "routing_drop_packets",
+    "ipv4_l3_drop_packets",
+    "isl_queue_saturation_associated_loss",
+    "gsl_queue_saturation_associated_loss",
+    "mixed_queue_saturation_associated_loss",
+    "tail_in_flight_possible_loss",
+    "unclassified_unexplained_loss",
+    "attribution_coverage_ratio",
+]
+
+QUEUE_SATURATION_TIMELINE_COLUMNS = [
+    "algorithm",
+    "time_ns",
+    "link_type",
+    "interface_key",
+    "from_node",
+    "to_node",
+    "queue_pkt",
+    "queue_capacity_pkt",
+    "is_at_capacity",
+    "estimated_active_flow_count",
+    "estimated_active_lost_flow_count",
+]
+
 TOP_LOSS_FLOW_COUNT = 20
 SYNTHETIC_LOSS_REASON = "udp_sent_minus_received"
 MAX_QUEUE_SCOPE = "sampled/event-derived ISL net-device queue; GSL queue summarized separately when available"
 PHYSICAL_DROP_TRACE_COVERAGE = (
-    "DropBeforeEnqueue queue callbacks and PhyTxDrop/PhyRxDrop on tracked "
-    "ISL/GSL NetDevices; MacTxDrop is not separately counted to avoid "
-    "double-counting queue overflow"
+    "DropBeforeEnqueue queue callbacks, MacTxDrop diagnostics, and "
+    "PhyTxDrop/PhyRxDrop on tracked ISL/GSL NetDevices. MacTxDrop is "
+    "reported as diagnostic coverage but is not added to physical queue "
+    "drop counts when DropBeforeEnqueue is present."
+)
+QUEUE_ASSOCIATION_WARNING = (
+    "Queue-saturation-associated loss is a conservative correlation based on "
+    "queue occupancy and flow/path context. It should not be interpreted as a "
+    "physical drop proof unless matching physical drop trace events are present."
 )
 
 SELECTION_DIAGNOSTIC_FILENAMES = [
@@ -266,6 +366,8 @@ def physical_drop_trace_available(algorithm_run_dir, drops_df):
 def gsl_queue_tracking_available(algorithm_run_dir):
     logs_dir = os.path.join(algorithm_run_dir, "logs_ns3")
     for filename in [
+        "gsl_queue_pkt_history.csv",
+        "gsl_queue_byte_history.csv",
         "gsl_queue_pkt.csv",
         "gsl_queue_byte.csv",
         "access_queue_pkt.csv",
@@ -282,6 +384,73 @@ def udp_send_failure_trace_available(algorithm_run_dir):
     )
 
 
+def routing_drop_trace_available(algorithm_run_dir):
+    return os.path.exists(
+        os.path.join(algorithm_run_dir, "logs_ns3", "routing_drops.csv")
+    )
+
+
+def ipv4_l3_drop_trace_available(algorithm_run_dir):
+    return os.path.exists(
+        os.path.join(algorithm_run_dir, "logs_ns3", "ipv4_l3_drops.csv")
+    )
+
+
+def read_queue_capacity_pkt(algorithm_run_dir, run, link_type):
+    config = parse_config_properties(os.path.join(algorithm_run_dir, "config_ns3.properties"))
+    key = "isl_max_queue_size_pkts" if link_type == "ISL" else "gsl_max_queue_size_pkts"
+    value = to_float_or_none(config.get(key))
+    if value is not None:
+        return int(value)
+    run_key = "queue_size_pkt"
+    value = to_float_or_none(run.get(run_key))
+    if value is not None:
+        return int(value)
+    return None
+
+
+def build_interface_key(link_type, from_node, to_node):
+    try:
+        from_node = int(from_node)
+    except (TypeError, ValueError):
+        from_node = -1
+    try:
+        to_node = int(to_node)
+    except (TypeError, ValueError):
+        to_node = -1
+    return "%s:%d->%d" % (link_type, from_node, to_node)
+
+
+def parse_semicolon_ints(value):
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return []
+    result = []
+    for item in str(value).split(";"):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            result.append(int(float(item)))
+        except ValueError:
+            continue
+    return result
+
+
+def _normalize_drop_source(row):
+    drop_source = str(row.get("drop_source", "") or "")
+    trace_hook = str(row.get("trace_hook", "") or "")
+    drop_reason = str(row.get("drop_reason", "") or "")
+    if drop_source:
+        return drop_source
+    if trace_hook:
+        return trace_hook
+    if drop_reason in ["QueueDrop", "DropBeforeEnqueue"]:
+        return "QueueDrop"
+    if drop_reason in ["PhyTxDrop", "PhyRxDrop", "MacTxDrop"]:
+        return drop_reason
+    return "Unknown"
+
+
 def read_physical_link_drops(algorithm_run_dir):
     path = os.path.join(algorithm_run_dir, "logs_ns3", "physical_link_drops.csv")
     if not os.path.exists(path):
@@ -293,18 +462,48 @@ def read_physical_link_drops(algorithm_run_dir):
     for col in PHYSICAL_DROP_COLUMNS:
         if col not in df.columns:
             df[col] = ""
+    if "interface_key" in df.columns:
+        missing_key = df["interface_key"].astype(str).isin(["", "nan"])
+        if missing_key.any():
+            df.loc[missing_key, "interface_key"] = df.loc[missing_key].apply(
+                lambda row: build_interface_key(row.get("link_type", "UNKNOWN"), row.get("from_node", -1), row.get("to_node", -1)),
+                axis=1,
+            )
+    if "drop_source" in df.columns:
+        df["drop_source"] = df.apply(_normalize_drop_source, axis=1)
+    if "trace_hook" in df.columns:
+        missing_hook = df["trace_hook"].astype(str).isin(["", "nan"])
+        df.loc[missing_hook, "trace_hook"] = df.loc[missing_hook, "drop_source"]
     df = df[PHYSICAL_DROP_COLUMNS].copy()
     for col in [
         "time_ns",
         "from_node",
         "to_node",
+        "satellite_id",
+        "ground_station_id",
         "packet_size_bytes",
         "queue_occupancy_pkt_if_available",
         "queue_occupancy_byte_if_available",
+        "queue_capacity_pkt_if_available",
         "flow_id_if_available",
     ]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
+
+
+def read_interface_queue_drops(algorithm_run_dir):
+    path = os.path.join(algorithm_run_dir, "logs_ns3", "interface_queue_drops.csv")
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=PHYSICAL_DROP_COLUMNS)
+    try:
+        df = pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame(columns=PHYSICAL_DROP_COLUMNS)
+    for col in PHYSICAL_DROP_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+    df["drop_source"] = df.apply(_normalize_drop_source, axis=1)
+    return df[PHYSICAL_DROP_COLUMNS].copy()
 
 
 def read_udp_send_failures(algorithm_run_dir):
@@ -320,6 +519,28 @@ def read_udp_send_failures(algorithm_run_dir):
             df[col] = ""
     df = df[UDP_SEND_FAILURE_COLUMNS].copy()
     for col in ["time_ns", "flow_id", "src", "dst", "packet_size_bytes", "error_code"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+def read_routing_drops(algorithm_run_dir):
+    path = os.path.join(algorithm_run_dir, "logs_ns3", "routing_drops.csv")
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=ROUTING_DROP_COLUMNS)
+    try:
+        df = pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        return pd.DataFrame(columns=ROUTING_DROP_COLUMNS)
+    for col in ROUTING_DROP_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+    df = df[ROUTING_DROP_COLUMNS].copy()
+    for col in [
+        "time_ns",
+        "node_id",
+        "packet_size_bytes",
+        "flow_id_if_available",
+    ]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
@@ -598,9 +819,20 @@ def _read_queue_interval_csv(path, value_name):
     return df.dropna(subset=["from", "to", "interval_start_ns", "interval_end_ns", value_name])
 
 
+def _queue_interval_path(logs_dir, link_type, value_kind):
+    prefix = link_type.lower()
+    history_path = os.path.join(
+        logs_dir,
+        "%s_queue_%s_history.csv" % (prefix, value_kind),
+    )
+    if os.path.exists(history_path) and os.path.getsize(history_path) > 0:
+        return history_path
+    return os.path.join(logs_dir, "%s_queue_%s.csv" % (prefix, value_kind))
+
+
 def collect_gsl_queue_summary(algorithm_run_dir, algorithm):
     logs_dir = os.path.join(algorithm_run_dir, "logs_ns3")
-    pkt_path = os.path.join(logs_dir, "gsl_queue_pkt.csv")
+    pkt_path = _queue_interval_path(logs_dir, "GSL", "pkt")
     df = _read_queue_interval_csv(pkt_path, "queue_pkt")
     if len(df) == 0:
         return {
@@ -635,6 +867,246 @@ def collect_gsl_queue_summary(algorithm_run_dir, algorithm):
     }
 
 
+def infer_num_satellites_from_flows(flows):
+    endpoint_values = []
+    if len(flows):
+        endpoint_values.extend(flows["src"].dropna().astype(int).tolist())
+        endpoint_values.extend(flows["dst"].dropna().astype(int).tolist())
+    return min(endpoint_values) if endpoint_values else 0
+
+
+def load_interface_flow_maps(run, flows):
+    run_dir = os.path.join("runs", run["name"])
+    interface_to_flows = {}
+    flow_to_isl = {}
+    flow_to_gsl = {}
+
+    def add_mapping(interface_key, flow_ids, link_type):
+        if not interface_key or not flow_ids:
+            return
+        bucket = interface_to_flows.setdefault(interface_key, set())
+        for flow_id in flow_ids:
+            bucket.add(flow_id)
+            if link_type == "ISL":
+                flow_to_isl.setdefault(flow_id, set()).add(interface_key)
+            elif link_type == "GSL":
+                flow_to_gsl.setdefault(flow_id, set()).add(interface_key)
+
+    isl_path = os.path.join(run_dir, "isl_corridor_load_summary.csv")
+    if os.path.exists(isl_path):
+        try:
+            isl_df = pd.read_csv(isl_path)
+        except pd.errors.EmptyDataError:
+            isl_df = pd.DataFrame()
+        for _, row in isl_df.iterrows():
+            flow_ids = parse_semicolon_ints(
+                row.get("selected_flow_ids_using_edge", row.get("selected_flow_ids", ""))
+            )
+            try:
+                edge_from = int(row["edge_from"])
+                edge_to = int(row["edge_to"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            add_mapping(build_interface_key("ISL", edge_from, edge_to), flow_ids, "ISL")
+
+    satellite_interface_path = os.path.join(run_dir, "satellite_interface_load_summary.csv")
+    if os.path.exists(satellite_interface_path):
+        try:
+            sat_if_df = pd.read_csv(satellite_interface_path)
+        except pd.errors.EmptyDataError:
+            sat_if_df = pd.DataFrame()
+        for _, row in sat_if_df.iterrows():
+            flow_ids = parse_semicolon_ints(row.get("selected_flow_ids", ""))
+            try:
+                satellite_id = int(row["satellite_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            add_mapping(build_interface_key("GSL", satellite_id, -1), flow_ids, "GSL")
+
+    flow_selection_path = os.path.join(run_dir, "flow_selection_diagnostics.csv")
+    if os.path.exists(flow_selection_path):
+        try:
+            flow_selection_df = pd.read_csv(flow_selection_path)
+        except pd.errors.EmptyDataError:
+            flow_selection_df = pd.DataFrame()
+        if len(flow_selection_df):
+            selected = flow_selection_df[
+                flow_selection_df.get("selected", False).astype(str).str.lower() == "true"
+            ] if "selected" in flow_selection_df.columns else flow_selection_df
+            for _, row in selected.iterrows():
+                try:
+                    flow_id = int(float(row["flow_id"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                for item in str(row.get("satellite_interface_keys", "")).split(";"):
+                    if ":" not in item:
+                        continue
+                    sat_id, _direction = item.split(":", 1)
+                    try:
+                        sat_id = int(sat_id)
+                    except ValueError:
+                        continue
+                    add_mapping(build_interface_key("GSL", sat_id, -1), [flow_id], "GSL")
+
+    # Endpoint/access-side fallback: GSL queue trackers may be attached to
+    # ground-station net devices. This does not prove the exact satellite-side
+    # path, but it gives a conservative access-queue association.
+    for _, row in flows.iterrows():
+        flow_id = int(row["flow_id"])
+        src = int(row["src"])
+        dst = int(row["dst"])
+        add_mapping(build_interface_key("GSL", src, -1), [flow_id], "GSL")
+        add_mapping(build_interface_key("GSL", dst, -1), [flow_id], "GSL")
+
+    return interface_to_flows, flow_to_isl, flow_to_gsl
+
+
+def read_queue_timeline_inputs(algorithm_run_dir, run, algorithm, flows):
+    rows = []
+    capacities = {
+        "ISL": read_queue_capacity_pkt(algorithm_run_dir, run, "ISL"),
+        "GSL": read_queue_capacity_pkt(algorithm_run_dir, run, "GSL"),
+    }
+    logs_dir = os.path.join(algorithm_run_dir, "logs_ns3")
+    for link_type in ["ISL", "GSL"]:
+        path = _queue_interval_path(logs_dir, link_type, "pkt")
+        df = _read_queue_interval_csv(path, "queue_pkt")
+        if len(df) == 0:
+            continue
+        capacity = capacities.get(link_type)
+        for _, row in df.iterrows():
+            from_node = int(row["from"])
+            to_node = int(row["to"])
+            queue_pkt = float(row["queue_pkt"])
+            rows.append({
+                "algorithm": algorithm,
+                "interval_start_ns": int(row["interval_start_ns"]),
+                "interval_end_ns": int(row["interval_end_ns"]),
+                "time_ns": int(row["interval_start_ns"]),
+                "link_type": link_type,
+                "interface_key": build_interface_key(link_type, from_node, to_node),
+                "from_node": from_node,
+                "to_node": to_node,
+                "queue_pkt": queue_pkt,
+                "queue_capacity_pkt": capacity if capacity is not None else math.nan,
+                "is_at_capacity": bool(capacity is not None and queue_pkt >= capacity),
+            })
+    if not rows:
+        return pd.DataFrame(columns=QUEUE_SATURATION_TIMELINE_COLUMNS + ["interval_end_ns"])
+    return pd.DataFrame(rows)
+
+
+def build_queue_saturation_outputs(algorithm_run_dir, run, algorithm, flows):
+    interface_to_flows, _flow_to_isl, _flow_to_gsl = load_interface_flow_maps(run, flows)
+    timeline = read_queue_timeline_inputs(algorithm_run_dir, run, algorithm, flows)
+    num_satellites = infer_num_satellites_from_flows(flows)
+    flows_by_id = {
+        int(row["flow_id"]): row
+        for _, row in flows.iterrows()
+    }
+    flow_isl_saturated_interfaces = {}
+    flow_gsl_saturated_interfaces = {}
+
+    if len(timeline) == 0:
+        empty_timeline = pd.DataFrame(columns=QUEUE_SATURATION_TIMELINE_COLUMNS)
+        empty_congested = pd.DataFrame(columns=CONGESTED_INTERFACE_COLUMNS)
+        return (
+            empty_timeline,
+            empty_congested,
+            flow_isl_saturated_interfaces,
+            flow_gsl_saturated_interfaces,
+        )
+
+    active_counts = []
+    active_lost_counts = []
+    for _, row in timeline.iterrows():
+        flow_ids = sorted(interface_to_flows.get(row["interface_key"], set()))
+        active = []
+        active_lost = []
+        for flow_id in flow_ids:
+            flow = flows_by_id.get(flow_id)
+            if flow is None:
+                continue
+            if int(flow["start_time_ns"]) <= int(row["time_ns"]) <= int(flow["end_time_ns"]):
+                active.append(flow_id)
+                if int(flow["lost_packets"]) > 0:
+                    active_lost.append(flow_id)
+        active_counts.append(len(active))
+        active_lost_counts.append(len(active_lost))
+        if bool(row["is_at_capacity"]):
+            for flow_id in flow_ids:
+                flow = flows_by_id.get(flow_id)
+                if flow is None or int(flow["lost_packets"]) <= 0:
+                    continue
+                if row["link_type"] == "ISL":
+                    flow_isl_saturated_interfaces.setdefault(flow_id, set()).add(row["interface_key"])
+                elif row["link_type"] == "GSL":
+                    flow_gsl_saturated_interfaces.setdefault(flow_id, set()).add(row["interface_key"])
+
+    timeline["estimated_active_flow_count"] = active_counts
+    timeline["estimated_active_lost_flow_count"] = active_lost_counts
+    timeline_out = timeline[QUEUE_SATURATION_TIMELINE_COLUMNS].copy()
+
+    congested_rows = []
+    saturated = timeline[timeline["is_at_capacity"] == True]
+    for interface_key, group in timeline.groupby("interface_key"):
+        saturated_group = group[group["is_at_capacity"] == True]
+        if len(saturated_group) == 0:
+            continue
+        first = group.iloc[0]
+        flow_ids = sorted(interface_to_flows.get(interface_key, set()))
+        affected_lost = 0
+        for flow_id in flow_ids:
+            flow = flows_by_id.get(flow_id)
+            if flow is not None:
+                affected_lost += int(flow["lost_packets"])
+        from_node = int(first["from_node"])
+        satellite_id = from_node if num_satellites and from_node < num_satellites else ""
+        ground_station_id = (
+            from_node - num_satellites
+            if num_satellites and from_node >= num_satellites
+            else ""
+        )
+        congested_rows.append({
+            "algorithm": algorithm,
+            "link_type": first["link_type"],
+            "interface_key": interface_key,
+            "from_node": from_node,
+            "to_node": int(first["to_node"]),
+            "satellite_id": satellite_id,
+            "ground_station_id": ground_station_id,
+            "max_queue_pkt": int(group["queue_pkt"].max()),
+            "mean_queue_pkt": float(group["queue_pkt"].mean()),
+            "samples_at_capacity": int(len(saturated_group)),
+            "first_saturation_time_ns": int(saturated_group["time_ns"].min()),
+            "last_saturation_time_ns": int(saturated_group["time_ns"].max()),
+            "estimated_affected_flow_count": int(len(flow_ids)),
+            "estimated_affected_lost_packets": int(affected_lost),
+            "flow_ids_passing_interface_if_available": ";".join(str(flow_id) for flow_id in flow_ids),
+        })
+    congested = pd.DataFrame(congested_rows, columns=CONGESTED_INTERFACE_COLUMNS)
+    if len(congested):
+        congested = congested.sort_values(
+            ["algorithm", "samples_at_capacity", "max_queue_pkt", "interface_key"],
+            ascending=[True, False, False, True],
+        ).reset_index(drop=True)
+    return (
+        timeline_out,
+        congested,
+        flow_isl_saturated_interfaces,
+        flow_gsl_saturated_interfaces,
+    )
+
+
+def _count_drop_source(df, algorithm, sources):
+    if len(df) == 0:
+        return 0
+    alg = df[df["algorithm"] == algorithm]
+    if len(alg) == 0:
+        return 0
+    return int(alg["drop_source"].astype(str).isin(sources).sum())
+
+
 def build_physical_drop_summary(physical_drop_df):
     if len(physical_drop_df) == 0:
         return pd.DataFrame(columns=PHYSICAL_DROP_SUMMARY_COLUMNS)
@@ -643,7 +1115,7 @@ def build_physical_drop_summary(physical_drop_df):
         df["packet_size_bytes"], errors="coerce"
     ).fillna(0)
     return (
-        df.groupby(["algorithm", "link_type", "drop_reason"])
+        df.groupby(["algorithm", "link_type", "drop_source", "drop_reason"])
         .agg(
             drop_count=("drop_reason", "size"),
             drop_bytes=("packet_size_bytes", "sum"),
@@ -667,10 +1139,16 @@ def build_loss_attribution_summary(summary_df, physical_drop_df, send_failure_df
             send_failure_df["algorithm"] == algorithm
         ] if len(send_failure_df) else pd.DataFrame()
 
-        physical_drop_packets = int(len(alg_drops))
+        if len(alg_drops):
+            countable_drops = alg_drops[
+                ~alg_drops["drop_source"].astype(str).isin(["MacTxDrop"])
+            ]
+        else:
+            countable_drops = alg_drops
+        physical_drop_packets = int(len(countable_drops))
         send_failed_packets = int(len(alg_send_failures))
-        gsl_drop_packets = int((alg_drops["link_type"] == "GSL").sum()) if len(alg_drops) else 0
-        isl_drop_packets = int((alg_drops["link_type"] == "ISL").sum()) if len(alg_drops) else 0
+        gsl_drop_packets = int((countable_drops["link_type"] == "GSL").sum()) if len(countable_drops) else 0
+        isl_drop_packets = int((countable_drops["link_type"] == "ISL").sum()) if len(countable_drops) else 0
         unknown_drop_packets = (
             physical_drop_packets - gsl_drop_packets - isl_drop_packets
         )
@@ -692,6 +1170,201 @@ def build_loss_attribution_summary(summary_df, physical_drop_df, send_failure_df
             "unknown_drop_packets": unknown_drop_packets,
         })
     return pd.DataFrame(rows, columns=LOSS_ATTRIBUTION_COLUMNS)
+
+
+def _count_by_flow_id(df, flow_id_col="flow_id"):
+    if len(df) == 0 or flow_id_col not in df.columns:
+        return {}
+    counts = {}
+    valid = df[pd.to_numeric(df[flow_id_col], errors="coerce").notna()].copy()
+    if len(valid) == 0:
+        return counts
+    valid[flow_id_col] = pd.to_numeric(valid[flow_id_col], errors="coerce").astype(int)
+    for flow_id, group in valid.groupby(flow_id_col):
+        counts[int(flow_id)] = int(len(group))
+    return counts
+
+
+def build_loss_attribution_detailed(
+    algorithm,
+    flows,
+    physical_drop_df,
+    udp_send_failure_df,
+    routing_drop_df,
+    flow_isl_saturated_interfaces,
+    flow_gsl_saturated_interfaces,
+    run,
+):
+    alg_physical = physical_drop_df[
+        physical_drop_df["algorithm"] == algorithm
+    ] if len(physical_drop_df) else pd.DataFrame(columns=physical_drop_df.columns)
+    queue_sources = ["QueueDrop", "DropBeforeEnqueue"]
+    phy_sources = ["PhyTxDrop", "PhyRxDrop"]
+    physical_queue_by_flow = _count_by_flow_id(
+        alg_physical[
+            alg_physical["drop_source"].astype(str).isin(queue_sources)
+        ] if len(alg_physical) else pd.DataFrame(),
+        "flow_id_if_available",
+    )
+    physical_phy_by_flow = _count_by_flow_id(
+        alg_physical[
+            alg_physical["drop_source"].astype(str).isin(phy_sources)
+        ] if len(alg_physical) else pd.DataFrame(),
+        "flow_id_if_available",
+    )
+    send_by_flow = _count_by_flow_id(
+        udp_send_failure_df[udp_send_failure_df["algorithm"] == algorithm]
+        if len(udp_send_failure_df) else pd.DataFrame(),
+        "flow_id",
+    )
+    routing_by_flow = _count_by_flow_id(
+        routing_drop_df[routing_drop_df["algorithm"] == algorithm]
+        if len(routing_drop_df) else pd.DataFrame(),
+        "flow_id_if_available",
+    )
+    tail_possible = (
+        not bool(run.get("drain_time_enabled", False))
+        or int(run.get("drain_time_ns", 0)) <= 0
+    )
+
+    rows = []
+    for _, row in flows.sort_values("flow_id").iterrows():
+        flow_id = int(row["flow_id"])
+        lost_packets = int(row["lost_packets"])
+        physical_queue = physical_queue_by_flow.get(flow_id, 0)
+        physical_phy = physical_phy_by_flow.get(flow_id, 0)
+        send_failed = send_by_flow.get(flow_id, 0)
+        routing_drop = routing_by_flow.get(flow_id, 0)
+        ipv4_l3_drop = 0
+        attributed_trace = physical_queue + physical_phy + send_failed + routing_drop + ipv4_l3_drop
+        explainable_loss = max(lost_packets - attributed_trace, 0)
+        isl_interfaces = sorted(flow_isl_saturated_interfaces.get(flow_id, set()))
+        gsl_interfaces = sorted(flow_gsl_saturated_interfaces.get(flow_id, set()))
+        isl_assoc = 0
+        gsl_assoc = 0
+        mixed_assoc = 0
+        tail_loss = 0
+        unclassified = 0
+        dominant = ""
+        if explainable_loss > 0:
+            if isl_interfaces and gsl_interfaces:
+                mixed_assoc = explainable_loss
+                dominant = "mixed_queue_saturation_associated"
+            elif isl_interfaces:
+                isl_assoc = explainable_loss
+                dominant = "isl_queue_saturation_associated"
+            elif gsl_interfaces:
+                gsl_assoc = explainable_loss
+                dominant = "gsl_queue_saturation_associated"
+            elif tail_possible:
+                tail_loss = explainable_loss
+                dominant = "tail_in_flight_possible"
+            else:
+                unclassified = explainable_loss
+                dominant = "unclassified_unexplained"
+        elif attributed_trace > 0:
+            dominant = "trace_attributed"
+        elif lost_packets == 0:
+            dominant = "no_loss"
+
+        notes = []
+        if lost_packets > 0:
+            notes.append("queue_saturation_association_is_not_physical_proof")
+        if len(alg_physical) and (
+            len(physical_queue_by_flow) == 0 and len(physical_phy_by_flow) == 0
+        ):
+            notes.append("physical_drop_trace_is_interface_level_only")
+        if isl_interfaces:
+            notes.append("isl_mapping_from_corridor_diagnostics")
+        if gsl_interfaces:
+            notes.append("gsl_mapping_from_satellite_interface_or_endpoint_proxy")
+        if tail_loss:
+            notes.append("traffic_stop_has_no_positive_drain_window")
+
+        rows.append({
+            "algorithm": algorithm,
+            "flow_id": flow_id,
+            "src": int(row["src"]),
+            "dst": int(row["dst"]),
+            "flow_class": row["flow_class"],
+            "sent_packets": int(row["sent_packets"]),
+            "received_packets": int(row["received_packets"]),
+            "lost_packets": lost_packets,
+            "pdr": float(row["pdr"]),
+            "physical_queue_drop_packets": physical_queue,
+            "physical_phy_drop_packets": physical_phy,
+            "udp_send_failed_packets": send_failed,
+            "routing_drop_packets": routing_drop,
+            "ipv4_l3_drop_packets": ipv4_l3_drop,
+            "isl_queue_saturation_associated_loss": isl_assoc,
+            "gsl_queue_saturation_associated_loss": gsl_assoc,
+            "mixed_queue_saturation_associated_loss": mixed_assoc,
+            "tail_in_flight_possible_loss": tail_loss,
+            "unclassified_unexplained_loss": unclassified,
+            "dominant_association": dominant,
+            "associated_interfaces": ";".join(isl_interfaces + gsl_interfaces),
+            "notes": "|".join(notes),
+        })
+    return pd.DataFrame(rows, columns=LOSS_ATTRIBUTION_DETAILED_COLUMNS)
+
+
+def build_loss_attribution_breakdown_v2(
+    summary_df,
+    detailed_df,
+    physical_drop_df,
+    udp_send_failure_df,
+    routing_drop_df,
+):
+    rows = []
+    for _, row in summary_df.iterrows():
+        algorithm = row["algorithm"]
+        synthetic_lost = int(row["total_lost_packets"])
+        alg_detail = detailed_df[
+            detailed_df["algorithm"] == algorithm
+        ] if len(detailed_df) else pd.DataFrame(columns=LOSS_ATTRIBUTION_DETAILED_COLUMNS)
+        physical_queue = _count_drop_source(
+            physical_drop_df,
+            algorithm,
+            ["QueueDrop", "DropBeforeEnqueue"],
+        )
+        physical_phy = _count_drop_source(
+            physical_drop_df,
+            algorithm,
+            ["PhyTxDrop", "PhyRxDrop"],
+        )
+        udp_failed = int(
+            len(udp_send_failure_df[udp_send_failure_df["algorithm"] == algorithm])
+        ) if len(udp_send_failure_df) else 0
+        routing_drop = int(
+            len(routing_drop_df[routing_drop_df["algorithm"] == algorithm])
+        ) if len(routing_drop_df) else 0
+        ipv4_l3_drop = 0
+        isl_assoc = int(alg_detail["isl_queue_saturation_associated_loss"].sum()) if len(alg_detail) else 0
+        gsl_assoc = int(alg_detail["gsl_queue_saturation_associated_loss"].sum()) if len(alg_detail) else 0
+        mixed_assoc = int(alg_detail["mixed_queue_saturation_associated_loss"].sum()) if len(alg_detail) else 0
+        tail_loss = int(alg_detail["tail_in_flight_possible_loss"].sum()) if len(alg_detail) else 0
+        unclassified = int(alg_detail["unclassified_unexplained_loss"].sum()) if len(alg_detail) else 0
+        coverage = (
+            1.0 - (unclassified / float(synthetic_lost))
+            if synthetic_lost > 0
+            else 1.0
+        )
+        rows.append({
+            "algorithm": algorithm,
+            "synthetic_lost_packets": synthetic_lost,
+            "physical_queue_drop_packets": physical_queue,
+            "physical_phy_drop_packets": physical_phy,
+            "udp_send_failed_packets": udp_failed,
+            "routing_drop_packets": routing_drop,
+            "ipv4_l3_drop_packets": ipv4_l3_drop,
+            "isl_queue_saturation_associated_loss": isl_assoc,
+            "gsl_queue_saturation_associated_loss": gsl_assoc,
+            "mixed_queue_saturation_associated_loss": mixed_assoc,
+            "tail_in_flight_possible_loss": tail_loss,
+            "unclassified_unexplained_loss": unclassified,
+            "attribution_coverage_ratio": coverage,
+        })
+    return pd.DataFrame(rows, columns=LOSS_ATTRIBUTION_BREAKDOWN_V2_COLUMNS)
 
 
 def build_pairwise(summary_df, per_flow_df):
@@ -827,9 +1500,14 @@ def write_loss_diagnostics(
     physical_drop_summary_df,
     gsl_queue_summary_df,
     loss_attribution_df,
+    loss_attribution_breakdown_v2_df,
+    loss_attribution_detailed_df,
+    congested_interfaces_df,
     physical_trace_available,
     gsl_queue_available,
     udp_send_failure_available,
+    routing_drop_available,
+    ipv4_l3_drop_available,
     gsl_capacity_warnings,
 ):
     loss_attribution = (
@@ -859,6 +1537,14 @@ def write_loss_diagnostics(
         f_out.write(
             "udp_send_failure_trace_available = %s\n\n"
             % format_bool(udp_send_failure_available)
+        )
+        f_out.write(
+            "routing_drop_trace_available = %s\n"
+            % format_bool(routing_drop_available)
+        )
+        f_out.write(
+            "ipv4_l3_drop_trace_available = %s\n\n"
+            % format_bool(ipv4_l3_drop_available)
         )
 
         f_out.write("Key observations\n")
@@ -990,10 +1676,11 @@ def write_loss_diagnostics(
             f_out.write("Physical drop summary:\n")
             for _, row in physical_drop_summary_df.iterrows():
                 f_out.write(
-                    "  algorithm=%s link_type=%s reason=%s drops=%d bytes=%d first=%s last=%s\n"
+                    "  algorithm=%s link_type=%s source=%s reason=%s drops=%d bytes=%d first=%s last=%s\n"
                     % (
                         row["algorithm"],
                         row["link_type"],
+                        row["drop_source"],
                         row["drop_reason"],
                         int(row["drop_count"]),
                         int(row["drop_bytes"]),
@@ -1020,6 +1707,102 @@ def write_loss_diagnostics(
                         int(row["unknown_drop_packets"]),
                     )
                 )
+        f_out.write("\n")
+
+        f_out.write("[Detailed Loss Attribution]\n")
+        f_out.write("-" * 40 + "\n")
+        f_out.write(
+            "physical_queue_drop_trace_available = %s\n"
+            % format_bool(physical_trace_available)
+        )
+        f_out.write(
+            "routing_no_route_drop_trace_available = %s\n"
+            % format_bool(routing_drop_available)
+        )
+        f_out.write(
+            "ipv4_l3_drop_trace_available = %s\n"
+            % format_bool(ipv4_l3_drop_available)
+        )
+        f_out.write(
+            "queue_saturation_association_warning = %s\n"
+            % QUEUE_ASSOCIATION_WARNING
+        )
+        if len(loss_attribution_breakdown_v2_df):
+            f_out.write("Detailed attribution breakdown v2:\n")
+            for _, row in loss_attribution_breakdown_v2_df.iterrows():
+                f_out.write(
+                    "  algorithm=%s synthetic_lost=%d physical_queue=%d physical_phy=%d "
+                    "udp_send_failed=%d routing=%d ipv4_l3=%d isl_assoc=%d "
+                    "gsl_assoc=%d mixed_assoc=%d tail_possible=%d unclassified=%d "
+                    "coverage=%.6f\n"
+                    % (
+                        row["algorithm"],
+                        int(row["synthetic_lost_packets"]),
+                        int(row["physical_queue_drop_packets"]),
+                        int(row["physical_phy_drop_packets"]),
+                        int(row["udp_send_failed_packets"]),
+                        int(row["routing_drop_packets"]),
+                        int(row["ipv4_l3_drop_packets"]),
+                        int(row["isl_queue_saturation_associated_loss"]),
+                        int(row["gsl_queue_saturation_associated_loss"]),
+                        int(row["mixed_queue_saturation_associated_loss"]),
+                        int(row["tail_in_flight_possible_loss"]),
+                        int(row["unclassified_unexplained_loss"]),
+                        float(row["attribution_coverage_ratio"]),
+                    )
+                )
+        else:
+            f_out.write("No detailed attribution rows were generated.\n")
+        if len(congested_interfaces_df):
+            f_out.write("Top saturated interfaces by samples_at_capacity:\n")
+            top_congested = congested_interfaces_df.sort_values(
+                ["samples_at_capacity", "max_queue_pkt"],
+                ascending=[False, False],
+            ).head(12)
+            for _, row in top_congested.iterrows():
+                f_out.write(
+                    "  algorithm=%s link_type=%s interface=%s max_queue_pkt=%s "
+                    "samples_at_capacity=%s affected_flows=%s affected_lost=%s "
+                    "first=%s last=%s\n"
+                    % (
+                        row["algorithm"],
+                        row["link_type"],
+                        row["interface_key"],
+                        row["max_queue_pkt"],
+                        row["samples_at_capacity"],
+                        row["estimated_affected_flow_count"],
+                        row["estimated_affected_lost_packets"],
+                        row["first_saturation_time_ns"],
+                        row["last_saturation_time_ns"],
+                    )
+                )
+        else:
+            f_out.write("No queue interfaces reached configured packet capacity in the analyzed logs.\n")
+        if len(loss_attribution_detailed_df):
+            classified = loss_attribution_detailed_df[
+                loss_attribution_detailed_df["lost_packets"] > 0
+            ]
+            if len(classified):
+                f_out.write("Dominant associations among lossy flows:\n")
+                counts = (
+                    classified.groupby("dominant_association")["flow_id"]
+                    .count()
+                    .reset_index(name="flow_count")
+                    .sort_values(["flow_count", "dominant_association"], ascending=[False, True])
+                )
+                for _, row in counts.iterrows():
+                    f_out.write(
+                        "  %s: %d flow(s)\n"
+                        % (row["dominant_association"], int(row["flow_count"]))
+                    )
+        f_out.write(
+            "Trace coverage limitations: physical queue drops require DropBeforeEnqueue "
+            "or equivalent queue trace events; MacTxDrop can overlap queue overflow and "
+            "is therefore diagnostic rather than additive. ISL association uses existing "
+            "corridor load diagnostics, while GSL association uses satellite-interface "
+            "or endpoint access proxies. dynamic_state/fstate files are delta updates; "
+            "this analysis does not claim complete per-packet path replay.\n"
+        )
         dst_818 = destination_df[
             (destination_df["dst"].astype(int) == 818)
             & (destination_df["total_lost_packets"] > 0)
@@ -1040,7 +1823,7 @@ def write_loss_diagnostics(
             "The max queue occupancy summary for routing still covers tracked ISL queues only; GSL/access queues are summarized separately and are not used by the routing algorithms.\n"
         )
         f_out.write(
-            "No-route and forwarding drops are not covered by this first tracing pass.\n"
+            "Routing/no-route drops are covered when logs_ns3/routing_drops.csv is present; generic IPv4 L3 drops still require a dedicated Ipv4L3Protocol drop hook.\n"
         )
         if gsl_capacity_warnings:
             for warning in gsl_capacity_warnings:
@@ -1220,12 +2003,18 @@ def analyze_run(run, algorithms):
     queue_frames = []
     physical_drop_frames = []
     udp_send_failure_frames = []
+    routing_drop_frames = []
+    loss_attribution_detailed_frames = []
+    congested_interface_frames = []
+    queue_saturation_timeline_frames = []
     gsl_queue_summary_rows = []
     gsl_capacity_by_algorithm = {}
     gsl_capacity_warnings = []
     physical_trace_available_any = False
     gsl_queue_available_any = False
     udp_send_failure_available_any = False
+    routing_drop_available_any = False
+    ipv4_l3_drop_available_any = False
 
     for algorithm in algorithms:
         algorithm_run_dir = os.path.join("runs", run["name"], algorithm)
@@ -1246,6 +2035,14 @@ def analyze_run(run, algorithms):
         udp_send_failure_available_any = (
             udp_send_failure_available_any
             or udp_send_failure_trace_available(algorithm_run_dir)
+        )
+        routing_drop_available_any = (
+            routing_drop_available_any
+            or routing_drop_trace_available(algorithm_run_dir)
+        )
+        ipv4_l3_drop_available_any = (
+            ipv4_l3_drop_available_any
+            or ipv4_l3_drop_trace_available(algorithm_run_dir)
         )
 
         flows, udp_flows_path = build_udp_flows_csv(algorithm_run_dir)
@@ -1303,12 +2100,49 @@ def analyze_run(run, algorithms):
             physical_drops.insert(0, "algorithm", algorithm)
             physical_drops.insert(0, "run_name", run["name"])
             physical_drop_frames.append(physical_drops)
+        else:
+            physical_drops.insert(0, "algorithm", algorithm)
+            physical_drops.insert(0, "run_name", run["name"])
 
         udp_send_failures = read_udp_send_failures(algorithm_run_dir)
         if len(udp_send_failures):
             udp_send_failures.insert(0, "algorithm", algorithm)
             udp_send_failures.insert(0, "run_name", run["name"])
             udp_send_failure_frames.append(udp_send_failures)
+        else:
+            udp_send_failures.insert(0, "algorithm", algorithm)
+            udp_send_failures.insert(0, "run_name", run["name"])
+
+        routing_drops = read_routing_drops(algorithm_run_dir)
+        if len(routing_drops):
+            routing_drops.insert(0, "algorithm", algorithm)
+            routing_drops.insert(0, "run_name", run["name"])
+            routing_drop_frames.append(routing_drops)
+        else:
+            routing_drops.insert(0, "algorithm", algorithm)
+            routing_drops.insert(0, "run_name", run["name"])
+
+        (
+            queue_timeline,
+            congested_interfaces,
+            flow_isl_saturated_interfaces,
+            flow_gsl_saturated_interfaces,
+        ) = build_queue_saturation_outputs(algorithm_run_dir, run, algorithm, flows)
+        if len(queue_timeline):
+            queue_saturation_timeline_frames.append(queue_timeline)
+        if len(congested_interfaces):
+            congested_interface_frames.append(congested_interfaces)
+        detailed = build_loss_attribution_detailed(
+            algorithm,
+            flows,
+            physical_drops,
+            udp_send_failures,
+            routing_drops,
+            flow_isl_saturated_interfaces,
+            flow_gsl_saturated_interfaces,
+            run,
+        )
+        loss_attribution_detailed_frames.append(detailed)
 
         gsl_queue_summary_rows.append(
             collect_gsl_queue_summary(algorithm_run_dir, algorithm)
@@ -1338,6 +2172,26 @@ def analyze_run(run, algorithms):
         if udp_send_failure_frames
         else pd.DataFrame(columns=["run_name", "algorithm"] + UDP_SEND_FAILURE_COLUMNS)
     )
+    routing_drop_df = (
+        pd.concat(routing_drop_frames, ignore_index=True)
+        if routing_drop_frames
+        else pd.DataFrame(columns=["run_name", "algorithm"] + ROUTING_DROP_COLUMNS)
+    )
+    loss_attribution_detailed_df = (
+        pd.concat(loss_attribution_detailed_frames, ignore_index=True)
+        if loss_attribution_detailed_frames
+        else pd.DataFrame(columns=LOSS_ATTRIBUTION_DETAILED_COLUMNS)
+    )
+    congested_interfaces_df = (
+        pd.concat(congested_interface_frames, ignore_index=True)
+        if congested_interface_frames
+        else pd.DataFrame(columns=CONGESTED_INTERFACE_COLUMNS)
+    )
+    queue_saturation_timeline_df = (
+        pd.concat(queue_saturation_timeline_frames, ignore_index=True)
+        if queue_saturation_timeline_frames
+        else pd.DataFrame(columns=QUEUE_SATURATION_TIMELINE_COLUMNS)
+    )
     gsl_queue_summary_df = pd.DataFrame(
         gsl_queue_summary_rows,
         columns=GSL_QUEUE_SUMMARY_COLUMNS,
@@ -1347,6 +2201,13 @@ def analyze_run(run, algorithms):
         summary_df,
         physical_drop_df,
         udp_send_failure_df,
+    )
+    loss_attribution_breakdown_v2_df = build_loss_attribution_breakdown_v2(
+        summary_df,
+        loss_attribution_detailed_df,
+        physical_drop_df,
+        udp_send_failure_df,
+        routing_drop_df,
     )
     pairwise_df = build_pairwise(summary_df, per_flow_df)
     affected_df = build_affected_flows(per_flow_df)
@@ -1366,9 +2227,14 @@ def analyze_run(run, algorithms):
     link_drops_df.to_csv(os.path.join(comparison_dir, "link_drops.csv"), index=False)
     physical_drop_df.to_csv(os.path.join(comparison_dir, "physical_link_drops.csv"), index=False)
     udp_send_failure_df.to_csv(os.path.join(comparison_dir, "udp_send_failures.csv"), index=False)
+    routing_drop_df.to_csv(os.path.join(comparison_dir, "routing_drops.csv"), index=False)
     physical_drop_summary_df.to_csv(os.path.join(comparison_dir, "physical_drop_summary.csv"), index=False)
     gsl_queue_summary_df.to_csv(os.path.join(comparison_dir, "gsl_queue_summary.csv"), index=False)
     loss_attribution_df.to_csv(os.path.join(comparison_dir, "loss_attribution_summary.csv"), index=False)
+    loss_attribution_detailed_df.to_csv(os.path.join(comparison_dir, "loss_attribution_detailed.csv"), index=False)
+    congested_interfaces_df.to_csv(os.path.join(comparison_dir, "congested_interfaces_summary.csv"), index=False)
+    loss_attribution_breakdown_v2_df.to_csv(os.path.join(comparison_dir, "loss_attribution_breakdown_v2.csv"), index=False)
+    queue_saturation_timeline_df.to_csv(os.path.join(comparison_dir, "queue_saturation_timeline.csv"), index=False)
     if not physical_trace_available_any:
         link_drops_df.to_csv(os.path.join(comparison_dir, "synthetic_link_drops.csv"), index=False)
     queue_df.to_csv(os.path.join(comparison_dir, "max_queue_occupancy_by_algorithm.csv"), index=False)
@@ -1395,9 +2261,14 @@ def analyze_run(run, algorithms):
         physical_drop_summary_df,
         gsl_queue_summary_df,
         loss_attribution_df,
+        loss_attribution_breakdown_v2_df,
+        loss_attribution_detailed_df,
+        congested_interfaces_df,
         physical_trace_available_any,
         gsl_queue_available_any,
         udp_send_failure_available_any,
+        routing_drop_available_any,
+        ipv4_l3_drop_available_any,
         gsl_capacity_warnings,
     )
     print("  > Wrote comparison outputs under %s" % comparison_dir)
