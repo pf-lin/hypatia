@@ -1,3 +1,4 @@
+import math
 import os
 from collections import defaultdict
 
@@ -193,7 +194,7 @@ def build_tag_coverage(algorithm, physical_drops, routing_drops):
                     "drop_source": str(source),
                     "drop_events_total": total,
                     "drop_events_with_flow_tag": tagged,
-                    "flow_tag_coverage_ratio": tagged / float(total) if total else 1.0,
+                    "flow_tag_coverage_ratio": tagged / float(total) if total else math.nan,
                 }
             )
     return pd.DataFrame(rows, columns=TAG_COVERAGE_COLUMNS)
@@ -420,7 +421,7 @@ def build_v3_for_algorithm(
         if len(tag_coverage)
         else 0
     )
-    tag_ratio = tag_with_flow / float(tag_total) if tag_total else 1.0
+    tag_ratio = tag_with_flow / float(tag_total) if tag_total else math.nan
 
     detailed_rows = []
     category_names = [

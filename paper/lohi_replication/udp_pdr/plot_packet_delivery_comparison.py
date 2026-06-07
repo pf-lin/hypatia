@@ -1,5 +1,4 @@
 import os
-import shutil
 import sys
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib-udp-pdr")
@@ -13,6 +12,12 @@ import pandas as pd
 
 sys.path.append(os.path.join(os.path.dirname(__file__)))
 from dynamic_run_list import build_arg_parser, describe_selection, get_udp_pdr_run_list
+from packet_delivery_outputs import (
+    ensure_standard_layout,
+    output_path,
+    resolve_input_path,
+    write_output_manifest,
+)
 
 
 def _short_label(label):
@@ -64,29 +69,7 @@ def _timing_title(base_title, df):
     return "%s (stop %.3gs, drain %.3gs)" % (base_title, traffic_stop_time_s, drain_time_s)
 
 
-def _background_flow_count_tag(df):
-    if "background_flow_count" not in df.columns or len(df) == 0:
-        return None
-    values = sorted(set(int(value) for value in df["background_flow_count"].dropna()))
-    if len(values) != 1:
-        return None
-    return "bg_flow_count_%d" % values[0]
-
-
-def _copy_plots_with_background_flow_suffix(comparison_dir, df):
-    tag = _background_flow_count_tag(df)
-    if tag is None:
-        return
-    for filename in sorted(os.listdir(comparison_dir)):
-        if not filename.endswith(".png") or tag in filename:
-            continue
-        src = os.path.join(comparison_dir, filename)
-        base, ext = os.path.splitext(filename)
-        dst = os.path.join(comparison_dir, "%s_%s%s" % (base, tag, ext))
-        shutil.copyfile(src, dst)
-
-
-def _write_deprecated_link_drop_heatmap_notice(comparison_dir):
+def _write_deprecated_link_drop_heatmap_notice(output_path_value):
     plt.figure(figsize=(8, 3.2))
     plt.axis("off")
     plt.text(
@@ -115,32 +98,44 @@ def _write_deprecated_link_drop_heatmap_notice(comparison_dir):
         fontsize=10,
     )
     plt.tight_layout()
-    plt.savefig(os.path.join(comparison_dir, "link_drop_heatmap.png"), dpi=180)
+    plt.savefig(output_path_value, dpi=180)
     plt.close()
 
 
-def plot_single_run(comparison_dir):
-    summary_path = os.path.join(comparison_dir, "summary_by_algorithm.csv")
-    per_flow_path = os.path.join(comparison_dir, "per_flow_delivery.csv")
-    queue_path = os.path.join(comparison_dir, "max_queue_occupancy_by_algorithm.csv")
-    top_loss_path = os.path.join(comparison_dir, "top_loss_flows.csv")
-    destination_path = os.path.join(comparison_dir, "destination_loss_summary.csv")
-    physical_drop_path = os.path.join(comparison_dir, "physical_drop_summary.csv")
-    gsl_queue_path = os.path.join(comparison_dir, "gsl_queue_summary.csv")
-    loss_attribution_path = os.path.join(comparison_dir, "loss_attribution_summary.csv")
-    loss_attribution_v2_path = os.path.join(comparison_dir, "loss_attribution_breakdown_v2.csv")
-    loss_attribution_v3_path = os.path.join(comparison_dir, "loss_attribution_breakdown_v3.csv")
-    congested_interfaces_path = os.path.join(comparison_dir, "congested_interfaces_summary.csv")
-    queue_saturation_timeline_path = os.path.join(comparison_dir, "queue_saturation_timeline.csv")
-    corridor_concentration_path = os.path.join(
-        comparison_dir,
-        "corridor_concentration_summary.csv",
+def plot_single_run(
+    comparison_dir,
+    output_layout="standard",
+    write_legacy_outputs=False,
+):
+    if output_layout == "standard":
+        ensure_standard_layout(comparison_dir)
+
+    def source(filename):
+        return resolve_input_path(comparison_dir, filename)
+
+    def destination(filename):
+        return output_path(comparison_dir, filename, output_layout)
+
+    summary_path = source("summary_by_algorithm.csv")
+    per_flow_path = source("per_flow_delivery.csv")
+    queue_path = source("max_queue_occupancy_by_algorithm.csv")
+    top_loss_path = source("top_loss_flows.csv")
+    destination_path = source("destination_loss_summary.csv")
+    physical_drop_path = source("physical_drop_summary.csv")
+    gsl_queue_path = source("gsl_queue_summary.csv")
+    loss_attribution_path = source("loss_attribution_summary.csv")
+    loss_attribution_v2_path = source("loss_attribution_breakdown_v2.csv")
+    loss_attribution_v3_path = source("loss_attribution_breakdown_v3.csv")
+    tag_coverage_path = source("tag_coverage_diagnostics.csv")
+    congested_interfaces_path = source("congested_interfaces_summary.csv")
+    queue_saturation_timeline_path = source(
+        "queue_saturation_timeline_at_capacity.csv"
     )
-    satellite_interface_path = os.path.join(
-        comparison_dir,
-        "satellite_interface_load_summary.csv",
-    )
-    fallback_phase_path = os.path.join(comparison_dir, "fallback_phase_summary.csv")
+    if not os.path.exists(queue_saturation_timeline_path):
+        queue_saturation_timeline_path = source("queue_saturation_timeline.csv")
+    corridor_concentration_path = source("corridor_concentration_summary.csv")
+    satellite_interface_path = source("satellite_interface_load_summary.csv")
+    fallback_phase_path = source("fallback_phase_summary.csv")
     if not os.path.exists(summary_path) or not os.path.exists(per_flow_path):
         print("Skipping plots; missing analysis outputs in %s" % comparison_dir)
         return
@@ -154,7 +149,7 @@ def plot_single_run(comparison_dir):
         summary,
         "algorithm",
         "aggregate_pdr",
-        os.path.join(comparison_dir, "aggregate_pdr.png"),
+        destination("aggregate_pdr.png"),
         "Aggregate PDR",
         _timing_title("Aggregate PDR", summary),
     )
@@ -162,7 +157,7 @@ def plot_single_run(comparison_dir):
         summary,
         "algorithm",
         "focus_flow_pdr",
-        os.path.join(comparison_dir, "focus_flow_pdr.png"),
+        destination("focus_flow_pdr.png"),
         "Focus-flow PDR",
         _timing_title("Focus-flow PDR", summary),
     )
@@ -170,7 +165,7 @@ def plot_single_run(comparison_dir):
         summary,
         "algorithm",
         "total_lost_packets",
-        os.path.join(comparison_dir, "packet_loss_count_by_algorithm.png"),
+        destination("packet_loss_count_by_algorithm.png"),
         "Lost packets",
         _timing_title("Synthetic Sent-minus-Received Loss", summary),
     )
@@ -178,7 +173,7 @@ def plot_single_run(comparison_dir):
         summary,
         "algorithm",
         "failed_flow_count",
-        os.path.join(comparison_dir, "failed_flow_count.png"),
+        destination("failed_flow_count.png"),
         "Failed flow count",
         _timing_title("Failed Flow Count", summary),
     )
@@ -215,21 +210,31 @@ def plot_single_run(comparison_dir):
                 by_link_type[link_type] = 0
         value_cols = [col for col in ["ISL", "GSL", "UNKNOWN"] if col in by_link_type.columns]
         by_link_type[value_cols] = by_link_type[value_cols].fillna(0)
+        exact_drop_total = int(by_algorithm["drop_count"].sum())
+        physical_title = (
+            "Physical Drop Count by Algorithm"
+            if exact_drop_total
+            else "No exact physical drop trace events were recorded."
+        )
         _bar_plot(
             by_algorithm,
             "algorithm",
             "drop_count",
-            os.path.join(comparison_dir, "physical_drop_count_by_algorithm.png"),
+            destination("physical_drop_count_by_algorithm.png"),
             "Physical drop trace events",
-            "Physical Drop Count by Algorithm",
+            physical_title,
         )
         _stacked_bar(
             by_link_type,
             "algorithm",
             value_cols,
-            os.path.join(comparison_dir, "physical_drop_by_link_type.png"),
+            destination("physical_drop_by_link_type.png"),
             "Physical drop trace events",
-            "Physical Drops by Link Type",
+            (
+                "Physical Drops by Link Type"
+                if exact_drop_total
+                else "No exact physical drop trace events were recorded."
+            ),
         )
 
     if os.path.exists(gsl_queue_path):
@@ -239,12 +244,12 @@ def plot_single_run(comparison_dir):
                 gsl_queue,
                 "algorithm",
                 "max_gsl_queue_pkt",
-                os.path.join(comparison_dir, "gsl_queue_occupancy_by_algorithm.png"),
+                destination("gsl_queue_occupancy_by_algorithm.png"),
                 "Max GSL/access queue occupancy (packets)",
                 "GSL Queue Occupancy by Algorithm",
             )
 
-    if os.path.exists(loss_attribution_path):
+    if write_legacy_outputs and os.path.exists(loss_attribution_path):
         attribution = pd.read_csv(loss_attribution_path)
         if len(attribution):
             attribution = attribution.copy()
@@ -259,12 +264,12 @@ def plot_single_run(comparison_dir):
                     "send_failed_packets",
                     "unexplained_loss_nonnegative",
                 ],
-                os.path.join(comparison_dir, "loss_attribution_breakdown.png"),
+                destination("loss_attribution_breakdown.png"),
                 "Packets",
                 "Loss Attribution Breakdown",
             )
 
-    if os.path.exists(loss_attribution_v2_path):
+    if write_legacy_outputs and os.path.exists(loss_attribution_v2_path):
         attribution_v2 = pd.read_csv(loss_attribution_v2_path)
         if len(attribution_v2):
             value_cols = [
@@ -286,7 +291,7 @@ def plot_single_run(comparison_dir):
                 attribution_v2,
                 "algorithm",
                 value_cols,
-                os.path.join(comparison_dir, "loss_attribution_breakdown_v2.png"),
+                destination("loss_attribution_breakdown_v2.png"),
                 "Packets",
                 "Loss Attribution Breakdown v2 (Physical and Associated)",
             )
@@ -312,41 +317,10 @@ def plot_single_run(comparison_dir):
                 attribution_v3,
                 "algorithm",
                 value_cols,
-                os.path.join(comparison_dir, "loss_attribution_breakdown_v3.png"),
+                destination("loss_attribution_breakdown_v3.png"),
                 "Packets",
                 "Loss Attribution v3: Exact Drops and Time-aware Associations",
             )
-
-            coverage = attribution_v3.copy()
-            coverage["algorithm_label"] = coverage["algorithm"].map(_short_label)
-            x = list(range(len(coverage)))
-            width = 0.38
-            plt.figure(figsize=(9, 4.8))
-            plt.bar(
-                [value - width / 2 for value in x],
-                coverage["path_replay_success_ratio"],
-                width=width,
-                label="Path replay",
-                color="#2a9d8f",
-            )
-            plt.bar(
-                [value + width / 2 for value in x],
-                coverage["flow_tag_coverage_ratio"],
-                width=width,
-                label="Flow tag",
-                color="#e9c46a",
-            )
-            plt.xticks(x, coverage["algorithm_label"], rotation=25, ha="right")
-            plt.ylabel("Coverage ratio")
-            plt.ylim(0, 1.05)
-            plt.title("Path Replay and Flow-tag Coverage")
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig(
-                os.path.join(comparison_dir, "path_replay_coverage.png"),
-                dpi=180,
-            )
-            plt.close()
 
             _stacked_bar(
                 attribution_v3,
@@ -356,13 +330,62 @@ def plot_single_run(comparison_dir):
                     "gsl_saturation_associated_loss",
                     "mixed_saturation_associated_loss",
                 ],
-                os.path.join(
-                    comparison_dir,
-                    "saturation_overlap_by_algorithm.png",
-                ),
+                destination("saturation_overlap_by_algorithm.png"),
                 "Inferred associated packets",
                 "Same-window Replay-path Saturation Overlap",
             )
+
+    if os.path.exists(tag_coverage_path):
+        tag_coverage = pd.read_csv(tag_coverage_path)
+        algorithms = summary[["algorithm"]].drop_duplicates().sort_values("algorithm")
+        if len(tag_coverage):
+            coverage = (
+                tag_coverage.groupby("algorithm")
+                .agg(
+                    trace_event_count=("drop_events_total", "sum"),
+                    tagged_event_count=("drop_events_with_flow_tag", "sum"),
+                )
+                .reset_index()
+            )
+            coverage = algorithms.merge(coverage, on="algorithm", how="left").fillna(0)
+        else:
+            coverage = algorithms.copy()
+            coverage["trace_event_count"] = 0
+            coverage["tagged_event_count"] = 0
+        labels = coverage["algorithm"].map(_short_label).tolist()
+        x = list(range(len(coverage)))
+        width = 0.38
+        plt.figure(figsize=(9, 4.8))
+        plt.bar(
+            [value - width / 2 for value in x],
+            coverage["trace_event_count"],
+            width=width,
+            label="Trace events",
+            color="#4c78a8",
+        )
+        plt.bar(
+            [value + width / 2 for value in x],
+            coverage["tagged_event_count"],
+            width=width,
+            label="Tagged events",
+            color="#f2cf5b",
+        )
+        for index, row in coverage.iterrows():
+            total = int(row["trace_event_count"])
+            tagged = int(row["tagged_event_count"])
+            label = "N/A" if total == 0 else "%.1f%%" % (100.0 * tagged / total)
+            plt.text(index, max(total, tagged) + 0.05, label, ha="center", fontsize=9)
+        plt.xticks(x, labels, rotation=25, ha="right")
+        plt.ylabel("Exact trace event count")
+        plt.title(
+            "UdpFlowTag Coverage (N/A when no trace events)"
+            if int(coverage["trace_event_count"].sum())
+            else "No exact physical drop trace events were recorded; tag coverage is N/A."
+        )
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(destination("tag_coverage_diagnostics.png"), dpi=180)
+        plt.close()
 
     if os.path.exists(congested_interfaces_path):
         congested = pd.read_csv(congested_interfaces_path)
@@ -384,7 +407,7 @@ def plot_single_run(comparison_dir):
                 by_link,
                 "algorithm",
                 ["ISL", "GSL", "UNKNOWN"],
-                os.path.join(comparison_dir, "queue_saturation_by_link_type.png"),
+                destination("queue_saturation_by_link_type.png"),
                 "Queue samples at capacity",
                 "Queue Saturation by Link Type",
             )
@@ -407,7 +430,7 @@ def plot_single_run(comparison_dir):
             plt.xlabel("Samples at queue capacity")
             plt.title("Top Congested Interfaces")
             plt.tight_layout()
-            plt.savefig(os.path.join(comparison_dir, "top_congested_interfaces.png"), dpi=180)
+            plt.savefig(destination("top_congested_interfaces.png"), dpi=180)
             plt.close()
 
     if os.path.exists(queue_saturation_timeline_path):
@@ -459,7 +482,7 @@ def plot_single_run(comparison_dir):
                 plt.grid(True, alpha=0.25)
                 plt.legend(fontsize=8)
                 plt.tight_layout()
-                plt.savefig(os.path.join(comparison_dir, "queue_saturation_timeline.png"), dpi=180)
+                plt.savefig(destination("queue_saturation_timeline.png"), dpi=180)
                 plt.close()
 
     if os.path.exists(corridor_concentration_path):
@@ -477,7 +500,7 @@ def plot_single_run(comparison_dir):
             plt.title("Corridor Concentration")
             plt.tight_layout()
             plt.savefig(
-                os.path.join(comparison_dir, "corridor_concentration_summary.png"),
+                destination("corridor_concentration_summary.png"),
                 dpi=180,
             )
             plt.close()
@@ -500,7 +523,7 @@ def plot_single_run(comparison_dir):
             plt.title("Top Satellite Interface Proxy Load")
             plt.tight_layout()
             plt.savefig(
-                os.path.join(comparison_dir, "satellite_interface_load_summary.png"),
+                destination("satellite_interface_load_summary.png"),
                 dpi=180,
             )
             plt.close()
@@ -519,7 +542,7 @@ def plot_single_run(comparison_dir):
             plt.title("Flow Selection by Fallback Phase")
             plt.tight_layout()
             plt.savefig(
-                os.path.join(comparison_dir, "fallback_phase_summary.png"),
+                destination("fallback_phase_summary.png"),
                 dpi=180,
             )
             plt.close()
@@ -539,7 +562,7 @@ def plot_single_run(comparison_dir):
     plt.grid(True, alpha=0.25)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(comparison_dir, "per_flow_pdr_cdf.png"), dpi=180)
+    plt.savefig(destination("per_flow_pdr_cdf.png"), dpi=180)
     plt.close()
 
     if os.path.exists(queue_path):
@@ -552,9 +575,12 @@ def plot_single_run(comparison_dir):
             plt.xlabel("Max queue occupancy (packets)")
             plt.title("Max ISL Queue Occupancy Top Links")
             plt.tight_layout()
-            plt.savefig(os.path.join(comparison_dir, "max_queue_occupancy_top_links.png"), dpi=180)
+            plt.savefig(destination("max_queue_occupancy_top_links.png"), dpi=180)
             plt.close()
-            _write_deprecated_link_drop_heatmap_notice(comparison_dir)
+            if write_legacy_outputs:
+                _write_deprecated_link_drop_heatmap_notice(
+                    destination("link_drop_heatmap.png")
+                )
 
     if os.path.exists(top_loss_path):
         top_loss = pd.read_csv(top_loss_path)
@@ -574,13 +600,15 @@ def plot_single_run(comparison_dir):
             plt.xlabel("Synthetic lost packets (sent - received)")
             plt.title("Top Loss Flows")
             plt.tight_layout()
-            plt.savefig(os.path.join(comparison_dir, "top_loss_flows.png"), dpi=180)
+            plt.savefig(destination("top_loss_flows.png"), dpi=180)
             plt.close()
 
     if os.path.exists(destination_path):
-        destination = pd.read_csv(destination_path)
-        if len(destination):
-            lossy = destination[destination["total_lost_packets"] > 0].copy()
+        destination_summary = pd.read_csv(destination_path)
+        if len(destination_summary):
+            lossy = destination_summary[
+                destination_summary["total_lost_packets"] > 0
+            ].copy()
             if len(lossy):
                 lossy = lossy.sort_values("total_lost_packets", ascending=False).head(20)
                 lossy["destination"] = (
@@ -593,12 +621,12 @@ def plot_single_run(comparison_dir):
                 plt.xlabel("Synthetic lost packets (sent - received)")
                 plt.title("Destination Loss Summary")
                 plt.tight_layout()
-                plt.savefig(os.path.join(comparison_dir, "destination_loss_summary.png"), dpi=180)
+                plt.savefig(destination("destination_loss_summary.png"), dpi=180)
                 plt.close()
 
-            capacity = destination[
-                destination["gsl_capacity_mbps"].notna()
-                & (destination["total_offered_rate_mbps"] > 0)
+            capacity = destination_summary[
+                destination_summary["gsl_capacity_mbps"].notna()
+                & (destination_summary["total_offered_rate_mbps"] > 0)
             ].copy()
             if len(capacity):
                 capacity = capacity.sort_values(
@@ -634,22 +662,25 @@ def plot_single_run(comparison_dir):
                 plt.legend()
                 plt.tight_layout()
                 plt.savefig(
-                    os.path.join(comparison_dir, "destination_offered_rate_vs_gsl_capacity.png"),
+                    destination("destination_offered_rate_vs_gsl_capacity.png"),
                     dpi=180,
                 )
             plt.close()
 
-    _copy_plots_with_background_flow_suffix(comparison_dir, summary)
+    if output_layout == "standard":
+        write_output_manifest(comparison_dir)
     print("  > Wrote plots under %s" % comparison_dir)
 
 
 def plot_across_loads(runs_root, run_names):
     rows = []
     for run_name in run_names:
-        summary_path = os.path.join(
-            runs_root,
-            run_name,
-            "comparison_packet_delivery",
+        summary_path = resolve_input_path(
+            os.path.join(
+                runs_root,
+                run_name,
+                "comparison_packet_delivery",
+            ),
             "summary_by_algorithm.csv",
         )
         if os.path.exists(summary_path):
@@ -697,10 +728,12 @@ def plot_across_loads(runs_root, run_names):
 def plot_across_background_flow_counts(runs_root, run_names):
     rows = []
     for run_name in run_names:
-        summary_path = os.path.join(
-            runs_root,
-            run_name,
-            "comparison_packet_delivery",
+        summary_path = resolve_input_path(
+            os.path.join(
+                runs_root,
+                run_name,
+                "comparison_packet_delivery",
+            ),
             "summary_by_algorithm.csv",
         )
         if os.path.exists(summary_path):
@@ -797,7 +830,11 @@ def main():
         seen.add(run["name"])
         run_names.append(run["name"])
         comparison_dir = os.path.join("runs", run["name"], "comparison_packet_delivery")
-        plot_single_run(comparison_dir)
+        plot_single_run(
+            comparison_dir,
+            output_layout=args.output_layout,
+            write_legacy_outputs=args.write_legacy_outputs,
+        )
     plot_across_loads("runs", run_names)
     plot_across_background_flow_counts("runs", run_names)
 

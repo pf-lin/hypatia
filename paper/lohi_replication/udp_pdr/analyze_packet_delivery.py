@@ -2,7 +2,6 @@ import csv
 import json
 import math
 import os
-import shutil
 import sys
 from itertools import combinations
 
@@ -17,6 +16,15 @@ from loss_attribution_v3 import (
     PATH_REPLAY_DIAGNOSTIC_COLUMNS,
     TAG_COVERAGE_COLUMNS,
     build_v3_for_algorithm,
+)
+from packet_delivery_outputs import (
+    archive_flat_outputs,
+    ensure_standard_layout,
+    link_selection_diagnostic,
+    output_path,
+    write_deprecated_notes,
+    write_output_manifest,
+    write_result_guide,
 )
 
 
@@ -310,23 +318,27 @@ def load_run_metadata(algorithm_run_dir):
         return json.load(f_in)
 
 
-def copy_selection_diagnostics(run, comparison_dir):
+def copy_selection_diagnostics(run, comparison_dir, output_layout):
     run_dir = os.path.join("runs", run["name"])
-    copied = []
+    linked = []
     for filename in SELECTION_DIAGNOSTIC_FILENAMES:
         src = os.path.join(run_dir, filename)
         if not os.path.exists(src):
             continue
-        dst = os.path.join(comparison_dir, filename)
-        shutil.copyfile(src, dst)
-        copied.append(dst)
+        dst = output_path(comparison_dir, filename, output_layout)
+        link_selection_diagnostic(src, dst)
+        linked.append(dst)
     warnings_src = os.path.join(run_dir, "flow_selection_warnings.txt")
     if os.path.exists(warnings_src):
-        shutil.copyfile(
+        link_selection_diagnostic(
             warnings_src,
-            os.path.join(comparison_dir, "flow_selection_warnings.txt"),
+            output_path(
+                comparison_dir,
+                "flow_selection_warnings.txt",
+                output_layout,
+            ),
         )
-    return copied
+    return linked
 
 
 def to_float_or_none(value):
@@ -1025,7 +1037,13 @@ def read_queue_timeline_inputs(algorithm_run_dir, run, algorithm, flows):
     return pd.DataFrame(rows)
 
 
-def build_queue_saturation_outputs(algorithm_run_dir, run, algorithm, flows):
+def build_queue_saturation_outputs(
+    algorithm_run_dir,
+    run,
+    algorithm,
+    flows,
+    write_full_timeline=False,
+):
     interface_to_flows, _flow_to_isl, _flow_to_gsl = load_interface_flow_maps(run, flows)
     timeline = read_queue_timeline_inputs(algorithm_run_dir, run, algorithm, flows)
     num_satellites = infer_num_satellites_from_flows(flows)
@@ -1075,6 +1093,10 @@ def build_queue_saturation_outputs(algorithm_run_dir, run, algorithm, flows):
     timeline["estimated_active_flow_count"] = active_counts
     timeline["estimated_active_lost_flow_count"] = active_lost_counts
     timeline_out = timeline[QUEUE_SATURATION_TIMELINE_COLUMNS].copy()
+    if not write_full_timeline:
+        timeline_out = timeline_out[
+            timeline_out["is_at_capacity"] == True
+        ].reset_index(drop=True)
 
     congested_rows = []
     saturated = timeline[timeline["is_at_capacity"] == True]
@@ -1552,6 +1574,52 @@ def write_loss_diagnostics(
         f_out.write("UDP/PDR Loss Attribution Diagnostics\n")
         f_out.write("=" * 40 + "\n\n")
 
+        f_out.write("How to read this report\n")
+        f_out.write("-" * 40 + "\n")
+        f_out.write(
+            "Synthetic loss = UDP sender count - UDP receiver count. It means "
+            "a packet did not reach the UDP application before simulation end; "
+            "it is not by itself a physical link-drop observation.\n"
+        )
+        f_out.write(
+            "Exact attribution requires a matching trace event: queue/device "
+            "rejection, PHY Tx/Rx drop, routing/no-route drop, or Socket::SendTo "
+            "failure. Physical drop therefore means exact traced link/device drop.\n"
+        )
+        f_out.write(
+            "Queue occupancy at capacity is saturation evidence only. Exact queue "
+            "drop attribution requires Enqueue(packet) to fail and QueueDrop or "
+            "DropBeforeEnqueue to fire. UdpFlowTag identifies an event after it "
+            "occurs and does not create drop events, so exact counts can remain zero.\n"
+        )
+        f_out.write(
+            "Associated attribution is inferred from same-window dynamic path replay "
+            "and queue saturation. ISL associated and GSL associated identify the "
+            "overlapping link type. Mixed means one flow has both ISL and GSL "
+            "evidence; it is flow-level ambiguity, not packet-level proof or a "
+            "division of causal loss between ISL and GSL.\n"
+        )
+        f_out.write(
+            "Unclassified loss is the residual with no exact event or supported "
+            "association. Confidence is high for exact reconciliation, medium when "
+            "association evidence explains residual loss, and low when unexplained "
+            "residual remains.\n\n"
+        )
+
+        f_out.write("Recommended outputs\n")
+        f_out.write("-" * 40 + "\n")
+        f_out.write("core/summary_by_algorithm.csv\n")
+        f_out.write("core/per_flow_delivery.csv\n")
+        f_out.write("core/loss_attribution_breakdown_v3.csv\n")
+        f_out.write("core/loss_attribution_detailed_v3.csv\n")
+        f_out.write("core/congested_interfaces_summary.csv\n")
+        f_out.write("core/path_replay_diagnostics.csv\n")
+        f_out.write("core/physical_drop_summary.csv\n")
+        f_out.write(
+            "Deprecated: legacy loss attribution v1/v2 outputs, link_drops.csv, "
+            "and link_drop_heatmap.png. Do not use them as paper results.\n\n"
+        )
+
         f_out.write("Attribution availability\n")
         f_out.write("-" * 40 + "\n")
         f_out.write(
@@ -1761,7 +1829,7 @@ def write_loss_diagnostics(
             % QUEUE_ASSOCIATION_WARNING
         )
         if len(loss_attribution_breakdown_v2_df):
-            f_out.write("Detailed attribution breakdown v2:\n")
+            f_out.write("Compatibility-only attribution breakdown v2:\n")
             for _, row in loss_attribution_breakdown_v2_df.iterrows():
                 f_out.write(
                     "  algorithm=%s synthetic_lost=%d physical_queue=%d physical_phy=%d "
@@ -1915,13 +1983,16 @@ def write_loss_diagnostics(
                 f_out.write("WARNING: %s\n" % warning)
         f_out.write("\n")
 
-        f_out.write("Recommended next steps\n")
+        f_out.write("Interpretation limits\n")
         f_out.write("-" * 40 + "\n")
         f_out.write(
-            "Use physical_drop_summary.csv, gsl_queue_summary.csv, and loss_attribution_summary.csv before making access-side bottleneck claims.\n"
+            "Use core/physical_drop_summary.csv for exact event counts and "
+            "core/loss_attribution_breakdown_v3.csv for the canonical reconciled result.\n"
         )
         f_out.write(
-            "Consider no-route/forwarding drop tracing and FlowMonitor as follow-up instrumentation work if unexplained_loss remains high.\n"
+            "ISL/GSL/Mixed saturation categories remain associated evidence, not "
+            "physical proof. Investigate exact hooks or additional forwarding traces "
+            "when unclassified loss remains high.\n"
         )
 
 
@@ -2074,12 +2145,36 @@ def write_statistics(
         f_out.write("\n")
 
 
-def analyze_run(run, algorithms):
+def analyze_run(
+    run,
+    algorithms,
+    output_layout="standard",
+    write_legacy_outputs=False,
+    write_full_diagnostics=True,
+    write_full_queue_saturation_timeline=False,
+):
     comparison_dir = os.path.join("runs", run["name"], "comparison_packet_delivery")
     os.makedirs(comparison_dir, exist_ok=True)
-    copied_diagnostics = copy_selection_diagnostics(run, comparison_dir)
+    if output_layout == "standard":
+        ensure_standard_layout(comparison_dir)
+        archived = archive_flat_outputs(comparison_dir)
+        if archived:
+            print(
+                "  > Preserved %d flat-layout output(s) in categorized directories"
+                % len(archived)
+            )
+        write_deprecated_notes(comparison_dir)
+        write_result_guide(comparison_dir)
+    copied_diagnostics = copy_selection_diagnostics(
+        run,
+        comparison_dir,
+        output_layout,
+    )
     if copied_diagnostics:
-        print("  > Copied flow-selection diagnostics into %s" % comparison_dir)
+        print("  > Linked flow-selection diagnostics under %s" % comparison_dir)
+
+    def result_path(filename):
+        return output_path(comparison_dir, filename, output_layout)
 
     per_flow_frames = []
     summary_rows = []
@@ -2217,7 +2312,13 @@ def analyze_run(run, algorithms):
             congested_interfaces,
             flow_isl_saturated_interfaces,
             flow_gsl_saturated_interfaces,
-        ) = build_queue_saturation_outputs(algorithm_run_dir, run, algorithm, flows)
+        ) = build_queue_saturation_outputs(
+            algorithm_run_dir,
+            run,
+            algorithm,
+            flows,
+            write_full_timeline=write_full_queue_saturation_timeline,
+        )
         if len(queue_timeline):
             queue_saturation_timeline_frames.append(queue_timeline)
         if len(congested_interfaces):
@@ -2352,34 +2453,77 @@ def analyze_run(run, algorithms):
         gsl_capacity_by_algorithm,
     )
 
-    per_flow_df.to_csv(os.path.join(comparison_dir, "per_flow_delivery.csv"), index=False)
-    summary_df.to_csv(os.path.join(comparison_dir, "summary_by_algorithm.csv"), index=False)
-    focus_df.to_csv(os.path.join(comparison_dir, "focus_flow_delivery.csv"), index=False)
-    pairwise_df.to_csv(os.path.join(comparison_dir, "pairwise_algorithm_comparison.csv"), index=False)
-    affected_df.to_csv(os.path.join(comparison_dir, "affected_flows.csv"), index=False)
-    top_loss_df.to_csv(os.path.join(comparison_dir, "top_loss_flows.csv"), index=False)
-    destination_df.to_csv(os.path.join(comparison_dir, "destination_loss_summary.csv"), index=False)
-    link_drops_df.to_csv(os.path.join(comparison_dir, "link_drops.csv"), index=False)
-    physical_drop_df.to_csv(os.path.join(comparison_dir, "physical_link_drops.csv"), index=False)
-    udp_send_failure_df.to_csv(os.path.join(comparison_dir, "udp_send_failures.csv"), index=False)
-    routing_drop_df.to_csv(os.path.join(comparison_dir, "routing_drops.csv"), index=False)
-    physical_drop_summary_df.to_csv(os.path.join(comparison_dir, "physical_drop_summary.csv"), index=False)
-    gsl_queue_summary_df.to_csv(os.path.join(comparison_dir, "gsl_queue_summary.csv"), index=False)
-    loss_attribution_df.to_csv(os.path.join(comparison_dir, "loss_attribution_summary.csv"), index=False)
-    loss_attribution_detailed_df.to_csv(os.path.join(comparison_dir, "loss_attribution_detailed.csv"), index=False)
-    flow_path_timeline_df.to_csv(os.path.join(comparison_dir, "flow_path_timeline.csv"), index=False)
-    path_replay_diagnostics_df.to_csv(os.path.join(comparison_dir, "path_replay_diagnostics.csv"), index=False)
-    loss_attribution_detailed_v3_df.to_csv(os.path.join(comparison_dir, "loss_attribution_detailed_v3.csv"), index=False)
-    loss_attribution_breakdown_v3_df.to_csv(os.path.join(comparison_dir, "loss_attribution_breakdown_v3.csv"), index=False)
-    tag_coverage_diagnostics_df.to_csv(os.path.join(comparison_dir, "tag_coverage_diagnostics.csv"), index=False)
-    congested_interfaces_df.to_csv(os.path.join(comparison_dir, "congested_interfaces_summary.csv"), index=False)
-    loss_attribution_breakdown_v2_df.to_csv(os.path.join(comparison_dir, "loss_attribution_breakdown_v2.csv"), index=False)
-    queue_saturation_timeline_df.to_csv(os.path.join(comparison_dir, "queue_saturation_timeline.csv"), index=False)
-    if not physical_trace_available_any:
-        link_drops_df.to_csv(os.path.join(comparison_dir, "synthetic_link_drops.csv"), index=False)
-    queue_df.to_csv(os.path.join(comparison_dir, "max_queue_occupancy_by_algorithm.csv"), index=False)
+    per_flow_df.to_csv(result_path("per_flow_delivery.csv"), index=False)
+    summary_df.to_csv(result_path("summary_by_algorithm.csv"), index=False)
+    focus_df.to_csv(result_path("focus_flow_delivery.csv"), index=False)
+    pairwise_df.to_csv(result_path("pairwise_algorithm_comparison.csv"), index=False)
+    affected_df.to_csv(result_path("affected_flows.csv"), index=False)
+    top_loss_df.to_csv(result_path("top_loss_flows.csv"), index=False)
+    destination_df.to_csv(result_path("destination_loss_summary.csv"), index=False)
+    physical_drop_df.to_csv(result_path("physical_link_drops.csv"), index=False)
+    udp_send_failure_df.to_csv(result_path("udp_send_failures.csv"), index=False)
+    routing_drop_df.to_csv(result_path("routing_drops.csv"), index=False)
+    physical_drop_summary_df.to_csv(result_path("physical_drop_summary.csv"), index=False)
+    gsl_queue_summary_df.to_csv(result_path("gsl_queue_summary.csv"), index=False)
+    path_replay_diagnostics_df.to_csv(
+        result_path("path_replay_diagnostics.csv"),
+        index=False,
+    )
+    loss_attribution_detailed_v3_df.to_csv(
+        result_path("loss_attribution_detailed_v3.csv"),
+        index=False,
+    )
+    loss_attribution_breakdown_v3_df.to_csv(
+        result_path("loss_attribution_breakdown_v3.csv"),
+        index=False,
+    )
+    tag_coverage_diagnostics_df.to_csv(
+        result_path("tag_coverage_diagnostics.csv"),
+        index=False,
+    )
+    congested_interfaces_df.to_csv(
+        result_path("congested_interfaces_summary.csv"),
+        index=False,
+    )
+    if write_full_diagnostics:
+        flow_path_timeline_df.to_csv(
+            result_path("flow_path_timeline.csv"),
+            index=False,
+        )
+    timeline_filename = (
+        "queue_saturation_timeline.csv"
+        if write_full_queue_saturation_timeline
+        else "queue_saturation_timeline_at_capacity.csv"
+    )
+    queue_saturation_timeline_df.to_csv(
+        result_path(timeline_filename),
+        index=False,
+    )
+    if write_legacy_outputs or output_layout == "flat":
+        link_drops_df.to_csv(result_path("link_drops.csv"), index=False)
+        loss_attribution_df.to_csv(
+            result_path("loss_attribution_summary.csv"),
+            index=False,
+        )
+        loss_attribution_detailed_df.to_csv(
+            result_path("loss_attribution_detailed.csv"),
+            index=False,
+        )
+        loss_attribution_breakdown_v2_df.to_csv(
+            result_path("loss_attribution_breakdown_v2.csv"),
+            index=False,
+        )
+        if not physical_trace_available_any:
+            link_drops_df.to_csv(
+                result_path("synthetic_link_drops.csv"),
+                index=False,
+            )
+    queue_df.to_csv(
+        result_path("max_queue_occupancy_by_algorithm.csv"),
+        index=False,
+    )
     write_statistics(
-        os.path.join(comparison_dir, "statistics.txt"),
+        result_path("statistics.txt"),
         run,
         summary_df,
         focus_df,
@@ -2391,7 +2535,7 @@ def analyze_run(run, algorithms):
         udp_send_failure_available_any,
     )
     write_loss_diagnostics(
-        os.path.join(comparison_dir, "loss_diagnostics.txt"),
+        result_path("loss_diagnostics.txt"),
         run,
         summary_df,
         focus_df,
@@ -2415,6 +2559,8 @@ def analyze_run(run, algorithms):
         ipv4_l3_drop_available_any,
         gsl_capacity_warnings,
     )
+    if output_layout == "standard":
+        write_output_manifest(comparison_dir)
     print("  > Wrote comparison outputs under %s" % comparison_dir)
     return comparison_dir
 
@@ -2450,7 +2596,16 @@ def main():
         if run["name"] in seen_run_names:
             continue
         seen_run_names.add(run["name"])
-        analyze_run(run, algorithms)
+        analyze_run(
+            run,
+            algorithms,
+            output_layout=args.output_layout,
+            write_legacy_outputs=args.write_legacy_outputs,
+            write_full_diagnostics=args.write_full_diagnostics,
+            write_full_queue_saturation_timeline=(
+                args.write_full_queue_saturation_timeline
+            ),
+        )
 
 
 if __name__ == "__main__":

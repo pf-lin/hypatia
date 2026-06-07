@@ -350,6 +350,45 @@ def add_common_run_arguments(parser):
     add_runtime_override_arguments(parser)
 
 
+def add_analysis_output_arguments(parser):
+    parser.add_argument(
+        "--output-layout",
+        choices=["standard", "flat"],
+        default="standard",
+        help=(
+            "Packet-delivery output layout. 'standard' writes core/, "
+            "diagnostics/, and legacy/. Default: standard"
+        ),
+    )
+    diagnostics_group = parser.add_mutually_exclusive_group()
+    diagnostics_group.add_argument(
+        "--write-full-diagnostics",
+        dest="write_full_diagnostics",
+        action="store_true",
+        help="Write detailed diagnostic CSVs. This is the default.",
+    )
+    diagnostics_group.add_argument(
+        "--no-write-full-diagnostics",
+        dest="write_full_diagnostics",
+        action="store_false",
+        help="Skip large per-flow/path diagnostic CSVs.",
+    )
+    parser.set_defaults(write_full_diagnostics=True)
+    parser.add_argument(
+        "--write-legacy-outputs",
+        action="store_true",
+        help="Generate deprecated v1/v2 compatibility CSVs and plots.",
+    )
+    parser.add_argument(
+        "--write-full-queue-saturation-timeline",
+        action="store_true",
+        help=(
+            "Write every queue-history row. Disabled by default because this "
+            "file can be multiple gigabytes."
+        ),
+    )
+
+
 def describe_selection(args):
     selected_traffic_mode = (
         args.traffic_mode
@@ -609,4 +648,5 @@ def add_force_and_dry_run_arguments(parser):
 def build_arg_parser(description):
     parser = argparse.ArgumentParser(description=description)
     add_common_run_arguments(parser)
+    add_analysis_output_arguments(parser)
     return parser
