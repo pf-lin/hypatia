@@ -516,8 +516,8 @@ These files use the same interval format as the ISL queue logs:
 access interfaces rather than fixed point-to-point links, so `to=-1` means the
 destination peer is not fixed at the queue object. Routing algorithms still
 consume only the ISL `queue_stats/*.csv`; GSL queues are for analysis and loss
-attribution only. Post-run analysis prefers the append-only history files and
-falls back to the scratch files for older runs.
+attribution only. v3 attribution requires the append-only history files and
+does not fall back to reset-per-window scratch files.
 
 Physical drop tracing is enabled by
 `enable_physical_link_drop_tracking=true`. It writes:
@@ -540,6 +540,12 @@ present. `routing_drops.csv` records arbiter route lookup failures from
 `RouteOutput` and `RouteInput`. `udp_send_failures.csv` is header-only when all
 `Socket::SendTo()` calls are accepted.
 
+Every UDP burst packet also carries an `UdpFlowTag` PacketTag containing the
+UDP burst id (the experiment flow id) and packet sequence number. PacketTags do
+not alter the wire payload or packet size and survive packet copies through
+routing, queues, and NetDevices. Drop traces read the tag without removing it.
+The native ns-3 packet UID is logged as an additional diagnostic key.
+
 The drop trace schema includes:
 
 ```text
@@ -549,7 +555,8 @@ drop_source, drop_reason, packet_size_bytes,
 queue_occupancy_pkt_if_available,
 queue_occupancy_byte_if_available,
 queue_capacity_pkt_if_available,
-flow_id_if_available, trace_hook
+flow_id_if_available, packet_sequence_if_available,
+packet_uid_if_available, flow_tag_available, trace_hook
 ```
 
 `interface_key` uses `LINK:from->to`, for example `ISL:240->241` or
@@ -558,6 +565,11 @@ object is not tied to a fixed peer. If the queue is attached to a satellite
 side GSL interface, `from` is the satellite node id. If it is attached to a
 ground-station side interface, `from` is the endpoint node id and
 `ground_station_id` is the local ground-station index when available.
+
+`forced_receive_error_rate` is a test-only configuration parameter for
+exercising the PHY receive-drop trace. It defaults to `0.0`; formal experiment
+templates leave it unset. A nonzero value installs receive error models on
+tracked ISL and GSL devices and should be used only for short validation runs.
 
 ## Detailed Loss Attribution
 
@@ -621,6 +633,54 @@ and lossy flow counts for the interface.
 
 When `synthetic_lost_packets` is zero, coverage is reported as `1.0`.
 
+## Time-aware Loss Attribution v3
+
+v3 accumulates every `dynamic_state/fstate_<time_ns>.txt` delta in timestamp
+order. For a time `t`, it uses the latest snapshot with
+`snapshot_time <= t`, then replays the directional path from each flow source
+to destination. Replay reports normal paths and explicit diagnostics for
+missing entries, no route, loops, invalid next hops, hop-limit exhaustion, and
+missing snapshots.
+
+ISL hops map to `ISL:from->to`. GSL queue keys map to the existing shared
+channel form `GSL:from->-1`; the actual replay hop is retained separately, and
+the output notes that the queue key cannot identify a unique shared-channel
+receiver.
+
+The new outputs are:
+
+```text
+flow_path_timeline.csv
+path_replay_diagnostics.csv
+tag_coverage_diagnostics.csv
+loss_attribution_detailed_v3.csv
+loss_attribution_breakdown_v3.csv
+loss_attribution_breakdown_v3.png
+path_replay_coverage.png
+saturation_overlap_by_algorithm.png
+```
+
+Exact queue, PHY, routing, and socket-submission events are deduplicated by the
+stable flow/sequence packet key. `MacTxDrop` remains diagnostic because it can
+describe the same queue overflow as `DropBeforeEnqueue`. Inferred saturation
+association is assigned only when a successful replay path and a saturated
+interface from `*_queue_pkt_history.csv` overlap in time. This is correlation,
+not physical drop proof.
+
+For every flow and algorithm, analysis checks:
+
+```text
+exact attributed
++ inferred saturation associated
++ tail in flight possible
++ unclassified
+= synthetic lost
+```
+
+Any mismatch or exact-event overflow is written to `reconciliation_error`; it
+is never silently discarded. v3 also reports path-replay success, flow-tag
+coverage, attribution coverage, confidence, and explanatory notes.
+
 ## Current Limitations
 
 PDR remains the primary end-to-end metric. The synthetic loss value
@@ -640,8 +700,9 @@ unexplained_loss = synthetic_lost_packets
 for example generic IPv4 L3 drops, socket/internal buffering, or a trace hook
 not covered by the current pass. It can also become negative if future trace
 coverage double-counts the same packet, so the diagnostics should be read
-together with the stated coverage. Use the v2 CSV files above for the more
-useful split of remaining loss.
+together with the stated coverage. Use the v3 CSV files above for time-aware
+path correlation and tagged exact attribution; v2 remains available for
+compatibility.
 
 `link_drops.csv` and `synthetic_link_drops.csv` remain synthetic flow-loss
 summaries for backward compatibility. True physical events are reported in
@@ -652,13 +713,12 @@ queue occupancy per ISL. GSL/access queues are summarized separately in
 `gsl_queue_summary.csv`, `congested_interfaces_summary.csv`, and
 `queue_saturation_timeline.csv`; they are not fed back into queue-aware routing.
 
-ISL queue-saturation association uses existing `isl_corridor_load_summary.csv`
-edge-to-flow diagnostics. GSL queue-saturation association uses
-`satellite_interface_load_summary.csv`, `flow_selection_diagnostics.csv`, and an
-endpoint access-side fallback. These are flow/path context proxies. The
-`dynamic_state/fstate_*.txt` files are delta updates, and this analysis does not
-perform complete per-packet path replay. If a flow-to-interface mapping is
-missing, the flow remains unclassified rather than being forced into ISL or GSL.
+The compatibility v2 association still uses corridor and access-side proxy
+diagnostics. v3 instead replays accumulated forwarding-state deltas and
+requires same-window path/history overlap. Packet timing for residual synthetic
+loss is not available for every packet, so saturation remains an inferred
+flow-level association after exact tagged events are removed. Missing or failed
+replay stays unclassified rather than being forced into ISL or GSL.
 
 `loss_diagnostics.txt` and `statistics.txt` explicitly record the current
 attribution scope:

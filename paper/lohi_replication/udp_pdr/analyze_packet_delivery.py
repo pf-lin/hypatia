@@ -10,6 +10,14 @@ import pandas as pd
 
 sys.path.append(os.path.join(os.path.dirname(__file__)))
 from dynamic_run_list import build_arg_parser, describe_selection, focus_dst_node_id, focus_src_node_id, get_udp_pdr_run_list
+from loss_attribution_v3 import (
+    FLOW_PATH_TIMELINE_COLUMNS,
+    LOSS_ATTRIBUTION_BREAKDOWN_V3_COLUMNS,
+    LOSS_ATTRIBUTION_DETAILED_V3_COLUMNS,
+    PATH_REPLAY_DIAGNOSTIC_COLUMNS,
+    TAG_COVERAGE_COLUMNS,
+    build_v3_for_algorithm,
+)
 
 
 UDP_FLOW_COLUMNS = [
@@ -89,6 +97,9 @@ PHYSICAL_DROP_COLUMNS = [
     "queue_occupancy_byte_if_available",
     "queue_capacity_pkt_if_available",
     "flow_id_if_available",
+    "packet_sequence_if_available",
+    "packet_uid_if_available",
+    "flow_tag_available",
     "trace_hook",
 ]
 
@@ -133,6 +144,9 @@ ROUTING_DROP_COLUMNS = [
     "next_hop_if_available",
     "packet_size_bytes",
     "flow_id_if_available",
+    "packet_sequence_if_available",
+    "packet_uid_if_available",
+    "flow_tag_available",
     "details",
 ]
 
@@ -141,6 +155,8 @@ UDP_SEND_FAILURE_COLUMNS = [
     "flow_id",
     "src",
     "dst",
+    "packet_sequence_if_available",
+    "packet_uid_if_available",
     "packet_size_bytes",
     "error_code",
     "error_message_if_available",
@@ -486,6 +502,8 @@ def read_physical_link_drops(algorithm_run_dir):
         "queue_occupancy_byte_if_available",
         "queue_capacity_pkt_if_available",
         "flow_id_if_available",
+        "packet_sequence_if_available",
+        "packet_uid_if_available",
     ]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
@@ -518,7 +536,16 @@ def read_udp_send_failures(algorithm_run_dir):
         if col not in df.columns:
             df[col] = ""
     df = df[UDP_SEND_FAILURE_COLUMNS].copy()
-    for col in ["time_ns", "flow_id", "src", "dst", "packet_size_bytes", "error_code"]:
+    for col in [
+        "time_ns",
+        "flow_id",
+        "src",
+        "dst",
+        "packet_sequence_if_available",
+        "packet_uid_if_available",
+        "packet_size_bytes",
+        "error_code",
+    ]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
 
@@ -540,6 +567,8 @@ def read_routing_drops(algorithm_run_dir):
         "node_id",
         "packet_size_bytes",
         "flow_id_if_available",
+        "packet_sequence_if_available",
+        "packet_uid_if_available",
     ]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df
@@ -1502,6 +1531,10 @@ def write_loss_diagnostics(
     loss_attribution_df,
     loss_attribution_breakdown_v2_df,
     loss_attribution_detailed_df,
+    loss_attribution_breakdown_v3_df,
+    loss_attribution_detailed_v3_df,
+    path_replay_diagnostics_df,
+    tag_coverage_diagnostics_df,
     congested_interfaces_df,
     physical_trace_available,
     gsl_queue_available,
@@ -1753,6 +1786,57 @@ def write_loss_diagnostics(
                 )
         else:
             f_out.write("No detailed attribution rows were generated.\n")
+        if len(loss_attribution_breakdown_v3_df):
+            f_out.write("\nTime-aware attribution breakdown v3:\n")
+            for _, row in loss_attribution_breakdown_v3_df.iterrows():
+                f_out.write(
+                    "  algorithm=%s synthetic_lost=%d exact=%d isl_assoc=%d "
+                    "gsl_assoc=%d mixed_assoc=%d tail_possible=%d unclassified=%d "
+                    "path_replay_success=%.6f flow_tag_coverage=%.6f "
+                    "attribution_coverage=%.6f reconciliation_errors=%d confidence=%s\n"
+                    % (
+                        row["algorithm"],
+                        int(row["synthetic_lost_packets"]),
+                        int(row["exact_attributed_loss"]),
+                        int(row["isl_saturation_associated_loss"]),
+                        int(row["gsl_saturation_associated_loss"]),
+                        int(row["mixed_saturation_associated_loss"]),
+                        int(row["tail_in_flight_possible_loss"]),
+                        int(row["unclassified_loss"]),
+                        float(row["path_replay_success_ratio"]),
+                        float(row["flow_tag_coverage_ratio"]),
+                        float(row["attribution_coverage_ratio"]),
+                        int(row["reconciliation_error_count"]),
+                        row["attribution_confidence"],
+                    )
+                )
+        if len(path_replay_diagnostics_df):
+            f_out.write("Path replay status counts:\n")
+            for _, row in path_replay_diagnostics_df.iterrows():
+                f_out.write(
+                    "  algorithm=%s status=%s count=%d success_ratio=%.6f notes=%s\n"
+                    % (
+                        row["algorithm"],
+                        row["status"],
+                        int(row["count"]),
+                        float(row["path_replay_success_ratio"]),
+                        row["notes"],
+                    )
+                )
+        if len(tag_coverage_diagnostics_df):
+            f_out.write("Flow-tag coverage by drop source:\n")
+            for _, row in tag_coverage_diagnostics_df.iterrows():
+                f_out.write(
+                    "  algorithm=%s family=%s source=%s total=%d tagged=%d ratio=%.6f\n"
+                    % (
+                        row["algorithm"],
+                        row["trace_family"],
+                        row["drop_source"],
+                        int(row["drop_events_total"]),
+                        int(row["drop_events_with_flow_tag"]),
+                        float(row["flow_tag_coverage_ratio"]),
+                    )
+                )
         if len(congested_interfaces_df):
             f_out.write("Top saturated interfaces by samples_at_capacity:\n")
             top_congested = congested_interfaces_df.sort_values(
@@ -1798,10 +1882,11 @@ def write_loss_diagnostics(
         f_out.write(
             "Trace coverage limitations: physical queue drops require DropBeforeEnqueue "
             "or equivalent queue trace events; MacTxDrop can overlap queue overflow and "
-            "is therefore diagnostic rather than additive. ISL association uses existing "
-            "corridor load diagnostics, while GSL association uses satellite-interface "
-            "or endpoint access proxies. dynamic_state/fstate files are delta updates; "
-            "this analysis does not claim complete per-packet path replay.\n"
+            "is therefore diagnostic rather than additive. v2 retains its corridor/access "
+            "proxy association for compatibility. v3 accumulates dynamic_state/fstate "
+            "delta snapshots and requires same-window overlap between a replayed path and "
+            "a saturated interface from *_queue_pkt_history.csv. Such overlap is inferred "
+            "association, not physical drop proof.\n"
         )
         dst_818 = destination_df[
             (destination_df["dst"].astype(int) == 818)
@@ -2005,6 +2090,11 @@ def analyze_run(run, algorithms):
     udp_send_failure_frames = []
     routing_drop_frames = []
     loss_attribution_detailed_frames = []
+    flow_path_timeline_frames = []
+    path_replay_diagnostic_frames = []
+    loss_attribution_detailed_v3_frames = []
+    loss_attribution_breakdown_v3_frames = []
+    tag_coverage_diagnostic_frames = []
     congested_interface_frames = []
     queue_saturation_timeline_frames = []
     gsl_queue_summary_rows = []
@@ -2143,6 +2233,26 @@ def analyze_run(run, algorithms):
             run,
         )
         loss_attribution_detailed_frames.append(detailed)
+        (
+            flow_path_timeline_v3,
+            path_replay_diagnostics_v3,
+            loss_attribution_detailed_v3,
+            loss_attribution_breakdown_v3,
+            tag_coverage_diagnostics_v3,
+        ) = build_v3_for_algorithm(
+            algorithm_run_dir,
+            run,
+            algorithm,
+            flows,
+            physical_drops,
+            routing_drops,
+            udp_send_failures,
+        )
+        flow_path_timeline_frames.append(flow_path_timeline_v3)
+        path_replay_diagnostic_frames.append(path_replay_diagnostics_v3)
+        loss_attribution_detailed_v3_frames.append(loss_attribution_detailed_v3)
+        loss_attribution_breakdown_v3_frames.append(loss_attribution_breakdown_v3)
+        tag_coverage_diagnostic_frames.append(tag_coverage_diagnostics_v3)
 
         gsl_queue_summary_rows.append(
             collect_gsl_queue_summary(algorithm_run_dir, algorithm)
@@ -2181,6 +2291,31 @@ def analyze_run(run, algorithms):
         pd.concat(loss_attribution_detailed_frames, ignore_index=True)
         if loss_attribution_detailed_frames
         else pd.DataFrame(columns=LOSS_ATTRIBUTION_DETAILED_COLUMNS)
+    )
+    flow_path_timeline_df = (
+        pd.concat(flow_path_timeline_frames, ignore_index=True)
+        if flow_path_timeline_frames
+        else pd.DataFrame(columns=FLOW_PATH_TIMELINE_COLUMNS)
+    )
+    path_replay_diagnostics_df = (
+        pd.concat(path_replay_diagnostic_frames, ignore_index=True)
+        if path_replay_diagnostic_frames
+        else pd.DataFrame(columns=PATH_REPLAY_DIAGNOSTIC_COLUMNS)
+    )
+    loss_attribution_detailed_v3_df = (
+        pd.concat(loss_attribution_detailed_v3_frames, ignore_index=True)
+        if loss_attribution_detailed_v3_frames
+        else pd.DataFrame(columns=LOSS_ATTRIBUTION_DETAILED_V3_COLUMNS)
+    )
+    loss_attribution_breakdown_v3_df = (
+        pd.concat(loss_attribution_breakdown_v3_frames, ignore_index=True)
+        if loss_attribution_breakdown_v3_frames
+        else pd.DataFrame(columns=LOSS_ATTRIBUTION_BREAKDOWN_V3_COLUMNS)
+    )
+    tag_coverage_diagnostics_df = (
+        pd.concat(tag_coverage_diagnostic_frames, ignore_index=True)
+        if tag_coverage_diagnostic_frames
+        else pd.DataFrame(columns=TAG_COVERAGE_COLUMNS)
     )
     congested_interfaces_df = (
         pd.concat(congested_interface_frames, ignore_index=True)
@@ -2232,6 +2367,11 @@ def analyze_run(run, algorithms):
     gsl_queue_summary_df.to_csv(os.path.join(comparison_dir, "gsl_queue_summary.csv"), index=False)
     loss_attribution_df.to_csv(os.path.join(comparison_dir, "loss_attribution_summary.csv"), index=False)
     loss_attribution_detailed_df.to_csv(os.path.join(comparison_dir, "loss_attribution_detailed.csv"), index=False)
+    flow_path_timeline_df.to_csv(os.path.join(comparison_dir, "flow_path_timeline.csv"), index=False)
+    path_replay_diagnostics_df.to_csv(os.path.join(comparison_dir, "path_replay_diagnostics.csv"), index=False)
+    loss_attribution_detailed_v3_df.to_csv(os.path.join(comparison_dir, "loss_attribution_detailed_v3.csv"), index=False)
+    loss_attribution_breakdown_v3_df.to_csv(os.path.join(comparison_dir, "loss_attribution_breakdown_v3.csv"), index=False)
+    tag_coverage_diagnostics_df.to_csv(os.path.join(comparison_dir, "tag_coverage_diagnostics.csv"), index=False)
     congested_interfaces_df.to_csv(os.path.join(comparison_dir, "congested_interfaces_summary.csv"), index=False)
     loss_attribution_breakdown_v2_df.to_csv(os.path.join(comparison_dir, "loss_attribution_breakdown_v2.csv"), index=False)
     queue_saturation_timeline_df.to_csv(os.path.join(comparison_dir, "queue_saturation_timeline.csv"), index=False)
@@ -2263,6 +2403,10 @@ def analyze_run(run, algorithms):
         loss_attribution_df,
         loss_attribution_breakdown_v2_df,
         loss_attribution_detailed_df,
+        loss_attribution_breakdown_v3_df,
+        loss_attribution_detailed_v3_df,
+        path_replay_diagnostics_df,
+        tag_coverage_diagnostics_df,
         congested_interfaces_df,
         physical_trace_available_any,
         gsl_queue_available_any,

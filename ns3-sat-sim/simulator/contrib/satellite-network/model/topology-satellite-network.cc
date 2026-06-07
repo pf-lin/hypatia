@@ -63,6 +63,15 @@ namespace ns3 {
         m_satellite_network_dir = m_basicSimulation->GetRunDir() + "/" + m_basicSimulation->GetConfigParamOrFail("satellite_network_dir");
         m_satellite_network_routes_dir =  m_basicSimulation->GetRunDir() + "/" + m_basicSimulation->GetConfigParamOrFail("satellite_network_routes_dir");
         m_satellite_network_force_static = parse_boolean(m_basicSimulation->GetConfigParamOrDefault("satellite_network_force_static", "false"));
+        m_forced_receive_error_rate = parse_double(
+            m_basicSimulation->GetConfigParamOrDefault(
+                "forced_receive_error_rate",
+                "0.0"
+            )
+        );
+        if (m_forced_receive_error_rate < 0.0 || m_forced_receive_error_rate > 1.0) {
+            throw std::invalid_argument("forced_receive_error_rate must be in [0.0, 1.0]");
+        }
     }
 
     void
@@ -317,7 +326,8 @@ namespace ns3 {
                "ground_station_id,interface_key,drop_source,drop_reason,"
                "packet_size_bytes,queue_occupancy_pkt_if_available,"
                "queue_occupancy_byte_if_available,queue_capacity_pkt_if_available,"
-               "flow_id_if_available,trace_hook";
+               "flow_id_if_available,packet_sequence_if_available,"
+               "packet_uid_if_available,flow_tag_available,trace_hook";
     }
 
     std::string
@@ -385,9 +395,22 @@ namespace ns3 {
         }
         std::string queue_pkt = "";
         std::string queue_byte = "";
+        std::string flow_id = "";
+        std::string packet_sequence = "";
+        std::string packet_uid = "";
+        std::string flow_tag_available = "false";
         if (context->m_queue != nullptr) {
             queue_pkt = std::to_string(context->m_queue->GetNPackets());
             queue_byte = std::to_string(context->m_queue->GetNBytes());
+        }
+        if (packet != nullptr) {
+            packet_uid = std::to_string(packet->GetUid());
+            UdpFlowTag flow_tag;
+            if (packet->PeekPacketTag(flow_tag)) {
+                flow_id = std::to_string(flow_tag.GetFlowId());
+                packet_sequence = std::to_string(flow_tag.GetPacketSequence());
+                flow_tag_available = "true";
+            }
         }
         std::string row =
             std::to_string(Simulator::Now().GetNanoSeconds()) + "," +
@@ -404,7 +427,10 @@ namespace ns3 {
             queue_pkt + "," +
             queue_byte + "," +
             GetQueueCapacityPackets(context->m_queue) + "," +
-            "" + "," +
+            flow_id + "," +
+            packet_sequence + "," +
+            packet_uid + "," +
+            flow_tag_available + "," +
             context->m_trace_hook;
         ofs << row << std::endl;
         ofs.close();
@@ -491,10 +517,16 @@ namespace ns3 {
             )
         );
 
+        int32_t phy_rx_from_node = from_node;
+        int32_t phy_rx_to_node = to_node;
+        if (link_type == "ISL" && to_node >= 0) {
+            phy_rx_from_node = to_node;
+            phy_rx_to_node = from_node;
+        }
         Ptr<PhysicalLinkTraceContext> phy_rx_context = new PhysicalLinkTraceContext(
             link_type,
-            from_node,
-            to_node,
+            phy_rx_from_node,
+            phy_rx_to_node,
             "PhyRxDrop",
             "PhyRxDrop",
             "PhyRxDrop",
@@ -583,6 +615,16 @@ namespace ns3 {
                 if (netDeviceA == nullptr || netDeviceB == nullptr) {
                     std::cerr << "ERROR: Failed to get PointToPointLaserNetDevice" << std::endl;
                     continue;
+                }
+                if (m_forced_receive_error_rate > 0.0) {
+                    Ptr<RateErrorModel> error_model_a = CreateObject<RateErrorModel>();
+                    error_model_a->SetUnit(RateErrorModel::ERROR_UNIT_PACKET);
+                    error_model_a->SetRate(m_forced_receive_error_rate);
+                    netDeviceA->SetReceiveErrorModel(error_model_a);
+                    Ptr<RateErrorModel> error_model_b = CreateObject<RateErrorModel>();
+                    error_model_b->SetUnit(RateErrorModel::ERROR_UNIT_PACKET);
+                    error_model_b->SetRate(m_forced_receive_error_rate);
+                    netDeviceB->SetReceiveErrorModel(error_model_b);
                 }
                 
                 // 檢查 queue 是否存在
@@ -702,6 +744,12 @@ namespace ns3 {
                     std::cerr << "ERROR: Queue is null for GSL interface on node "
                               << gslNetDevice->GetNode()->GetId() << std::endl;
                     continue;
+                }
+                if (m_forced_receive_error_rate > 0.0) {
+                    Ptr<RateErrorModel> error_model = CreateObject<RateErrorModel>();
+                    error_model->SetUnit(RateErrorModel::ERROR_UNIT_PACKET);
+                    error_model->SetRate(m_forced_receive_error_rate);
+                    gslNetDevice->SetReceiveErrorModel(error_model);
                 }
 
                 int32_t from_node = gslNetDevice->GetNode()->GetId();

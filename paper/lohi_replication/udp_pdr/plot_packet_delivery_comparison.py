@@ -16,7 +16,17 @@ from dynamic_run_list import build_arg_parser, describe_selection, get_udp_pdr_r
 
 
 def _short_label(label):
-    return label.replace("algorithm_", "").replace("_over_isls", "")
+    labels = {
+        "algorithm_free_one_only_over_isls": "Baseline",
+        "algorithm_queue_aware_over_isls": "Queue-aware",
+        "algorithm_lohi": "LoHi",
+        "algorithm_lhtr": "LHTR",
+        "algorithm_tlr": "TLR",
+    }
+    return labels.get(
+        label,
+        label.replace("algorithm_", "").replace("_over_isls", ""),
+    )
 
 
 def _bar_plot(df, x_col, y_col, output_path, ylabel, title=None):
@@ -119,6 +129,7 @@ def plot_single_run(comparison_dir):
     gsl_queue_path = os.path.join(comparison_dir, "gsl_queue_summary.csv")
     loss_attribution_path = os.path.join(comparison_dir, "loss_attribution_summary.csv")
     loss_attribution_v2_path = os.path.join(comparison_dir, "loss_attribution_breakdown_v2.csv")
+    loss_attribution_v3_path = os.path.join(comparison_dir, "loss_attribution_breakdown_v3.csv")
     congested_interfaces_path = os.path.join(comparison_dir, "congested_interfaces_summary.csv")
     queue_saturation_timeline_path = os.path.join(comparison_dir, "queue_saturation_timeline.csv")
     corridor_concentration_path = os.path.join(
@@ -278,6 +289,79 @@ def plot_single_run(comparison_dir):
                 os.path.join(comparison_dir, "loss_attribution_breakdown_v2.png"),
                 "Packets",
                 "Loss Attribution Breakdown v2 (Physical and Associated)",
+            )
+
+    if os.path.exists(loss_attribution_v3_path):
+        attribution_v3 = pd.read_csv(loss_attribution_v3_path)
+        if len(attribution_v3):
+            value_cols = [
+                "exact_physical_queue_loss",
+                "exact_physical_phy_loss",
+                "exact_routing_loss",
+                "exact_udp_send_failure_loss",
+                "isl_saturation_associated_loss",
+                "gsl_saturation_associated_loss",
+                "mixed_saturation_associated_loss",
+                "tail_in_flight_possible_loss",
+                "unclassified_loss",
+            ]
+            for col in value_cols:
+                if col not in attribution_v3.columns:
+                    attribution_v3[col] = 0
+            _stacked_bar(
+                attribution_v3,
+                "algorithm",
+                value_cols,
+                os.path.join(comparison_dir, "loss_attribution_breakdown_v3.png"),
+                "Packets",
+                "Loss Attribution v3: Exact Drops and Time-aware Associations",
+            )
+
+            coverage = attribution_v3.copy()
+            coverage["algorithm_label"] = coverage["algorithm"].map(_short_label)
+            x = list(range(len(coverage)))
+            width = 0.38
+            plt.figure(figsize=(9, 4.8))
+            plt.bar(
+                [value - width / 2 for value in x],
+                coverage["path_replay_success_ratio"],
+                width=width,
+                label="Path replay",
+                color="#2a9d8f",
+            )
+            plt.bar(
+                [value + width / 2 for value in x],
+                coverage["flow_tag_coverage_ratio"],
+                width=width,
+                label="Flow tag",
+                color="#e9c46a",
+            )
+            plt.xticks(x, coverage["algorithm_label"], rotation=25, ha="right")
+            plt.ylabel("Coverage ratio")
+            plt.ylim(0, 1.05)
+            plt.title("Path Replay and Flow-tag Coverage")
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(
+                os.path.join(comparison_dir, "path_replay_coverage.png"),
+                dpi=180,
+            )
+            plt.close()
+
+            _stacked_bar(
+                attribution_v3,
+                "algorithm",
+                [
+                    "isl_saturation_associated_loss",
+                    "gsl_saturation_associated_loss",
+                    "mixed_saturation_associated_loss",
+                ],
+                os.path.join(
+                    comparison_dir,
+                    "saturation_overlap_by_algorithm.png",
+                ),
+                "Inferred associated packets",
+                "Same-window Replay-path Saturation Overlap",
             )
 
     if os.path.exists(congested_interfaces_path):

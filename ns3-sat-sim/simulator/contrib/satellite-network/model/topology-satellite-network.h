@@ -58,6 +58,8 @@
 #include "ns3/gsl-net-device.h"
 #include "ns3/ipv4.h"
 #include "ns3/ptop-link-queue-tracker.h"
+#include "ns3/udp-flow-tag.h"
+#include "ns3/error-model.h"
 
 namespace ns3 {
 
@@ -181,6 +183,7 @@ namespace ns3 {
         int64_t m_isl_utilization_tracking_interval_ns;
         bool m_enable_queue_traces;
         bool m_enable_physical_link_drop_tracking;
+        double m_forced_receive_error_rate;
         std::string m_queue_trace_file;
         std::string m_isl_queue_pkt_history_csv_filename;
         std::string m_isl_queue_byte_history_csv_filename;
