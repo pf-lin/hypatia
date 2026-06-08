@@ -546,6 +546,55 @@ Queue statistics are read from `logs_ns3/isl_queue_pkt.csv` and summarized into
 `isl_queue_pkt.csv` and `isl_queue_byte.csv` files contain only the current
 routing-update window and are overwritten every window.
 
+### Delay-based queue cost
+
+`algorithm_queue_aware_over_isls`, LoHi, and LHTR use delay as the default
+queue-aware link cost:
+
+```text
+D_prop  = distance_m / 299792458
+D_trans = packet_size_bytes * 8 / isl_capacity_bps
+D_queue = queue_bytes * 8 / isl_capacity_bps
+Cost    = D_prop + D_trans + D_queue
+```
+
+All terms and the final cost are in seconds. This avoids the former mix of
+physical distance, packet count, alpha weights, and a maximum synthetic
+penalty distance. Dijkstra and the queue-aware border scoring therefore compare
+one physical unit.
+
+The route calculator reads `isl_data_rate_megabit_per_s` from
+`config_ns3.properties` and passes it as the ISL capacity. Outside this
+experiment path, the fallback is `QUEUE_DEFAULT_ISL_CAPACITY_BPS`, defaulting
+to 1 Gbit/s. Transmission delay is included by default and uses
+`QUEUE_DEFAULT_PACKET_SIZE_BYTES=1500`; set
+`QUEUE_INCLUDE_TRANSMISSION_DELAY=false` to omit the per-link serialization
+term.
+
+The per-window summary now combines `isl_queue_pkt.csv` and
+`isl_queue_byte.csv`, producing `packet_max` and `byte_max`. Routing prefers
+`byte_max`. Old summaries containing only `packet_max` remain supported and
+use:
+
+```text
+queued_bits = packet_max * QUEUE_DEFAULT_PACKET_SIZE_BYTES * 8
+```
+
+The former alpha / virtual-distance model is retained only for comparisons:
+
+```bash
+QUEUE_COST_MODE=legacy_penalty
+```
+
+The default is `QUEUE_COST_MODE=delay`. LoHi and LHTR keep their hierarchy,
+border policy, and holdover behavior unchanged. LHTR also expresses its
+traffic-light scoring additions in seconds in delay mode; traffic-light
+occupancy thresholds are unchanged.
+
+EWMA smoothing is intentionally not implemented in this change. The shared
+cost helper contains the extension point for adding an EWMA-smoothed queue
+delay later if route flapping becomes significant.
+
 Queue tracking also appends every completed window to full-history files:
 
 ```text
@@ -558,9 +607,9 @@ logs_ns3/gsl_queue_byte_history.csv
 After both scratch and history files are written, the ISL and GSL trackers are
 reset to begin a new measurement window. Resetting the trackers does not clear
 the actual NetDevice queues; the new window is initialized with the current
-queue occupancy. Routing continues to consume only the per-window
-`isl_queue_pkt.csv`, so `queue_stats/queue_stats_<time_ns>.csv` remains a
-per-window maximum rather than a cumulative maximum.
+queue occupancy. Routing consumes the per-window ISL packet and byte scratch
+files, so `queue_stats/queue_stats_<time_ns>.csv` remains a per-window maximum
+rather than a cumulative maximum.
 
 GSL/access queue tracking is enabled for UDP/PDR runs through
 `enable_link_queue_tracking=true`. Its per-window scratch files are:

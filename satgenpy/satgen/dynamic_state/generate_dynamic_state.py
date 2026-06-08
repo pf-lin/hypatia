@@ -109,7 +109,8 @@ def generate_dynamic_state_at(
         queue_stats_file=None,  # for queue-aware algorithm
         alpha=0.7,              # weight for distance
         beta=0.3,               # weight for queue delay
-        time_step_ns=None       # time step for dynamic algorithms
+        time_step_ns=None,      # time step for dynamic algorithms
+        isl_link_capacity_bps=None,
 ):
     if enable_verbose_logs:
         print("FORWARDING STATE AT T = " + (str(time_since_epoch_ns))
@@ -375,7 +376,8 @@ def generate_dynamic_state_at(
             enable_verbose_logs,
             queue_stats_file,
             alpha,
-            beta
+            beta,
+            isl_link_capacity_bps,
         )
 
     elif dynamic_state_algorithm == "algorithm_tlr":
@@ -418,7 +420,8 @@ def generate_dynamic_state_at(
             prev_output,
             enable_verbose_logs,
             queue_stats_file,
-            time_step_ns=time_step_ns
+            time_step_ns=time_step_ns,
+            isl_link_capacity_bps=isl_link_capacity_bps,
         )
 
     elif dynamic_state_algorithm == "algorithm_lhtr":
@@ -445,7 +448,8 @@ def generate_dynamic_state_at(
             prev_output,
             enable_verbose_logs,
             queue_stats_file,
-            time_step_ns=time_step_ns
+            time_step_ns=time_step_ns,
+            isl_link_capacity_bps=isl_link_capacity_bps,
         )
 
     else:

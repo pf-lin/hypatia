@@ -1,6 +1,13 @@
 from .fstate_calculation import *
-import csv
 import os
+from .queue_delay_cost import (
+    DEFAULT_ISL_LINK_CAPACITY_BPS,
+    QUEUE_COST_MODE,
+    calculate_link_queue_cost,
+    describe_queue_cost,
+    load_queue_statistics_csv,
+    propagation_delay_seconds,
+)
 
 
 def load_queue_statistics(queue_stats_file, num_satellites, enable_verbose_logs):
@@ -8,28 +15,14 @@ def load_queue_statistics(queue_stats_file, num_satellites, enable_verbose_logs)
     從 NS-3 輸出的 queue 統計檔案讀取數據
     
     Returns:
-        dict: {(sat_from, sat_to): avg_queue_delay_ns}
+        dict: {(sat_from, sat_to): queue_length_packets}
     """
-    queue_delays = {}
-    
-    if not os.path.exists(queue_stats_file):
+    if not queue_stats_file or not os.path.exists(queue_stats_file):
         print(f"  > Warning: Queue statistics file not found: {queue_stats_file}")
-        return queue_delays
-    
-    with open(queue_stats_file, 'r') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            sat_from = int(row['from'])
-            sat_to = int(row['to'])
-            
-            # 只處理衛星之間的 ISL
-            if sat_from < num_satellites and sat_to < num_satellites:
-                # 計算平均隊列延遲 (可以用封包數或位元組數)
-                queue_len = int(row['packet_max'])
-                
-                # 簡化計算: packet_max 越大代表越擁塞
-                # 實際可以更精確地計算排隊延遲
-                queue_delays[(sat_from, sat_to)] = queue_len
+        return {}
+
+    queue_stats = load_queue_statistics_csv(queue_stats_file, num_satellites)
+    queue_delays = queue_stats.queue_packets
     
     # 統計雙向連接
     unique_links = set()
@@ -49,9 +42,15 @@ def load_queue_statistics(queue_stats_file, num_satellites, enable_verbose_logs)
     return queue_delays
 
 
-def calculate_link_weight(distance_m, queue_delay, alpha=0.7, beta=0.3):
+def calculate_link_weight(
+        distance_m,
+        queue_delay,
+        alpha=0.7,
+        beta=0.3,
+        queue_bytes=None,
+        link_capacity_bps=None):
     """
-    計算鏈路權重,結合距離和隊列延遲
+    計算鏈路權重；delay 模式回傳 seconds。
     
     Args:
         distance_m: 物理距離 (公尺)
@@ -60,22 +59,38 @@ def calculate_link_weight(distance_m, queue_delay, alpha=0.7, beta=0.3):
         beta: 隊列延遲權重係數
     
     Returns:
-        float: 綜合權重
+        float: delay seconds，或 legacy_penalty 模式的虛擬距離
     """
-    # 正規化 Queue (0.0 ~ 1.0)
-    normalized_queue = min(queue_delay / 100.0, 1.0)
-    
-    # 定義一個與距離同量級的懲罰係數
-    # 例如：如果隊列滿了，相當於這條路徑「憑空多出了」2000 km
-    MAX_PENALTY_KM = 2000000.0 
-    
-    queue_penalty_m = normalized_queue * MAX_PENALTY_KM * (beta / alpha) 
-    # 註：這裡的係數設計可以根據您對 alpha/beta 的定義調整
-    
-    # 最終權重直接是「虛擬距離」
-    final_virtual_distance = distance_m + queue_penalty_m
-    
-    return final_virtual_distance
+    return calculate_link_queue_cost(
+        distance_m,
+        queue_packets=queue_delay,
+        queue_bytes=queue_bytes,
+        link_capacity_bps=link_capacity_bps,
+        alpha_dist=alpha,
+        alpha_queue=beta,
+    )
+
+
+def _convert_gsl_candidates_to_cost(ground_station_satellites_in_range):
+    """Convert GSL distance to propagation seconds without changing baseline code."""
+    if QUEUE_COST_MODE != "delay":
+        return ground_station_satellites_in_range
+
+    def convert_candidates(candidates):
+        return [
+            (propagation_delay_seconds(candidate[0]), candidate[1])
+            for candidate in candidates
+        ]
+
+    if isinstance(ground_station_satellites_in_range, dict):
+        return {
+            gid: convert_candidates(candidates)
+            for gid, candidates in ground_station_satellites_in_range.items()
+        }
+    return [
+        convert_candidates(candidates)
+        for candidates in ground_station_satellites_in_range
+    ]
 
 
 def algorithm_queue_aware_over_isls(
@@ -92,7 +107,8 @@ def algorithm_queue_aware_over_isls(
         enable_verbose_logs,
         queue_stats_file=None,
         alpha=0.7,
-        beta=0.3
+        beta=0.3,
+        isl_link_capacity_bps=None,
 ):
     """
     QUEUE-AWARE FREE-ONE ONLY OVER INTER-SATELLITE LINKS ALGORITHM
@@ -102,13 +118,27 @@ def algorithm_queue_aware_over_isls(
     
     if enable_verbose_logs:
         print("\nALGORITHM: QUEUE-AWARE FREE ONE ONLY OVER ISLS")
-        print(f"  > Alpha (distance weight): {alpha}")
-        print(f"  > Beta (queue weight): {beta}")
+        if QUEUE_COST_MODE == "legacy_penalty":
+            print(f"  > Legacy alpha (distance weight): {alpha}")
+            print(f"  > Legacy beta (queue weight): {beta}")
 
     # 載入隊列統計數據
-    queue_delays = {}
+    queue_packets = {}
+    queue_bytes = {}
+    queue_delay_source = "queue_packets_fallback"
     if queue_stats_file and time_since_epoch_ns > 0:
-        queue_delays = load_queue_statistics(queue_stats_file, len(satellites), enable_verbose_logs)
+        queue_stats = load_queue_statistics_csv(queue_stats_file, len(satellites))
+        queue_packets = queue_stats.queue_packets
+        queue_bytes = queue_stats.queue_bytes
+        queue_delay_source = queue_stats.delay_source
+
+    link_capacity_bps = (
+        DEFAULT_ISL_LINK_CAPACITY_BPS
+        if isl_link_capacity_bps is None
+        else float(isl_link_capacity_bps)
+    )
+    if enable_verbose_logs:
+        print("  > " + describe_queue_cost(queue_delay_source, link_capacity_bps))
     
     # 更新圖的權重
     updated_graph = sat_net_graph_only_satellites_with_isls.copy()
@@ -122,11 +152,17 @@ def algorithm_queue_aware_over_isls(
         
         # 獲取兩個方向的隊列延遲
         # 注意：NetworkX 無向圖的邊是標準化的（a < b），但 queue 數據可能是任一方向
-        queue_delay_a_to_b = queue_delays.get((a, b), 0)
-        queue_delay_b_to_a = queue_delays.get((b, a), 0)
+        queue_delay_a_to_b = queue_packets.get((a, b), 0)
+        queue_delay_b_to_a = queue_packets.get((b, a), 0)
         
         # 使用兩個方向的最大值（保守策略，避開擁塞）
         queue_delay = max(queue_delay_a_to_b, queue_delay_b_to_a)
+        queue_bytes_for_link = None
+        if queue_bytes:
+            queue_bytes_for_link = max(
+                queue_bytes.get((a, b), 0),
+                queue_bytes.get((b, a), 0),
+            )
         
         # 或者使用平均值（較溫和的策略）
         # queue_delay = (queue_delay_a_to_b + queue_delay_b_to_a) / 2.0
@@ -136,7 +172,9 @@ def algorithm_queue_aware_over_isls(
             original_distance, 
             queue_delay, 
             alpha, 
-            beta
+            beta,
+            queue_bytes=queue_bytes_for_link,
+            link_capacity_bps=link_capacity_bps,
         )
         
         updated_graph.edges[(a, b)]["weight"] = new_weight
@@ -157,7 +195,7 @@ def algorithm_queue_aware_over_isls(
                     direction_info = f"queue({b:3d}->{a:3d})={queue_delay_b_to_a:3d}"
                 
                 print(f"      >>> Link {a:3d}-{b:3d}: distance={original_distance:7.0f}m, "
-                      f"{direction_info}, new_weight={new_weight:7.0f}")
+                      f"{direction_info}, new_weight={new_weight:.9f}")
     
     if enable_verbose_logs:
         print(f"    >> Total links updated: {links_updated}")
@@ -186,6 +224,9 @@ def algorithm_queue_aware_over_isls(
     gid_to_sat_gsl_if_idx = [0] * len(ground_stations)
 
     # 使用更新權重的圖計算 forwarding state
+    gsl_candidates_with_cost = _convert_gsl_candidates_to_cost(
+        ground_station_satellites_in_range
+    )
     fstate = calculate_fstate_shortest_path_without_gs_relaying(
         output_dynamic_state_dir,
         time_since_epoch_ns,
@@ -194,7 +235,7 @@ def algorithm_queue_aware_over_isls(
         updated_graph,  # 使用更新權重的圖
         num_isls_per_sat,
         gid_to_sat_gsl_if_idx,
-        ground_station_satellites_in_range,
+        gsl_candidates_with_cost,
         sat_neighbor_to_if,
         prev_fstate,
         enable_verbose_logs

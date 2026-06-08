@@ -41,27 +41,52 @@ def read_dynamic_interval_ns(run_dir):
     return int(props["dynamic_state_update_interval_ns"])
 
 
+def read_isl_link_capacity_bps(run_dir):
+    props = read_properties(os.path.join(run_dir, "config_ns3.properties"))
+    return float(props["isl_data_rate_megabit_per_s"]) * 1e6
+
+
 def process_queue_statistics(logs_dir, output_file):
-    isl_queue_file = os.path.join(logs_dir, "isl_queue_pkt.csv")
-    if not os.path.exists(isl_queue_file):
-        print("Warning: %s not found" % isl_queue_file)
+    isl_queue_pkt_file = os.path.join(logs_dir, "isl_queue_pkt.csv")
+    isl_queue_byte_file = os.path.join(logs_dir, "isl_queue_byte.csv")
+    if not os.path.exists(isl_queue_pkt_file):
+        print("Warning: %s not found" % isl_queue_pkt_file)
         return None
 
-    df = pd.read_csv(
-        isl_queue_file,
+    packet_df = pd.read_csv(
+        isl_queue_pkt_file,
         header=None,
         names=["from", "to", "interval_start_ns", "interval_end_ns", "num_packets"],
     )
-    print("  > Read %d records from %s" % (len(df), isl_queue_file))
+    print("  > Read %d records from %s" % (len(packet_df), isl_queue_pkt_file))
 
-    if len(df) == 0:
+    if len(packet_df) == 0:
         result = pd.DataFrame(columns=["from", "to", "packet_max"])
     else:
         result = (
-            df.groupby(["from", "to"])["num_packets"]
+            packet_df.groupby(["from", "to"])["num_packets"]
             .max()
             .reset_index(name="packet_max")
         )
+
+    if os.path.exists(isl_queue_byte_file):
+        byte_df = pd.read_csv(
+            isl_queue_byte_file,
+            header=None,
+            names=["from", "to", "interval_start_ns", "interval_end_ns", "num_bytes"],
+        )
+        print("  > Read %d records from %s" % (len(byte_df), isl_queue_byte_file))
+        byte_max = (
+            byte_df.groupby(["from", "to"])["num_bytes"]
+            .max()
+            .reset_index(name="byte_max")
+        )
+        result = result.merge(byte_max, on=["from", "to"], how="outer")
+        result["packet_max"] = result["packet_max"].fillna(0).astype(int)
+        result["byte_max"] = result["byte_max"].fillna(0).astype(int)
+        result = result[(result["packet_max"] > 0) | (result["byte_max"] > 0)]
+    else:
+        print("Warning: %s not found; routing will use packet-size fallback" % isl_queue_byte_file)
         result = result[result["packet_max"] > 0]
 
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
@@ -69,6 +94,8 @@ def process_queue_statistics(logs_dir, output_file):
 
     print("  > Processed %d active links" % len(result))
     print("  > Max queue size: %d" % (result["packet_max"].max() if len(result) > 0 else 0))
+    if "byte_max" in result:
+        print("  > Max queue bytes: %d" % (result["byte_max"].max() if len(result) > 0 else 0))
     print("  > Saved to: %s" % output_file)
     return output_file
 
@@ -146,6 +173,7 @@ def generate_single_fstate(
     alpha=0.7,
     beta=0.3,
     time_step_ns=None,
+    isl_link_capacity_bps=None,
 ):
     ground_stations = read_ground_stations_extended(
         os.path.join(satellite_network_dir, "ground_stations.txt")
@@ -183,6 +211,7 @@ def generate_single_fstate(
         alpha,
         beta,
         time_step_ns,
+        isl_link_capacity_bps,
     )
 
 
@@ -205,6 +234,7 @@ def main():
     algorithm = args.fstate_calculation_algorithm
     current_time_ns = args.current_time_ns
     time_step_ns = read_dynamic_interval_ns(run_dir)
+    isl_link_capacity_bps = read_isl_link_capacity_bps(run_dir)
     prev_time_ns = current_time_ns - time_step_ns
 
     dynamic_state_dir = os.path.join(run_dir, "dynamic_state")
@@ -236,6 +266,7 @@ def main():
         args.alpha,
         args.beta,
         time_step_ns,
+        isl_link_capacity_bps,
     )
 
     print("Step 4: Saving current output for next iteration...")

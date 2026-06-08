@@ -24,7 +24,6 @@ LHTR (Load-aware Hierarchical Traffic-light Routing) Algorithm
 from dataclasses import dataclass
 from typing import Dict, Set, Tuple, List, Optional, Callable, Any
 from collections import Counter, defaultdict
-import csv
 import datetime as _dt
 import heapq
 import json
@@ -34,6 +33,16 @@ import os
 import random
 import threading
 import sys
+from .queue_delay_cost import (
+    DEFAULT_ISL_LINK_CAPACITY_BPS,
+    QUEUE_COST_MODE,
+    SPEED_OF_LIGHT_M_PER_S,
+    calculate_link_queue_cost,
+    describe_queue_cost,
+    get_directional_value,
+    load_queue_statistics_csv,
+    propagation_delay_seconds,
+)
 
 # ==========================
 # Tunables (LoHi p×s)
@@ -46,7 +55,8 @@ BETA_Q = float(os.environ.get('LHTR_BETA_Q', 1.0))   # queue delay weight
 BETA_S = float(os.environ.get('LHTR_BETA_S', 0.0))   # static penalty
 
 # ===== Queue-aware parameters =====
-# QUEUE-AWARE: Weight blending for distance vs queue
+# Legacy virtual-distance parameters. They are inactive unless
+# QUEUE_COST_MODE=legacy_penalty.
 ALPHA_DISTANCE = float(os.environ.get('LHTR_ALPHA_DISTANCE', 0.7))  # distance weight
 ALPHA_QUEUE = float(os.environ.get('LHTR_ALPHA_QUEUE', 0.3))        # queue weight
 
@@ -63,6 +73,14 @@ TRAFFIC_LIGHT_TQOR_GREEN_YELLOW = float(os.environ.get('LHTR_TL_TQOR_GY', 1.0 / 
 TRAFFIC_LIGHT_TQOR_YELLOW_RED = float(os.environ.get('LHTR_TL_TQOR_YR', 2.0 / 3.0))
 TRAFFIC_LIGHT_YELLOW_PENALTY_M = float(os.environ.get('LHTR_TL_YELLOW_PENALTY_M', 400000.0))
 TRAFFIC_LIGHT_RED_PENALTY_M = float(os.environ.get('LHTR_TL_RED_PENALTY_M', 1200000.0))
+TRAFFIC_LIGHT_YELLOW_PENALTY_S = float(os.environ.get(
+    'LHTR_TL_YELLOW_PENALTY_S',
+    str(TRAFFIC_LIGHT_YELLOW_PENALTY_M / SPEED_OF_LIGHT_M_PER_S),
+))
+TRAFFIC_LIGHT_RED_PENALTY_S = float(os.environ.get(
+    'LHTR_TL_RED_PENALTY_S',
+    str(TRAFFIC_LIGHT_RED_PENALTY_M / SPEED_OF_LIGHT_M_PER_S),
+))
 TRAFFIC_LIGHT_ALT_PATH_FACTOR = float(os.environ.get('LHTR_TL_ALT_PATH_FACTOR', 1.5))
 
 # ===== Destination-aware border selection =====
@@ -115,97 +133,11 @@ TG_SCALE = float(os.environ.get('LHTR_TG_SCALE', 1.0))
 # QUEUE-AWARE: Load queue statistics from CSV
 # ==========================
 def load_queue_statistics_from_csv(queue_stats_file: str, num_satellites: int, enable_verbose_logs: bool = False) -> Dict[Tuple[int,int], int]:
-    """
-    QUEUE-AWARE: 從 NS-3 輸出的 queue 統計檔案讀取數據
-    
-    Args:
-        queue_stats_file: CSV 檔案路徑
-        num_satellites: 衛星總數
-        enable_verbose_logs: 是否輸出詳細日誌
-    
-    Returns:
-        dict: {(sat_from, sat_to): queue_length_packets}
-    
-    CSV 格式假設：
-        from,to,packet_max,bytes_max,...
-    """
-    queue_delays = {}
-    
-    if not queue_stats_file or not os.path.exists(queue_stats_file):
-        if enable_verbose_logs:
-            print(f"  > [QUEUE-AWARE] Queue statistics file not found or not provided: {queue_stats_file}")
-        return queue_delays
-    
-    try:
-        with open(queue_stats_file, 'r') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                sat_from = int(row['from'])
-                sat_to = int(row['to'])
-                
-                # 只處理衛星之間的 ISL (排除 GS)
-                if sat_from < num_satellites and sat_to < num_satellites:
-                    # 使用 packet_max 作為 queue 指標
-                    queue_len = int(row.get('packet_max', 0))
-                    queue_delays[(sat_from, sat_to)] = queue_len
-        
-        # 統計
-        if enable_verbose_logs:
-            unique_links = set()
-            directional_flows_with_traffic = 0
-            for (a, b), packets in queue_delays.items():
-                link = tuple(sorted([a, b]))
-                unique_links.add(link)
-                if packets > 0:
-                    directional_flows_with_traffic += 1
-            
-            print("  > [QUEUE-AWARE] Queue statistics loaded:")
-            print(f"    >> Total directional flows: {len(queue_delays)}")
-            print(f"    >> Directional flows with traffic: {directional_flows_with_traffic}")
-            print(f"    >> Unique physical ISL links: {len(unique_links)}")
-    
-    except Exception as e:
-        if enable_verbose_logs:
-            print(f"  > [QUEUE-AWARE] Error loading queue statistics: {e}")
-    
-    return queue_delays
-
-
-def calculate_link_queue_cost(distance_m: float, queue_packets: int, 
-                               alpha_dist: float = ALPHA_DISTANCE, 
-                               alpha_queue: float = ALPHA_QUEUE,
-                               queue_norm_max: int = QUEUE_NORMALIZE_MAX_PACKETS,
-                               queue_max_penalty_m: float = QUEUE_MAX_PENALTY_M) -> float:
-    """
-    QUEUE-AWARE: 計算結合距離和 queue 的鏈路成本
-    
-    Args:
-        distance_m: 物理距離 (公尺)
-        queue_packets: 當前 queue 長度 (封包數)
-        alpha_dist: 距離權重係數 (預設 0.7)
-        alpha_queue: queue 權重係數 (預設 0.3)
-        queue_norm_max: queue 正規化最大值 (預設 100 packets)
-        queue_max_penalty_m: queue 滿載時的最大懲罰距離 (預設 2000 km)
-    
-    Returns:
-        float: 加權後的虛擬距離 (公尺)
-    
-    計算公式：
-        normalized_queue = min(queue_packets / queue_norm_max, 1.0)
-        queue_penalty = normalized_queue * queue_max_penalty_m * (alpha_queue / alpha_dist)
-        final_cost = distance_m + queue_penalty
-    """
-    # 正規化 queue (0.0 ~ 1.0)
-    normalized_queue = min(queue_packets / max(1.0, queue_norm_max), 1.0)
-    
-    # 計算 queue 懲罰 (換算成等效距離)
-    # 使用 alpha 比例調整懲罰強度
-    queue_penalty_m = normalized_queue * queue_max_penalty_m * (alpha_queue / max(0.01, alpha_dist))
-    
-    # 最終成本 = 基礎距離 + queue 懲罰
-    final_cost = distance_m + queue_penalty_m
-    
-    return final_cost
+    """Backward-compatible packet-count view of the shared queue loader."""
+    stats = load_queue_statistics_csv(queue_stats_file, num_satellites)
+    if enable_verbose_logs:
+        print(f"  > [QUEUE-AWARE] Loaded {len(stats.queue_packets)} directional queue entries")
+    return stats.queue_packets
 
 
 class TrafficLightColor:
@@ -278,12 +210,20 @@ def combine_traffic_light_colors(current_hop_color: str, next_hop_color: str) ->
     return TrafficLightColor.GREEN
 
 
-def traffic_light_color_to_penalty_m(color: str) -> float:
-    """Map traffic-light state to an additive path penalty used by fused scoring."""
+def traffic_light_color_to_cost(color: str) -> float:
+    """Map traffic-light state to seconds, or meters in legacy mode."""
     if color == TrafficLightColor.RED:
-        return TRAFFIC_LIGHT_RED_PENALTY_M
+        return (
+            TRAFFIC_LIGHT_RED_PENALTY_S
+            if QUEUE_COST_MODE == "delay"
+            else TRAFFIC_LIGHT_RED_PENALTY_M
+        )
     if color == TrafficLightColor.YELLOW:
-        return TRAFFIC_LIGHT_YELLOW_PENALTY_M
+        return (
+            TRAFFIC_LIGHT_YELLOW_PENALTY_S
+            if QUEUE_COST_MODE == "delay"
+            else TRAFFIC_LIGHT_YELLOW_PENALTY_M
+        )
     return 0.0
 
 
@@ -426,6 +366,8 @@ def _debug_border_selection_decision(snapshot_idx: int,
 def calculate_link_lhtr_cost(distance_m: float,
                              queue_packets: int,
                              final_color: str,
+                             queue_bytes: Optional[int] = None,
+                             link_capacity_bps: Optional[float] = None,
                              alpha_dist: float = ALPHA_DISTANCE,
                              alpha_queue: float = ALPHA_QUEUE,
                              queue_norm_max: int = QUEUE_NORMALIZE_MAX_PACKETS,
@@ -439,13 +381,15 @@ def calculate_link_lhtr_cost(distance_m: float,
     """
     queue_cost = calculate_link_queue_cost(
         distance_m,
-        queue_packets,
+        queue_packets=queue_packets,
+        queue_bytes=queue_bytes,
+        link_capacity_bps=link_capacity_bps,
         alpha_dist=alpha_dist,
         alpha_queue=alpha_queue,
         queue_norm_max=queue_norm_max,
         queue_max_penalty_m=queue_max_penalty_m,
     )
-    return queue_cost + traffic_light_color_to_penalty_m(final_color)
+    return queue_cost + traffic_light_color_to_cost(final_color)
 
 
 def build_traffic_light_state(queue_packets: Optional[Dict[Tuple[int, int], int]],
@@ -1074,13 +1018,32 @@ class VirtualPIDRouterPlaneBlock:
         self._prev_pid_of_sat = dict(self.pid_of_sat)
         return dict(self.pid_of_sat)
 
-    def sync_pid_subgraph_weights_from_graph(self, G_sat: nx.Graph) -> None:
-        """Refresh observed intra-PID edge weights after queue-aware weighting."""
+    def sync_pid_subgraph_weights_from_graph(
+            self,
+            G_sat: nx.Graph,
+            default_link_capacity_bps: Optional[float] = None) -> None:
+        """Refresh PID copies after delay-based graph weighting."""
         for Gp in self.pid_subgraphs.values():
             for u, v, edge_data in Gp.edges(data=True):
                 current_edge_data = G_sat.get_edge_data(u, v)
                 if current_edge_data is not None and 'weight' in current_edge_data:
                     edge_data['weight'] = current_edge_data['weight']
+                    if 'geo_len_m' in current_edge_data:
+                        edge_data['geo_len_m'] = current_edge_data['geo_len_m']
+                    continue
+
+                physical_distance = float(
+                    edge_data.get('geo_len_m', edge_data.get('weight', 1.0))
+                )
+                edge_data['geo_len_m'] = physical_distance
+                edge_data['weight'] = calculate_link_queue_cost(
+                    physical_distance,
+                    link_capacity_bps=default_link_capacity_bps,
+                    alpha_dist=ALPHA_DISTANCE,
+                    alpha_queue=ALPHA_QUEUE,
+                    queue_norm_max=QUEUE_NORMALIZE_MAX_PACKETS,
+                    queue_max_penalty_m=QUEUE_MAX_PENALTY_M,
+                )
 
 
 # ==========================
@@ -1093,76 +1056,40 @@ def apply_queue_aware_weights_intra_only(G_sat: nx.Graph,
                                          queue_packets: Optional[Dict[Tuple[int,int], int]] = None,
                                          beta_q: float = BETA_Q,
                                          beta_s: float = BETA_S,
-                                         use_enhanced_queue_cost: bool = True) -> None:
+                                         use_enhanced_queue_cost: bool = True,
+                                         default_link_capacity_bps: Optional[float] = None) -> None:
     """
-    QUEUE-AWARE (Enhanced): 僅對群內邊加入排隊延遲處罰，群際邊保留原始 geo_len_m
-    
-    兩種模式：
-    1. 原始模式 (use_enhanced_queue_cost=False):
-       weight = geo_len_m + beta_q * (queue_bytes*8 / rate_bps) * C_UNIT + beta_s
-    
-    2. 增強模式 (use_enhanced_queue_cost=True, 預設):
-       使用 calculate_link_queue_cost() 結合距離和 queue packets
-       支援更靈活的 alpha/beta 加權
-    
-    Args:
-        G_sat: 衛星圖
-        sat_pid: 衛星到 PID 的映射
-        queue_bytes: (u,v) -> queue bytes (用於原始模式)
-        link_rate_bps: (u,v) -> link rate (用於原始模式)
-        queue_packets: (u,v) -> queue packets (用於增強模式)
-        beta_q: queue 權重 (原始模式)
-        beta_s: 靜態懲罰 (原始模式)
-        use_enhanced_queue_cost: 是否使用增強的 queue cost 計算
+    Set all ISL weights to one unit, adding queueing delay only inside a PID.
+
+    In delay mode every edge weight is seconds. Inter-PID links receive
+    propagation + transmission delay here and their queue delay is included
+    later by border-pair scoring. Legacy mode preserves virtual meters.
     """
-    C_UNIT = 3e5  # 光速常數 (km/s -> m/s conversion factor)
-    
+    del beta_q, beta_s, use_enhanced_queue_cost
+    default_capacity = (
+        DEFAULT_ISL_LINK_CAPACITY_BPS
+        if default_link_capacity_bps is None
+        else float(default_link_capacity_bps)
+    )
+
     for u, v, d in G_sat.edges(data=True):
         base = float(d.get('geo_len_m', d.get('weight', 1.0)))
+        d['geo_len_m'] = base
         pa, pb = sat_pid.get(u), sat_pid.get(v)
-        
-        # 只處理群內邊
-        if pa is None or pb is None or pa != pb:
-            d['weight'] = base
-            continue
-        
-        # 如果沒有 queue 資料，使用基礎權重
-        if use_enhanced_queue_cost and queue_packets:
-            # QUEUE-AWARE: 增強模式
-            q_packets = None
-            if (u, v) in queue_packets:
-                q_packets = queue_packets[(u, v)]
-            elif (v, u) in queue_packets:
-                q_packets = queue_packets[(v, u)]
-            
-            if q_packets is not None:
-                # 使用增強的 queue cost 計算
-                d['weight'] = calculate_link_queue_cost(
-                    base, q_packets,
-                    alpha_dist=ALPHA_DISTANCE,
-                    alpha_queue=ALPHA_QUEUE,
-                    queue_norm_max=QUEUE_NORMALIZE_MAX_PACKETS,
-                    queue_max_penalty_m=QUEUE_MAX_PENALTY_M
-                )
-            else:
-                d['weight'] = base
-        else:
-            # 原始模式 (向後相容)
-            if not queue_bytes or not link_rate_bps:
-                d['weight'] = base
-                continue
-            
-            q = None; r = None
-            if (u,v) in queue_bytes and (u,v) in link_rate_bps:
-                q = queue_bytes[(u,v)]; r = link_rate_bps[(u,v)]
-            elif (v,u) in queue_bytes and (v,u) in link_rate_bps:
-                q = queue_bytes[(v,u)]; r = link_rate_bps[(v,u)]
-            
-            if q is not None and r and r > 0:
-                q_delay_s = (q * 8.0) / r
-                d['weight'] = base + beta_q * q_delay_s * C_UNIT + beta_s
-            else:
-                d['weight'] = base
+        is_intra_pid = pa is not None and pb is not None and pa == pb
+        q_packets = get_directional_value(queue_packets, u, v, 0) if is_intra_pid else 0
+        q_bytes = get_directional_value(queue_bytes, u, v, None) if is_intra_pid else None
+        capacity = get_directional_value(link_rate_bps, u, v, default_capacity)
+        d['weight'] = calculate_link_queue_cost(
+            base,
+            queue_packets=q_packets,
+            queue_bytes=q_bytes,
+            link_capacity_bps=capacity,
+            alpha_dist=ALPHA_DISTANCE,
+            alpha_queue=ALPHA_QUEUE,
+            queue_norm_max=QUEUE_NORMALIZE_MAX_PACKETS,
+            queue_max_penalty_m=QUEUE_MAX_PENALTY_M,
+        )
 
 
 # ==========================
@@ -1332,6 +1259,9 @@ class BorderSelector:
                                     src_sat: Optional[int] = None,
                                     router: Optional['VirtualPIDRouterPlaneBlock'] = None,
                                     queue_packets: Optional[Dict[Tuple[int,int], int]] = None,
+                                    queue_bytes: Optional[Dict[Tuple[int,int], int]] = None,
+                                    link_rate_bps: Optional[Dict[Tuple[int,int], float]] = None,
+                                    default_link_capacity_bps: Optional[float] = None,
                                     dst_sat: Optional[int] = None,
                                     dst_pid: Optional[int] = None,
                                     pre_src_side_dists: Optional[Dict[int, float]] = None,
@@ -1439,16 +1369,26 @@ class BorderSelector:
                 q_pkts = 0
                 if queue_get is not None:
                     q_pkts = queue_get((u, v), queue_get((v, u), 0))
+                q_bytes = get_directional_value(queue_bytes, u, v, None)
+                capacity = get_directional_value(
+                    link_rate_bps,
+                    u,
+                    v,
+                    default_link_capacity_bps,
+                )
 
                 final_color = get_final_traffic_light_color(u, v, traffic_light_state)
                 path_isl_cost = calculate_link_queue_cost(
-                    geo_dist, q_pkts,
+                    geo_dist,
+                    queue_packets=q_pkts,
+                    queue_bytes=q_bytes,
+                    link_capacity_bps=capacity,
                     alpha_dist=ALPHA_DISTANCE,
                     alpha_queue=ALPHA_QUEUE,
                     queue_norm_max=QUEUE_NORMALIZE_MAX_PACKETS,
                     queue_max_penalty_m=QUEUE_MAX_PENALTY_M
                 )
-                fused_isl_cost = path_isl_cost + traffic_light_color_to_penalty_m(final_color)
+                fused_isl_cost = path_isl_cost + traffic_light_color_to_cost(final_color)
                 link_qor = link_qor_get((u, v), 0.0) if link_qor_get is not None else 0.0
                 u_comp = pid_comp_map.get(u) if router is not None else None
 
@@ -1602,6 +1542,9 @@ class BorderSelector:
                          src_sat: Optional[int] = None,
                          router: Optional['VirtualPIDRouterPlaneBlock'] = None,
                          queue_packets: Optional[Dict[Tuple[int,int], int]] = None,
+                         queue_bytes: Optional[Dict[Tuple[int,int], int]] = None,
+                         link_rate_bps: Optional[Dict[Tuple[int,int], float]] = None,
+                         default_link_capacity_bps: Optional[float] = None,
                          dst_sat: Optional[int] = None,
                          dst_pid: Optional[int] = None,
                          pre_src_side_dists: Optional[Dict[int, float]] = None,
@@ -1618,6 +1561,9 @@ class BorderSelector:
             src_sat=src_sat,
             router=router,
             queue_packets=queue_packets,
+            queue_bytes=queue_bytes,
+            link_rate_bps=link_rate_bps,
+            default_link_capacity_bps=default_link_capacity_bps,
             dst_sat=dst_sat,
             dst_pid=dst_pid,
             pre_src_side_dists=pre_src_side_dists,
@@ -1839,7 +1785,7 @@ def _build_intra_pid_next_hop_candidates(src: int,
         edge_weight = float(edge_data.get('weight', 1.0))
         path_cost = edge_weight + float(dist_map.get(neighbor, float('inf')))
         final_color = get_final_traffic_light_color(src, neighbor, traffic_light_state)
-        decision_score = path_cost + traffic_light_color_to_penalty_m(final_color)
+        decision_score = path_cost + traffic_light_color_to_cost(final_color)
         link_qor = traffic_light_state.link_qor.get((src, neighbor), 0.0) if traffic_light_state else 0.0
         queue_pkts = traffic_light_state.link_queue_packets.get((src, neighbor), 0) if traffic_light_state else 0
         candidates.append(
@@ -2124,7 +2070,12 @@ def _build_ground_station_attachment_cache(
         if not G_sat.has_node(sat_id):
             continue
 
-        state = (float(gsl_distance), float(gsl_distance), int(sat_id))
+        gsl_cost = (
+            propagation_delay_seconds(gsl_distance)
+            if QUEUE_COST_MODE == "delay"
+            else float(gsl_distance)
+        )
+        state = (gsl_cost, float(gsl_distance), int(sat_id))
         current = best_state.get(sat_id)
         if current is None or state < current:
             best_state[sat_id] = state
@@ -2168,6 +2119,9 @@ def build_fstate_lhtr(
     prev_src_sat_map: Optional[Dict[int,int]] = None,
     prev_fstate: Optional[Dict[Tuple[int,int], Tuple[int,int,int]]] = None,
     queue_packets: Optional[Dict[Tuple[int,int], int]] = None,
+    queue_bytes: Optional[Dict[Tuple[int,int], int]] = None,
+    link_rate_bps: Optional[Dict[Tuple[int,int], float]] = None,
+    default_link_capacity_bps: Optional[float] = None,
     traffic_light_state: Optional[TrafficLightState] = None,
 ) -> Tuple[
     Dict[Tuple[int,int], Tuple[int,int,int]],
@@ -2180,7 +2134,8 @@ def build_fstate_lhtr(
     LHTR: 產生 fstate（第一跳）：(u,dst) -> (next_hop, my_if, next_if)
     
     新增：
-    - queue_packets: 用於 queue-aware 邊界選擇
+    - queue_bytes: queueing delay 的優先資料來源
+    - queue_packets: queue bytes 缺少時的 fallback
     - traffic_light_state: 用於 TLR-style BR / SBR 決策
     
     基於 algorithm_lohi_kun.py 的 build_fstate_lohi，保留完整階層路由邏輯
@@ -2518,6 +2473,9 @@ def build_fstate_lhtr(
             border_candidates = BorderSelector.rank_border_pair_candidates(
                 G_sat, gplanner, src_pid, next_pid, sat_pid,
                 src_sat=u, router=router, queue_packets=queue_packets,
+                queue_bytes=queue_bytes,
+                link_rate_bps=link_rate_bps,
+                default_link_capacity_bps=default_link_capacity_bps,
                 dst_sat=dst_sat, dst_pid=dst_pid,
                 pre_src_side_dists=src_side_dists_cache.get(u),
                 pre_dst_side_dists=dst_side_dists_cache.get((next_pid, _ref_for_dst_cache)),
@@ -2721,7 +2679,12 @@ def build_fstate_lhtr(
                     sat_to_dst_cost = dst_costs.get(candidate_sat, float('inf'))
                     if math.isinf(sat_to_dst_cost):
                         continue
-                    choice = (src_gsl_dist + sat_to_dst_cost, src_gsl_dist, candidate_sat)
+                    src_gsl_cost = (
+                        propagation_delay_seconds(src_gsl_dist)
+                        if QUEUE_COST_MODE == "delay"
+                        else src_gsl_dist
+                    )
+                    choice = (src_gsl_cost + sat_to_dst_cost, src_gsl_dist, candidate_sat)
                     if best_src_choice is None or choice < best_src_choice:
                         best_src_choice = choice
 
@@ -2784,7 +2747,9 @@ def init(config: Optional[dict] = None):
     global ENABLE_TRAFFIC_LIGHT
     global TRAFFIC_LIGHT_BUFFER_SIZE, TRAFFIC_LIGHT_QOR_GREEN_YELLOW, TRAFFIC_LIGHT_QOR_YELLOW_RED
     global TRAFFIC_LIGHT_TQOR_GREEN_YELLOW, TRAFFIC_LIGHT_TQOR_YELLOW_RED
-    global TRAFFIC_LIGHT_YELLOW_PENALTY_M, TRAFFIC_LIGHT_RED_PENALTY_M, TRAFFIC_LIGHT_ALT_PATH_FACTOR
+    global TRAFFIC_LIGHT_YELLOW_PENALTY_M, TRAFFIC_LIGHT_RED_PENALTY_M
+    global TRAFFIC_LIGHT_YELLOW_PENALTY_S, TRAFFIC_LIGHT_RED_PENALTY_S
+    global TRAFFIC_LIGHT_ALT_PATH_FACTOR
     global LHTR_DEST_AWARE_BORDER_SELECTION, LHTR_BORDER_SELECTION_MODE
     global DEST_AWARE_BORDER_WEIGHT, ANCHOR_BORDER_WEIGHT, LOCAL_BORDER_WEIGHT, DEST_AWARE_RELAY_ONLY
     global ENABLE_BORDER_SELECTION_DEBUG, BORDER_SELECTION_DEBUG_LIMIT
@@ -2802,6 +2767,8 @@ def init(config: Optional[dict] = None):
     TRAFFIC_LIGHT_TQOR_YELLOW_RED = float(cfg.get('traffic_light_tqor_yellow_red', TRAFFIC_LIGHT_TQOR_YELLOW_RED))
     TRAFFIC_LIGHT_YELLOW_PENALTY_M = float(cfg.get('traffic_light_yellow_penalty_m', TRAFFIC_LIGHT_YELLOW_PENALTY_M))
     TRAFFIC_LIGHT_RED_PENALTY_M = float(cfg.get('traffic_light_red_penalty_m', TRAFFIC_LIGHT_RED_PENALTY_M))
+    TRAFFIC_LIGHT_YELLOW_PENALTY_S = float(cfg.get('traffic_light_yellow_penalty_s', TRAFFIC_LIGHT_YELLOW_PENALTY_S))
+    TRAFFIC_LIGHT_RED_PENALTY_S = float(cfg.get('traffic_light_red_penalty_s', TRAFFIC_LIGHT_RED_PENALTY_S))
     TRAFFIC_LIGHT_ALT_PATH_FACTOR = float(cfg.get('traffic_light_alt_path_factor', TRAFFIC_LIGHT_ALT_PATH_FACTOR))
     LHTR_DEST_AWARE_BORDER_SELECTION = bool(cfg.get('dest_aware_border_selection', LHTR_DEST_AWARE_BORDER_SELECTION))
     LHTR_BORDER_SELECTION_MODE = str(cfg.get('border_selection_mode', LHTR_BORDER_SELECTION_MODE)).strip().lower()
@@ -2910,6 +2877,7 @@ def algorithm_lhtr(
     time_step_ns: Optional[int] = None,
     group_cost_mode: str = 'hop',
     traffic_light_enabled: Optional[bool] = None,
+    isl_link_capacity_bps: Optional[float] = None,
 ):
     """
     LHTR (Load-aware Hierarchical Traffic Routing) Algorithm
@@ -2978,12 +2946,30 @@ def algorithm_lhtr(
     sat_to_pid = _ROUTER.refresh_pid_members_and_subgraphs(sat_ids,
                                                            sat_net_graph_only_satellites_with_isls)
 
-    # QUEUE-AWARE: 讀取 queue 統計
+    # QUEUE-AWARE: 讀取 queue 統計，優先採用 byte occupancy。
     queue_packets = {}
+    queue_bytes = dict(link_queue_bytes or {})
+    queue_delay_source = "queue_packets_fallback"
     if queue_stats_file:
-        queue_packets = load_queue_statistics_from_csv(queue_stats_file, num_sats, enable_verbose_logs)
-        if enable_verbose_logs and queue_packets:
-            print(f"  > [QUEUE-AWARE] Loaded {len(queue_packets)} queue entries from {queue_stats_file}")
+        queue_stats = load_queue_statistics_csv(queue_stats_file, num_sats)
+        queue_packets = queue_stats.queue_packets
+        queue_bytes.update(queue_stats.queue_bytes)
+        queue_delay_source = (
+            "queue_bytes" if queue_bytes else queue_stats.delay_source
+        )
+
+    default_link_capacity_bps = (
+        DEFAULT_ISL_LINK_CAPACITY_BPS
+        if isl_link_capacity_bps is None
+        else float(isl_link_capacity_bps)
+    )
+    if enable_verbose_logs:
+        print("  > " + describe_queue_cost(queue_delay_source, default_link_capacity_bps))
+        print(f"    >> Loaded directional queue entries: {len(queue_packets)}")
+        print(
+            "    >> Traffic-light penalty unit: %s"
+            % ("seconds" if QUEUE_COST_MODE == "delay" else "meters")
+        )
 
     traffic_light_state = None
     if ENABLE_TRAFFIC_LIGHT:
@@ -2994,16 +2980,20 @@ def algorithm_lhtr(
             enable_verbose_logs=enable_verbose_logs,
         )
 
-    # QUEUE-AWARE: 群內權重更新 (使用增強模式)
+    # QUEUE-AWARE: All graph weights use seconds in delay mode.
     apply_queue_aware_weights_intra_only(sat_net_graph_only_satellites_with_isls,
                                          sat_to_pid,
-                                         link_queue_bytes,
+                                         queue_bytes,
                                          link_rate_bps,
                                          queue_packets=queue_packets,
                                          beta_q=BETA_Q, 
                                          beta_s=BETA_S,
-                                         use_enhanced_queue_cost=True)
-    _ROUTER.sync_pid_subgraph_weights_from_graph(sat_net_graph_only_satellites_with_isls)
+                                         use_enhanced_queue_cost=True,
+                                         default_link_capacity_bps=default_link_capacity_bps)
+    _ROUTER.sync_pid_subgraph_weights_from_graph(
+        sat_net_graph_only_satellites_with_isls,
+        default_link_capacity_bps,
+    )
 
     # 建立群圖
     _GPLANNER.build_group_graph(sat_net_graph_only_satellites_with_isls,
@@ -3037,7 +3027,10 @@ def algorithm_lhtr(
         prev_dst_sat_map=_PREV_DST_SAT_MAP,
         prev_src_sat_map=_PREV_SRC_SAT_MAP,
         prev_fstate=prev_fstate,
-        queue_packets=queue_packets,  # QUEUE-AWARE: 傳入 queue 資訊
+        queue_packets=queue_packets,
+        queue_bytes=queue_bytes,
+        link_rate_bps=link_rate_bps,
+        default_link_capacity_bps=default_link_capacity_bps,
         traffic_light_state=traffic_light_state,
     )
     if enable_verbose_logs and ENABLE_PID_SNAPSHOT_DUMP:

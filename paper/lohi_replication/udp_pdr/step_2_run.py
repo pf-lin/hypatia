@@ -8,6 +8,7 @@ from dynamic_run_list import build_arg_parser, describe_selection, get_udp_pdr_r
 from calculate_routes import (
     generate_single_fstate,
     persist_algorithm_state,
+    read_isl_link_capacity_bps,
     resolve_satellite_network_dir,
     save_prev_output,
 )
@@ -63,6 +64,7 @@ def generate_initial_fstate(run, run_dir):
         run["dynamic_state_algorithm"],
         None,
         time_step_ns=run["dynamic_state_update_interval_ns"],
+        isl_link_capacity_bps=read_isl_link_capacity_bps(run_dir),
     )
 
     if prev_output:
