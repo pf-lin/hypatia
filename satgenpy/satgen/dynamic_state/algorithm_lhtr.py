@@ -24,6 +24,7 @@ LHTR (Load-aware Hierarchical Traffic-light Routing) Algorithm
 from dataclasses import dataclass
 from typing import Dict, Set, Tuple, List, Optional, Callable, Any
 from collections import Counter, defaultdict
+import csv
 import datetime as _dt
 import heapq
 import json
@@ -111,6 +112,14 @@ ENABLE_PID_SNAPSHOT_DUMP = os.environ.get(
     'LHTR_DUMP_PID_SNAPSHOT',
     '0'
 ) not in ['0', 'false', 'False']
+ENABLE_TRAFFIC_LIGHT_DIAGNOSTICS = os.environ.get(
+    'LHTR_ENABLE_DIAGNOSTICS',
+    '0'
+) not in ['0', 'false', 'False']
+TRAFFIC_LIGHT_DIAGNOSTIC_DETAIL_LIMIT = int(os.environ.get(
+    'LHTR_DIAGNOSTIC_DETAIL_LIMIT',
+    '5000',
+))
 
 # ===== Chaos Monkey =====
 ENABLE_CHAOS_MONKEY = os.environ.get('ENABLE_CHAOS_MONKEY', 'false').lower() == 'true'
@@ -153,6 +162,8 @@ class TrafficLightState:
     link_queue_packets: Dict[Tuple[int, int], int]
     link_qor: Dict[Tuple[int, int], float]
     link_color: Dict[Tuple[int, int], str]
+    node_queue_packets: Dict[int, int]
+    node_queue_capacity_packets: Dict[int, int]
     node_tqor: Dict[int, float]
     node_color: Dict[int, str]
     final_link_color_map: Dict[Tuple[int, int], str]
@@ -407,6 +418,7 @@ def build_traffic_light_state(queue_packets: Optional[Dict[Tuple[int, int], int]
     link_qor: Dict[Tuple[int, int], float] = {}
     link_color: Dict[Tuple[int, int], str] = {}
     node_outgoing_queue_sum: Dict[int, int] = defaultdict(int)
+    node_queue_capacity_packets: Dict[int, int] = {}
     node_tqor: Dict[int, float] = {}
     node_color: Dict[int, str] = {}
     final_link_color_map: Dict[Tuple[int, int], str] = {}
@@ -428,6 +440,7 @@ def build_traffic_light_state(queue_packets: Optional[Dict[Tuple[int, int], int]
     for sat_id in range(num_satellites):
         degree = G_sat.degree(sat_id) if G_sat.has_node(sat_id) else 0
         total_buffer_packets = max(1, degree) * max(1, TRAFFIC_LIGHT_BUFFER_SIZE)
+        node_queue_capacity_packets[sat_id] = total_buffer_packets
         tqor = node_outgoing_queue_sum.get(sat_id, 0) / float(total_buffer_packets)
         node_tqor[sat_id] = tqor
         node_color[sat_id] = _classify_traffic_light(
@@ -453,6 +466,8 @@ def build_traffic_light_state(queue_packets: Optional[Dict[Tuple[int, int], int]
         link_queue_packets=link_queue_packets,
         link_qor=link_qor,
         link_color=link_color,
+        node_queue_packets=dict(node_outgoing_queue_sum),
+        node_queue_capacity_packets=node_queue_capacity_packets,
         node_tqor=node_tqor,
         node_color=node_color,
         final_link_color_map=final_link_color_map,
@@ -625,6 +640,309 @@ def select_border_pair_by_traffic_light(candidates: List[BorderPairCandidate],
         return sbr, br, sbr
 
     return br, br, sbr
+
+
+def _candidate_identity(candidate: Optional[Any]) -> Optional[Tuple[Any, ...]]:
+    if candidate is None:
+        return None
+    if isinstance(candidate, NextHopCandidate):
+        return ("next_hop", candidate.next_hop)
+    if isinstance(candidate, BorderPairCandidate):
+        return ("border_pair", candidate.u_border, candidate.v_border)
+    return ("object", id(candidate))
+
+
+def _candidate_target(candidate: Optional[Any], current_node: int) -> Optional[int]:
+    if candidate is None:
+        return None
+    if isinstance(candidate, NextHopCandidate):
+        return candidate.next_hop
+    if isinstance(candidate, BorderPairCandidate):
+        return candidate.v_border if current_node == candidate.u_border else candidate.u_border
+    return None
+
+
+def _explain_traffic_light_decision(
+        selected: Optional[Any],
+        br: Optional[Any],
+        sbr: Optional[Any]) -> str:
+    """Describe the already-computed selector result without changing it."""
+    if br is None:
+        return "fallback_no_br_candidate"
+    if not ENABLE_TRAFFIC_LIGHT:
+        return "br_traffic_light_disabled"
+    if sbr is None:
+        return "br_no_admissible_sbr"
+    if br.final_color == TrafficLightColor.GREEN:
+        return "br_green"
+    if br.final_color == TrafficLightColor.YELLOW:
+        if sbr.final_color in (TrafficLightColor.GREEN, TrafficLightColor.YELLOW):
+            return "sbr_due_to_yellow"
+        return "br_yellow_sbr_red"
+    if sbr.final_color in (TrafficLightColor.GREEN, TrafficLightColor.YELLOW):
+        return "sbr_due_to_red"
+    if sbr.link_qor < br.link_qor:
+        return "sbr_both_red_lower_qor"
+    if sbr.decision_score < br.decision_score:
+        return "sbr_both_red_lower_score"
+    if _candidate_identity(selected) == _candidate_identity(sbr):
+        return "sbr_both_red"
+    return "br_both_red"
+
+
+def _record_br_sbr_diagnostic(
+        rows: Optional[List[Dict[str, Any]]],
+        time_ns: int,
+        src: int,
+        dst: int,
+        current_node: int,
+        pid: Optional[int],
+        case_type: str,
+        selected: Optional[Any],
+        br: Optional[Any],
+        sbr: Optional[Any],
+        actual_selected_next_hop: Optional[int] = None,
+        fallback_reason: Optional[str] = None) -> None:
+    if rows is None:
+        return
+
+    selected_identity = _candidate_identity(selected)
+    sbr_identity = _candidate_identity(sbr)
+    if fallback_reason is not None or selected is None:
+        selected_route_type = "FALLBACK"
+    elif selected_identity == sbr_identity and sbr is not None:
+        selected_route_type = "SBR"
+    else:
+        selected_route_type = "BR"
+
+    br_cost = br.path_cost if br is not None else None
+    sbr_cost = sbr.path_cost if sbr is not None else None
+    path_stretch = None
+    if br_cost is not None and sbr_cost is not None and br_cost > 0:
+        path_stretch = sbr_cost / br_cost
+
+    decision_reason = fallback_reason or _explain_traffic_light_decision(selected, br, sbr)
+    rows.append({
+        "time_ns": time_ns,
+        "src": src,
+        "dst": dst,
+        "current_node": current_node,
+        "pid": "" if pid is None else pid,
+        "case_type": case_type,
+        "br_next_hop": _candidate_target(br, current_node),
+        "sbr_next_hop": _candidate_target(sbr, current_node),
+        "selected_next_hop": (
+            actual_selected_next_hop
+            if actual_selected_next_hop is not None
+            else _candidate_target(selected, current_node)
+        ),
+        "selected_route_type": selected_route_type,
+        "br_max_color": br.final_color if br is not None else "",
+        "sbr_max_color": sbr.final_color if sbr is not None else "",
+        "br_cost": br_cost,
+        "sbr_cost": sbr_cost,
+        "br_hop_count": "",
+        "sbr_hop_count": "",
+        "path_stretch": path_stretch,
+        "decision_reason": decision_reason,
+        "br_border_u": br.u_border if isinstance(br, BorderPairCandidate) else "",
+        "br_border_v": br.v_border if isinstance(br, BorderPairCandidate) else "",
+        "sbr_border_u": sbr.u_border if isinstance(sbr, BorderPairCandidate) else "",
+        "sbr_border_v": sbr.v_border if isinstance(sbr, BorderPairCandidate) else "",
+        "selected_border_u": selected.u_border if isinstance(selected, BorderPairCandidate) else "",
+        "selected_border_v": selected.v_border if isinstance(selected, BorderPairCandidate) else "",
+        "installed_next_hop": "",
+        "selected_applied": "",
+    })
+
+
+def _write_csv_rows(
+        path: str,
+        fieldnames: List[str],
+        rows: List[Dict[str, Any]],
+        reset: bool) -> None:
+    mode = "w" if reset or not os.path.exists(path) else "a"
+    with open(path, mode, newline="", encoding="utf-8") as f_out:
+        writer = csv.DictWriter(f_out, fieldnames=fieldnames)
+        if mode == "w":
+            writer.writeheader()
+        writer.writerows(rows)
+
+
+def _write_traffic_light_diagnostics(
+        output_dir: str,
+        time_ns: int,
+        G_sat: nx.Graph,
+        sat_pid: Dict[int, int],
+        traffic_light_state: Optional[TrafficLightState],
+        decision_rows: List[Dict[str, Any]]) -> None:
+    """Persist diagnostics only; routing state is never read back from these files."""
+    if not ENABLE_TRAFFIC_LIGHT_DIAGNOSTICS:
+        return
+
+    os.makedirs(output_dir, exist_ok=True)
+    reset = time_ns == 0
+    state = traffic_light_state
+    sample_rows: List[Dict[str, Any]] = []
+    final_color_counts = Counter()
+    qor_color_counts = Counter()
+    tqor_color_counts = Counter(state.node_color.values() if state is not None else [])
+    tqor_upgrade_count = 0
+
+    for u, v in G_sat.edges():
+        for current_node, next_hop in ((u, v), (v, u)):
+            queue_packets = (
+                state.link_queue_packets.get((current_node, next_hop), 0)
+                if state is not None else 0
+            )
+            qor = (
+                state.link_qor.get((current_node, next_hop), 0.0)
+                if state is not None else 0.0
+            )
+            qor_color = (
+                state.link_color.get((current_node, next_hop), TrafficLightColor.GREEN)
+                if state is not None else TrafficLightColor.GREEN
+            )
+            tqor = state.node_tqor.get(next_hop, 0.0) if state is not None else 0.0
+            tqor_color = (
+                state.node_color.get(next_hop, TrafficLightColor.GREEN)
+                if state is not None else TrafficLightColor.GREEN
+            )
+            final_color = combine_traffic_light_colors(qor_color, tqor_color)
+            final_color_counts[final_color] += 1
+            qor_color_counts[qor_color] += 1
+            if _traffic_light_color_rank(final_color) > _traffic_light_color_rank(qor_color):
+                tqor_upgrade_count += 1
+
+            node_queue_packets = (
+                state.node_queue_packets.get(next_hop, 0)
+                if state is not None else 0
+            )
+            node_queue_capacity = (
+                state.node_queue_capacity_packets.get(next_hop, 0)
+                if state is not None else 0
+            )
+            sample_rows.append({
+                "time_ns": time_ns,
+                "current_node": current_node,
+                "next_hop": next_hop,
+                "dst": "",
+                "pid": sat_pid.get(current_node, ""),
+                "link_key": f"{current_node}->{next_hop}",
+                "qor": qor,
+                "tqor": tqor,
+                "qor_color": qor_color,
+                "tqor_color": tqor_color,
+                "final_color": final_color,
+                "queue_packets": queue_packets,
+                "queue_capacity": TRAFFIC_LIGHT_BUFFER_SIZE,
+                "next_hop_total_queue_packets": node_queue_packets,
+                "next_hop_total_queue_capacity": node_queue_capacity,
+            })
+
+    color_summary_rows = [{
+        "time_ns": time_ns,
+        "green_count": final_color_counts[TrafficLightColor.GREEN],
+        "yellow_count": final_color_counts[TrafficLightColor.YELLOW],
+        "red_count": final_color_counts[TrafficLightColor.RED],
+        "qor_yellow_count": qor_color_counts[TrafficLightColor.YELLOW],
+        "qor_red_count": qor_color_counts[TrafficLightColor.RED],
+        "tqor_yellow_count": tqor_color_counts[TrafficLightColor.YELLOW],
+        "tqor_red_count": tqor_color_counts[TrafficLightColor.RED],
+        "tqor_upgrade_count": tqor_upgrade_count,
+    }]
+
+    decision_counts = Counter(row["selected_route_type"] for row in decision_rows)
+    br_color_counts = Counter(row["br_max_color"] for row in decision_rows)
+    reason_counts = Counter(row["decision_reason"] for row in decision_rows)
+    important_detail_rows = [
+        row for row in decision_rows
+        if (
+            row["selected_route_type"] != "BR"
+            or row["br_max_color"] not in ("", TrafficLightColor.GREEN)
+            or row["selected_applied"] is False
+        )
+    ]
+    important_row_ids = {id(row) for row in important_detail_rows}
+    routine_detail_rows = [
+        row for row in decision_rows
+        if id(row) not in important_row_ids
+    ]
+    if TRAFFIC_LIGHT_DIAGNOSTIC_DETAIL_LIMIT < 0:
+        written_decision_rows = decision_rows
+    else:
+        routine_limit = max(
+            0,
+            TRAFFIC_LIGHT_DIAGNOSTIC_DETAIL_LIMIT - len(important_detail_rows),
+        )
+        written_decision_rows = important_detail_rows + routine_detail_rows[:routine_limit]
+    for row in written_decision_rows:
+        row["diagnostic_sampled"] = len(written_decision_rows) < len(decision_rows)
+
+    br_sbr_summary_rows = [{
+        "time_ns": time_ns,
+        "br_selected_count": decision_counts["BR"],
+        "sbr_selected_count": decision_counts["SBR"],
+        "fallback_count": decision_counts["FALLBACK"],
+        "yellow_count": br_color_counts[TrafficLightColor.YELLOW],
+        "red_count": br_color_counts[TrafficLightColor.RED],
+        "green_count": br_color_counts[TrafficLightColor.GREEN],
+        "sbr_due_to_yellow_count": reason_counts["sbr_due_to_yellow"],
+        "sbr_due_to_red_count": reason_counts["sbr_due_to_red"],
+        "fallback_due_to_no_sbr_count": reason_counts["fallback_no_sbr"],
+        "no_admissible_sbr_count": reason_counts["br_no_admissible_sbr"],
+        "decision_detail_total_count": len(decision_rows),
+        "decision_detail_written_count": len(written_decision_rows),
+    }]
+    reason_summary_rows = [
+        {"time_ns": time_ns, "decision_reason": reason, "count": count}
+        for reason, count in sorted(reason_counts.items())
+    ]
+
+    _write_csv_rows(
+        os.path.join(output_dir, "lhtr_traffic_light_color_summary.csv"),
+        list(color_summary_rows[0].keys()),
+        color_summary_rows,
+        reset,
+    )
+    _write_csv_rows(
+        os.path.join(output_dir, "lhtr_qor_tqor_samples.csv"),
+        list(sample_rows[0].keys()) if sample_rows else [
+            "time_ns", "current_node", "next_hop", "dst", "pid", "link_key",
+            "qor", "tqor", "qor_color", "tqor_color", "final_color",
+            "queue_packets", "queue_capacity", "next_hop_total_queue_packets",
+            "next_hop_total_queue_capacity",
+        ],
+        sample_rows,
+        reset,
+    )
+    decision_fields = [
+        "time_ns", "src", "dst", "current_node", "pid", "case_type",
+        "br_next_hop", "sbr_next_hop", "selected_next_hop",
+        "selected_route_type", "br_max_color", "sbr_max_color", "br_cost",
+        "sbr_cost", "br_hop_count", "sbr_hop_count", "path_stretch",
+        "decision_reason", "br_border_u", "br_border_v", "sbr_border_u",
+        "sbr_border_v", "selected_border_u", "selected_border_v",
+        "installed_next_hop", "selected_applied", "diagnostic_sampled",
+    ]
+    _write_csv_rows(
+        os.path.join(output_dir, "lhtr_br_sbr_decision_log.csv"),
+        decision_fields,
+        written_decision_rows,
+        reset,
+    )
+    _write_csv_rows(
+        os.path.join(output_dir, "lhtr_br_sbr_summary.csv"),
+        list(br_sbr_summary_rows[0].keys()),
+        br_sbr_summary_rows,
+        reset,
+    )
+    _write_csv_rows(
+        os.path.join(output_dir, "lhtr_decision_reason_summary.csv"),
+        ["time_ns", "decision_reason", "count"],
+        reason_summary_rows,
+        reset,
+    )
 
 
 # ==========================
@@ -2123,6 +2441,8 @@ def build_fstate_lhtr(
     link_rate_bps: Optional[Dict[Tuple[int,int], float]] = None,
     default_link_capacity_bps: Optional[float] = None,
     traffic_light_state: Optional[TrafficLightState] = None,
+    diagnostics_time_ns: int = 0,
+    decision_diagnostics: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[
     Dict[Tuple[int,int], Tuple[int,int,int]],
     Dict[int,int],
@@ -2429,6 +2749,7 @@ def build_fstate_lhtr(
                     preferred_br_next_hop=baseline_next_hop,
                 )
                 next_hop = selected_candidate.next_hop if selected_candidate is not None else None
+                fallback_reason = None
 
                 if selected_candidate is not None and br_candidate is not None and selected_candidate.next_hop != br_candidate.next_hop:
                     reason['traffic_light_offload_same_pid'] += 1
@@ -2437,10 +2758,29 @@ def build_fstate_lhtr(
 
                 if next_hop is None:
                     next_hop = baseline_next_hop
+                    if next_hop is not None:
+                        fallback_reason = "fallback_no_candidate_baseline"
                 
                 # 保底機制
                 if next_hop is None:
                     next_hop = _fallback_spf_one_hop(u, dst_sat, G_sat)
+                    if next_hop is not None:
+                        fallback_reason = "fallback_spf"
+
+                _record_br_sbr_diagnostic(
+                    decision_diagnostics,
+                    diagnostics_time_ns,
+                    u,
+                    dst_node,
+                    u,
+                    src_pid,
+                    "same_pid_next_hop",
+                    selected_candidate,
+                    br_candidate,
+                    sbr_candidate,
+                    actual_selected_next_hop=next_hop,
+                    fallback_reason=fallback_reason,
+                )
                 
                 # ISL驗證
                 if next_hop is not None and G_sat.has_edge(u, next_hop):
@@ -2504,6 +2844,22 @@ def build_fstate_lhtr(
                 border_candidates,
                 preferred_br_pair=baseline_border,
                 candidates_are_ranked=True,
+            )
+            _record_br_sbr_diagnostic(
+                decision_diagnostics,
+                diagnostics_time_ns,
+                u,
+                dst_node,
+                u,
+                src_pid,
+                "cross_pid_border_pair",
+                selected_border,
+                br_border,
+                sbr_border,
+                fallback_reason=(
+                    "fallback_no_border_candidate"
+                    if selected_border is None else None
+                ),
             )
 
             _debug_border_selection_decision(
@@ -2626,6 +2982,7 @@ def build_fstate_lhtr(
                 preferred_br_next_hop=baseline_next_hop,
             )
             next_hop = selected_candidate.next_hop if selected_candidate is not None else None
+            fallback_reason = None
 
             if selected_candidate is not None and br_candidate is not None and selected_candidate.next_hop != br_candidate.next_hop:
                 reason['traffic_light_offload_cross_pid'] += 1
@@ -2634,13 +2991,34 @@ def build_fstate_lhtr(
 
             if next_hop is None:
                 next_hop = baseline_next_hop
+                if next_hop is not None:
+                    fallback_reason = "fallback_no_candidate_baseline"
             if next_hop is None and u_border2 is not None:
                 next_hop = _route_direct_in_subgraph(u, u_border2, src_pid, router, G_sat, intra_group_tree_cache)
+                if next_hop is not None:
+                    fallback_reason = "fallback_backup_border"
             
             # 保底機制
             if next_hop is None:
                 fallback_target = u_border2 if u_border2 is not None else u_border
                 next_hop = _fallback_spf_one_hop(u, fallback_target, G_sat)
+                if next_hop is not None:
+                    fallback_reason = "fallback_spf"
+
+            _record_br_sbr_diagnostic(
+                decision_diagnostics,
+                diagnostics_time_ns,
+                u,
+                dst_node,
+                u,
+                src_pid,
+                "cross_pid_next_hop",
+                selected_candidate,
+                br_candidate,
+                sbr_candidate,
+                actual_selected_next_hop=next_hop,
+                fallback_reason=fallback_reason,
+            )
             
             # ISL驗證
             if next_hop is not None and G_sat.has_edge(u, next_hop):
@@ -2728,6 +3106,16 @@ def build_fstate_lhtr(
     )
     reason["sat_to_gs_expected"] = num_sats * num_gs
     reason["sat_to_gs_present"] = sum(1 for (src, _dst) in fstate.keys() if src < num_sats)
+
+    if decision_diagnostics is not None:
+        for row in decision_diagnostics:
+            installed = fstate.get((row["current_node"], row["dst"]))
+            installed_next_hop = installed[0] if installed is not None else None
+            row["installed_next_hop"] = installed_next_hop
+            if row["case_type"].endswith("_next_hop"):
+                row["selected_applied"] = (
+                    installed_next_hop == row["selected_next_hop"]
+                )
 
     return fstate, dst_sat_map, src_sat_map, dict(reason), dict(Counter(missing_reason.values()))
 
@@ -3012,6 +3400,9 @@ def algorithm_lhtr(
     
     # 設定全局變數供 build_fstate_lhtr 使用
     _SAT_NEI_TO_IF = sat_neighbor_to_if
+    decision_diagnostics: Optional[List[Dict[str, Any]]] = (
+        [] if ENABLE_TRAFFIC_LIGHT_DIAGNOSTICS else None
+    )
     
     # QUEUE-AWARE: 生成 fstate (傳入 queue_packets)
     fstate, dst_sat_map, src_sat_map, reason_counters, missing_reason_counts = build_fstate_lhtr(
@@ -3032,6 +3423,8 @@ def algorithm_lhtr(
         link_rate_bps=link_rate_bps,
         default_link_capacity_bps=default_link_capacity_bps,
         traffic_light_state=traffic_light_state,
+        diagnostics_time_ns=time_since_epoch_ns,
+        decision_diagnostics=decision_diagnostics,
     )
     if enable_verbose_logs and ENABLE_PID_SNAPSHOT_DUMP:
         _dump_pid_snapshot(
@@ -3088,6 +3481,15 @@ def algorithm_lhtr(
     
     # （第二次 _break_2cycles 已移除：HOLDOVER 加入的 entry 均通過 has_edge 驗證，
     #  幾乎不會製造新的 2-cycle；第一次在 build_fstate_lhtr 結尾已清理主流程產生的 cycle。）
+
+    _write_traffic_light_diagnostics(
+        output_dynamic_state_dir,
+        time_since_epoch_ns,
+        sat_net_graph_only_satellites_with_isls,
+        sat_to_pid,
+        traffic_light_state,
+        decision_diagnostics or [],
+    )
 
     # 寫入 fstate
     output_filename = output_dynamic_state_dir + "/fstate_" + str(time_since_epoch_ns) + ".txt"
