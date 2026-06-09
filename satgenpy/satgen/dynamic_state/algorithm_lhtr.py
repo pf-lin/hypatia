@@ -83,6 +83,16 @@ TRAFFIC_LIGHT_RED_PENALTY_S = float(os.environ.get(
     str(TRAFFIC_LIGHT_RED_PENALTY_M / SPEED_OF_LIGHT_M_PER_S),
 ))
 TRAFFIC_LIGHT_ALT_PATH_FACTOR = float(os.environ.get('LHTR_TL_ALT_PATH_FACTOR', 1.5))
+_SUPPORTED_TRAFFIC_LIGHT_SCORING_MODES = {"categorical", "legacy_fused"}
+TRAFFIC_LIGHT_SCORING_MODE = os.environ.get(
+    'LHTR_TRAFFIC_LIGHT_SCORING_MODE',
+    'categorical',
+).strip().lower()
+if TRAFFIC_LIGHT_SCORING_MODE not in _SUPPORTED_TRAFFIC_LIGHT_SCORING_MODES:
+    raise ValueError(
+        "LHTR_TRAFFIC_LIGHT_SCORING_MODE must be one of %s, got %r"
+        % (sorted(_SUPPORTED_TRAFFIC_LIGHT_SCORING_MODES), TRAFFIC_LIGHT_SCORING_MODE)
+    )
 
 # ===== Destination-aware border selection =====
 # Modes:
@@ -222,7 +232,7 @@ def combine_traffic_light_colors(current_hop_color: str, next_hop_color: str) ->
 
 
 def traffic_light_color_to_cost(color: str) -> float:
-    """Map traffic-light state to seconds, or meters in legacy mode."""
+    """Return the configured color penalty in the active queue-cost unit."""
     if color == TrafficLightColor.RED:
         return (
             TRAFFIC_LIGHT_RED_PENALTY_S
@@ -236,6 +246,25 @@ def traffic_light_color_to_cost(color: str) -> float:
             else TRAFFIC_LIGHT_YELLOW_PENALTY_M
         )
     return 0.0
+
+
+def _traffic_light_scoring_penalty(color: str) -> float:
+    """Return the penalty applied to decision_score in the selected mode."""
+    if TRAFFIC_LIGHT_SCORING_MODE == "legacy_fused":
+        return traffic_light_color_to_cost(color)
+    return 0.0
+
+
+def _traffic_light_decision_score(path_cost: float, color: str) -> float:
+    """Keep categorical scoring equal to path cost; preserve legacy fusion on demand."""
+    return float(path_cost) + _traffic_light_scoring_penalty(color)
+
+
+def _candidate_mode_cost(candidate: Any) -> float:
+    """Return the numeric candidate cost used after categorical comparisons."""
+    if TRAFFIC_LIGHT_SCORING_MODE == "legacy_fused":
+        return candidate.decision_score
+    return candidate.path_cost
 
 
 def _normalized_border_selection_mode() -> str:
@@ -266,7 +295,7 @@ def _destination_aware_border_active(next_pid: int, dst_pid: Optional[int]) -> b
 def _border_pair_key(candidate: BorderPairCandidate) -> Tuple[float, float, float, int, int]:
     return (
         candidate.path_cost,
-        candidate.decision_score,
+        _candidate_mode_cost(candidate),
         candidate.link_qor,
         candidate.u_border,
         candidate.v_border,
@@ -278,7 +307,11 @@ def _anchor_border_pair_key(candidate: BorderPairCandidate) -> Tuple[float, floa
     anchor_decision_score = candidate.anchor_decision_score or candidate.decision_score
     return (
         anchor_path_cost,
-        anchor_decision_score,
+        (
+            anchor_decision_score
+            if TRAFFIC_LIGHT_SCORING_MODE == "legacy_fused"
+            else anchor_path_cost
+        ),
         candidate.link_qor,
         candidate.u_border,
         candidate.v_border,
@@ -288,7 +321,7 @@ def _anchor_border_pair_key(candidate: BorderPairCandidate) -> Tuple[float, floa
 def _border_sbr_key(candidate: BorderPairCandidate) -> Tuple[int, float, float, float, int, int]:
     return (
         _traffic_light_color_rank(candidate.final_color),
-        candidate.decision_score,
+        _candidate_mode_cost(candidate),
         candidate.path_cost,
         candidate.link_qor,
         candidate.u_border,
@@ -384,11 +417,13 @@ def calculate_link_lhtr_cost(distance_m: float,
                              queue_norm_max: int = QUEUE_NORMALIZE_MAX_PACKETS,
                              queue_max_penalty_m: float = QUEUE_MAX_PENALTY_M) -> float:
     """
-    LHTR fused cost: queue-aware link cost + traffic-light penalty.
+    Compatibility helper for an LHTR local decision score.
 
     NOTE:
     - queue-aware cost remains the base metric from stage 1
-    - traffic-light penalty is directional, so it is applied only in local decision layers
+    - categorical mode returns only the queue-aware path cost
+    - legacy_fused mode adds the directional traffic-light penalty
+    - internal route construction keeps path_cost and decision_score separate
     """
     queue_cost = calculate_link_queue_cost(
         distance_m,
@@ -400,7 +435,7 @@ def calculate_link_lhtr_cost(distance_m: float,
         queue_norm_max=queue_norm_max,
         queue_max_penalty_m=queue_max_penalty_m,
     )
-    return queue_cost + traffic_light_color_to_cost(final_color)
+    return _traffic_light_decision_score(queue_cost, final_color)
 
 
 def build_traffic_light_state(queue_packets: Optional[Dict[Tuple[int, int], int]],
@@ -503,7 +538,12 @@ def _pick_br_sbr_candidates(candidates: List[NextHopCandidate],
     dedup: Dict[int, NextHopCandidate] = {}
     for candidate in sorted(
         candidates,
-        key=lambda item: (item.path_cost, item.decision_score, item.link_qor, item.next_hop),
+        key=lambda item: (
+            item.path_cost,
+            _candidate_mode_cost(item),
+            item.link_qor,
+            item.next_hop,
+        ),
     ):
         if candidate.next_hop not in dedup:
             dedup[candidate.next_hop] = candidate
@@ -519,7 +559,7 @@ def _pick_br_sbr_candidates(candidates: List[NextHopCandidate],
         br = ordered[0]
 
     sbr_pool = [
-        item for item in ordered[1:]
+        item for item in ordered
         if item.next_hop != br.next_hop and item.path_cost <= br.path_cost * max(1.0, TRAFFIC_LIGHT_ALT_PATH_FACTOR)
     ]
     if not sbr_pool:
@@ -528,7 +568,7 @@ def _pick_br_sbr_candidates(candidates: List[NextHopCandidate],
     sbr_pool.sort(
         key=lambda item: (
             _traffic_light_color_rank(item.final_color),
-            item.decision_score,
+            _candidate_mode_cost(item),
             item.path_cost,
             item.link_qor,
             item.next_hop,
@@ -560,7 +600,7 @@ def _pick_br_sbr_border_pairs(candidates: List[BorderPairCandidate],
     best_sbr = None
     best_sbr_key = None
     max_sbr_path_cost = br.path_cost * max(1.0, TRAFFIC_LIGHT_ALT_PATH_FACTOR)
-    for item in ordered[1:]:
+    for item in ordered:
         if (item.u_border, item.v_border) == (br.u_border, br.v_border):
             continue
         if item.path_cost > max_sbr_path_cost:
@@ -602,7 +642,7 @@ def select_next_hop_candidate_by_traffic_light(candidates: List[NextHopCandidate
     if sbr.link_qor < br.link_qor:
         return sbr, br, sbr
 
-    if sbr.decision_score < br.decision_score:
+    if _candidate_mode_cost(sbr) < _candidate_mode_cost(br):
         return sbr, br, sbr
 
     return br, br, sbr
@@ -636,7 +676,7 @@ def select_border_pair_by_traffic_light(candidates: List[BorderPairCandidate],
     if sbr.link_qor < br.link_qor:
         return sbr, br, sbr
 
-    if sbr.decision_score < br.decision_score:
+    if _candidate_mode_cost(sbr) < _candidate_mode_cost(br):
         return sbr, br, sbr
 
     return br, br, sbr
@@ -683,7 +723,7 @@ def _explain_traffic_light_decision(
         return "sbr_due_to_red"
     if sbr.link_qor < br.link_qor:
         return "sbr_both_red_lower_qor"
-    if sbr.decision_score < br.decision_score:
+    if _candidate_mode_cost(sbr) < _candidate_mode_cost(br):
         return "sbr_both_red_lower_score"
     if _candidate_identity(selected) == _candidate_identity(sbr):
         return "sbr_both_red"
@@ -717,6 +757,13 @@ def _record_br_sbr_diagnostic(
 
     br_cost = br.path_cost if br is not None else None
     sbr_cost = sbr.path_cost if sbr is not None else None
+    selected_path_cost = selected.path_cost if selected is not None else None
+    br_penalty = traffic_light_color_to_cost(br.final_color) if br is not None else None
+    sbr_penalty = traffic_light_color_to_cost(sbr.final_color) if sbr is not None else None
+    selected_penalty = (
+        traffic_light_color_to_cost(selected.final_color)
+        if selected is not None else None
+    )
     path_stretch = None
     if br_cost is not None and sbr_cost is not None and br_cost > 0:
         path_stretch = sbr_cost / br_cost
@@ -741,6 +788,28 @@ def _record_br_sbr_diagnostic(
         "sbr_max_color": sbr.final_color if sbr is not None else "",
         "br_cost": br_cost,
         "sbr_cost": sbr_cost,
+        "traffic_light_scoring_mode": TRAFFIC_LIGHT_SCORING_MODE,
+        "br_path_cost": br_cost,
+        "sbr_path_cost": sbr_cost,
+        "selected_path_cost": selected_path_cost,
+        "br_traffic_light_penalty": br_penalty,
+        "sbr_traffic_light_penalty": sbr_penalty,
+        "selected_traffic_light_penalty": selected_penalty,
+        "br_applied_traffic_light_penalty": (
+            br.decision_score - br.path_cost if br is not None else None
+        ),
+        "sbr_applied_traffic_light_penalty": (
+            sbr.decision_score - sbr.path_cost if sbr is not None else None
+        ),
+        "selected_applied_traffic_light_penalty": (
+            selected.decision_score - selected.path_cost
+            if selected is not None else None
+        ),
+        "br_decision_score": br.decision_score if br is not None else None,
+        "sbr_decision_score": sbr.decision_score if sbr is not None else None,
+        "selected_decision_score": (
+            selected.decision_score if selected is not None else None
+        ),
         "br_hop_count": "",
         "sbr_hop_count": "",
         "path_stretch": path_stretch,
@@ -842,6 +911,7 @@ def _write_traffic_light_diagnostics(
 
     color_summary_rows = [{
         "time_ns": time_ns,
+        "traffic_light_scoring_mode": TRAFFIC_LIGHT_SCORING_MODE,
         "green_count": final_color_counts[TrafficLightColor.GREEN],
         "yellow_count": final_color_counts[TrafficLightColor.YELLOW],
         "red_count": final_color_counts[TrafficLightColor.RED],
@@ -881,6 +951,7 @@ def _write_traffic_light_diagnostics(
 
     br_sbr_summary_rows = [{
         "time_ns": time_ns,
+        "traffic_light_scoring_mode": TRAFFIC_LIGHT_SCORING_MODE,
         "br_selected_count": decision_counts["BR"],
         "sbr_selected_count": decision_counts["SBR"],
         "fallback_count": decision_counts["FALLBACK"],
@@ -920,7 +991,14 @@ def _write_traffic_light_diagnostics(
         "time_ns", "src", "dst", "current_node", "pid", "case_type",
         "br_next_hop", "sbr_next_hop", "selected_next_hop",
         "selected_route_type", "br_max_color", "sbr_max_color", "br_cost",
-        "sbr_cost", "br_hop_count", "sbr_hop_count", "path_stretch",
+        "sbr_cost", "traffic_light_scoring_mode", "br_path_cost",
+        "sbr_path_cost", "selected_path_cost", "br_traffic_light_penalty",
+        "sbr_traffic_light_penalty", "selected_traffic_light_penalty",
+        "br_applied_traffic_light_penalty",
+        "sbr_applied_traffic_light_penalty",
+        "selected_applied_traffic_light_penalty", "br_decision_score",
+        "sbr_decision_score", "selected_decision_score", "br_hop_count",
+        "sbr_hop_count", "path_stretch",
         "decision_reason", "br_border_u", "br_border_v", "sbr_border_u",
         "sbr_border_v", "selected_border_u", "selected_border_v",
         "installed_next_hop", "selected_applied", "diagnostic_sampled",
@@ -1599,7 +1677,8 @@ class BorderSelector:
                     + dist(v_border → ref_node)
 
         TRAFFIC-LIGHT 邏輯:
-        - decision_score = path_cost + traffic_light_penalty(border_isl_color)
+        - categorical: decision_score = path_cost
+        - legacy_fused: decision_score = path_cost + traffic_light_penalty(border_isl_color)
 
         LHTR 融合邏輯:
         - 先保留 LoHi/queue-aware 的 BR
@@ -1706,7 +1785,10 @@ class BorderSelector:
                     queue_norm_max=QUEUE_NORMALIZE_MAX_PACKETS,
                     queue_max_penalty_m=QUEUE_MAX_PENALTY_M
                 )
-                fused_isl_cost = path_isl_cost + traffic_light_color_to_cost(final_color)
+                fused_isl_cost = _traffic_light_decision_score(
+                    path_isl_cost,
+                    final_color,
+                )
                 link_qor = link_qor_get((u, v), 0.0) if link_qor_get is not None else 0.0
                 u_comp = pid_comp_map.get(u) if router is not None else None
 
@@ -2103,7 +2185,7 @@ def _build_intra_pid_next_hop_candidates(src: int,
         edge_weight = float(edge_data.get('weight', 1.0))
         path_cost = edge_weight + float(dist_map.get(neighbor, float('inf')))
         final_color = get_final_traffic_light_color(src, neighbor, traffic_light_state)
-        decision_score = path_cost + traffic_light_color_to_cost(final_color)
+        decision_score = _traffic_light_decision_score(path_cost, final_color)
         link_qor = traffic_light_state.link_qor.get((src, neighbor), 0.0) if traffic_light_state else 0.0
         queue_pkts = traffic_light_state.link_queue_packets.get((src, neighbor), 0) if traffic_light_state else 0
         candidates.append(
@@ -3137,7 +3219,7 @@ def init(config: Optional[dict] = None):
     global TRAFFIC_LIGHT_TQOR_GREEN_YELLOW, TRAFFIC_LIGHT_TQOR_YELLOW_RED
     global TRAFFIC_LIGHT_YELLOW_PENALTY_M, TRAFFIC_LIGHT_RED_PENALTY_M
     global TRAFFIC_LIGHT_YELLOW_PENALTY_S, TRAFFIC_LIGHT_RED_PENALTY_S
-    global TRAFFIC_LIGHT_ALT_PATH_FACTOR
+    global TRAFFIC_LIGHT_ALT_PATH_FACTOR, TRAFFIC_LIGHT_SCORING_MODE
     global LHTR_DEST_AWARE_BORDER_SELECTION, LHTR_BORDER_SELECTION_MODE
     global DEST_AWARE_BORDER_WEIGHT, ANCHOR_BORDER_WEIGHT, LOCAL_BORDER_WEIGHT, DEST_AWARE_RELAY_ONLY
     global ENABLE_BORDER_SELECTION_DEBUG, BORDER_SELECTION_DEBUG_LIMIT
@@ -3153,11 +3235,34 @@ def init(config: Optional[dict] = None):
     TRAFFIC_LIGHT_QOR_YELLOW_RED = float(cfg.get('traffic_light_qor_yellow_red', TRAFFIC_LIGHT_QOR_YELLOW_RED))
     TRAFFIC_LIGHT_TQOR_GREEN_YELLOW = float(cfg.get('traffic_light_tqor_green_yellow', TRAFFIC_LIGHT_TQOR_GREEN_YELLOW))
     TRAFFIC_LIGHT_TQOR_YELLOW_RED = float(cfg.get('traffic_light_tqor_yellow_red', TRAFFIC_LIGHT_TQOR_YELLOW_RED))
+    yellow_penalty_m_configured = 'traffic_light_yellow_penalty_m' in cfg
+    red_penalty_m_configured = 'traffic_light_red_penalty_m' in cfg
+    yellow_penalty_s_configured = 'traffic_light_yellow_penalty_s' in cfg
+    red_penalty_s_configured = 'traffic_light_red_penalty_s' in cfg
     TRAFFIC_LIGHT_YELLOW_PENALTY_M = float(cfg.get('traffic_light_yellow_penalty_m', TRAFFIC_LIGHT_YELLOW_PENALTY_M))
     TRAFFIC_LIGHT_RED_PENALTY_M = float(cfg.get('traffic_light_red_penalty_m', TRAFFIC_LIGHT_RED_PENALTY_M))
-    TRAFFIC_LIGHT_YELLOW_PENALTY_S = float(cfg.get('traffic_light_yellow_penalty_s', TRAFFIC_LIGHT_YELLOW_PENALTY_S))
-    TRAFFIC_LIGHT_RED_PENALTY_S = float(cfg.get('traffic_light_red_penalty_s', TRAFFIC_LIGHT_RED_PENALTY_S))
+    if yellow_penalty_s_configured:
+        TRAFFIC_LIGHT_YELLOW_PENALTY_S = float(cfg['traffic_light_yellow_penalty_s'])
+    elif yellow_penalty_m_configured:
+        TRAFFIC_LIGHT_YELLOW_PENALTY_S = (
+            TRAFFIC_LIGHT_YELLOW_PENALTY_M / SPEED_OF_LIGHT_M_PER_S
+        )
+    if red_penalty_s_configured:
+        TRAFFIC_LIGHT_RED_PENALTY_S = float(cfg['traffic_light_red_penalty_s'])
+    elif red_penalty_m_configured:
+        TRAFFIC_LIGHT_RED_PENALTY_S = (
+            TRAFFIC_LIGHT_RED_PENALTY_M / SPEED_OF_LIGHT_M_PER_S
+        )
     TRAFFIC_LIGHT_ALT_PATH_FACTOR = float(cfg.get('traffic_light_alt_path_factor', TRAFFIC_LIGHT_ALT_PATH_FACTOR))
+    scoring_mode = str(
+        cfg.get('traffic_light_scoring_mode', TRAFFIC_LIGHT_SCORING_MODE)
+    ).strip().lower()
+    if scoring_mode not in _SUPPORTED_TRAFFIC_LIGHT_SCORING_MODES:
+        raise ValueError(
+            "traffic_light_scoring_mode must be one of %s, got %r"
+            % (sorted(_SUPPORTED_TRAFFIC_LIGHT_SCORING_MODES), scoring_mode)
+        )
+    TRAFFIC_LIGHT_SCORING_MODE = scoring_mode
     LHTR_DEST_AWARE_BORDER_SELECTION = bool(cfg.get('dest_aware_border_selection', LHTR_DEST_AWARE_BORDER_SELECTION))
     LHTR_BORDER_SELECTION_MODE = str(cfg.get('border_selection_mode', LHTR_BORDER_SELECTION_MODE)).strip().lower()
     DEST_AWARE_BORDER_WEIGHT = float(cfg.get('dest_aware_border_weight', DEST_AWARE_BORDER_WEIGHT))
@@ -3358,6 +3463,7 @@ def algorithm_lhtr(
             "    >> Traffic-light penalty unit: %s"
             % ("seconds" if QUEUE_COST_MODE == "delay" else "meters")
         )
+        print(f"    >> Traffic-light scoring mode: {TRAFFIC_LIGHT_SCORING_MODE}")
 
     traffic_light_state = None
     if ENABLE_TRAFFIC_LIGHT:
