@@ -274,6 +274,58 @@ SELECTION_DIAGNOSTIC_FILENAMES = [
     "satellite_interface_load_summary.csv",
 ]
 
+LHTR_DIAGNOSTIC_COLUMNS = {
+    "lhtr_traffic_light_color_summary.csv": [
+        "time_ns",
+        "traffic_light_scoring_mode",
+        "green_count",
+        "yellow_count",
+        "red_count",
+        "qor_yellow_count",
+        "qor_red_count",
+        "tqor_yellow_count",
+        "tqor_red_count",
+        "tqor_escalated_count",
+        "total_colored_links",
+    ],
+    "lhtr_br_sbr_summary.csv": [
+        "time_ns",
+        "traffic_light_scoring_mode",
+        "br_selected_count",
+        "sbr_selected_count",
+        "fallback_count",
+        "no_route_count",
+        "yellow_count",
+        "red_count",
+        "green_count",
+        "sbr_due_to_yellow_count",
+        "sbr_due_to_red_count",
+        "fallback_due_to_no_sbr_count",
+        "fallback_due_to_sbr_red_count",
+        "fallback_due_to_stretch_count",
+        "no_admissible_sbr_count",
+        "decision_detail_total_count",
+        "decision_detail_written_count",
+    ],
+    "lhtr_decision_reason_summary.csv": [
+        "decision_reason",
+        "count",
+        "percentage",
+    ],
+    "lhtr_fstate_decision_consistency.csv": [
+        "time_ns",
+        "src",
+        "dst",
+        "current_node",
+        "case_type",
+        "selected_route_type",
+        "selected_next_hop",
+        "fstate_next_hop",
+        "match",
+        "notes",
+    ],
+}
+
 
 def run_timing_fields(run):
     return {
@@ -345,6 +397,47 @@ def copy_selection_diagnostics(run, comparison_dir, output_layout):
             ),
         )
     return linked
+
+
+def collect_lhtr_diagnostic_summaries(algorithm_run_dir, run_name, algorithm):
+    relative_dir = (
+        os.environ.get("LHTR_DIAGNOSTICS_DIR", "lhtr_diagnostics").strip()
+        or "lhtr_diagnostics"
+    )
+    relative_dir = os.path.normpath(relative_dir)
+    first_component = relative_dir.split(os.sep, 1)[0]
+    if (
+        os.path.isabs(relative_dir)
+        or relative_dir in (".", "..")
+        or relative_dir.startswith(".." + os.sep)
+        or first_component in {
+            "dynamic_state",
+            "logs_ns3",
+            "queue_stats",
+            "timing_results",
+        }
+    ):
+        relative_dir = "lhtr_diagnostics"
+    diagnostics_dir = os.path.join(algorithm_run_dir, relative_dir)
+
+    summaries = {}
+    for filename, columns in LHTR_DIAGNOSTIC_COLUMNS.items():
+        path = os.path.join(diagnostics_dir, filename)
+        if os.path.exists(path):
+            try:
+                frame = pd.read_csv(path)
+            except pd.errors.EmptyDataError:
+                frame = pd.DataFrame(columns=columns)
+        else:
+            frame = pd.DataFrame(columns=columns)
+        for column in columns:
+            if column not in frame.columns:
+                frame[column] = ""
+        frame = frame[columns]
+        frame.insert(0, "algorithm", algorithm)
+        frame.insert(0, "run_name", run_name)
+        summaries[filename] = frame
+    return summaries
 
 
 def to_float_or_none(value):
@@ -2235,6 +2328,9 @@ def analyze_run(
     tag_coverage_diagnostic_frames = []
     congested_interface_frames = []
     queue_saturation_timeline_frames = []
+    lhtr_diagnostic_frames = {
+        filename: [] for filename in LHTR_DIAGNOSTIC_COLUMNS
+    }
     gsl_queue_summary_rows = []
     gsl_capacity_by_algorithm = {}
     gsl_capacity_warnings = []
@@ -2250,6 +2346,16 @@ def analyze_run(
             print("Skipping missing run directory: %s" % algorithm_run_dir)
             continue
         print("Processing %s" % algorithm_run_dir)
+
+        if algorithm == "algorithm_lhtr":
+            summaries = collect_lhtr_diagnostic_summaries(
+                algorithm_run_dir,
+                run["name"],
+                algorithm,
+            )
+            for filename, frame in summaries.items():
+                if len(frame):
+                    lhtr_diagnostic_frames[filename].append(frame)
 
         gsl_capacity_mbps = read_gsl_capacity_mbps(algorithm_run_dir, run)
         gsl_capacity_by_algorithm[algorithm] = gsl_capacity_mbps
@@ -2477,6 +2583,14 @@ def analyze_run(
         if queue_saturation_timeline_frames
         else pd.DataFrame(columns=QUEUE_SATURATION_TIMELINE_COLUMNS)
     )
+    lhtr_diagnostic_dfs = {}
+    for filename, columns in LHTR_DIAGNOSTIC_COLUMNS.items():
+        frames = lhtr_diagnostic_frames[filename]
+        lhtr_diagnostic_dfs[filename] = (
+            pd.concat(frames, ignore_index=True)
+            if frames
+            else pd.DataFrame(columns=["run_name", "algorithm"] + columns)
+        )
     gsl_queue_summary_df = pd.DataFrame(
         gsl_queue_summary_rows,
         columns=GSL_QUEUE_SUMMARY_COLUMNS,
@@ -2548,6 +2662,8 @@ def analyze_run(
         result_path(timeline_filename),
         index=False,
     )
+    for filename, frame in lhtr_diagnostic_dfs.items():
+        frame.to_csv(result_path(filename), index=False)
     if write_legacy_outputs or output_layout == "flat":
         link_drops_df.to_csv(result_path("link_drops.csv"), index=False)
         loss_attribution_df.to_csv(

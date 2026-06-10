@@ -126,6 +126,10 @@ ENABLE_TRAFFIC_LIGHT_DIAGNOSTICS = os.environ.get(
     'LHTR_ENABLE_DIAGNOSTICS',
     '0'
 ) not in ['0', 'false', 'False']
+LHTR_DIAGNOSTICS_DIR = (
+    os.environ.get('LHTR_DIAGNOSTICS_DIR', 'lhtr_diagnostics').strip()
+    or 'lhtr_diagnostics'
+)
 TRAFFIC_LIGHT_DIAGNOSTIC_DETAIL_LIMIT = int(os.environ.get(
     'LHTR_DIAGNOSTIC_DETAIL_LIMIT',
     '5000',
@@ -189,6 +193,7 @@ class NextHopCandidate:
     link_qor: float
     queue_packets: int
     route_kind: str
+    path: Tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -211,6 +216,7 @@ class BorderPairCandidate:
     ref_node: Optional[int] = None
     dst_sat: Optional[int] = None
     scoring_mode: str = "anchor"
+    path: Tuple[int, ...] = ()
 
 
 def _classify_traffic_light(rate: float, green_yellow: float, yellow_red: float) -> str:
@@ -702,17 +708,54 @@ def _candidate_target(candidate: Optional[Any], current_node: int) -> Optional[i
     return None
 
 
+def _candidate_path(candidate: Optional[Any]) -> Tuple[int, ...]:
+    if candidate is None:
+        return ()
+    return tuple(getattr(candidate, "path", ()) or ())
+
+
+def _format_candidate_path(candidate: Optional[Any]) -> str:
+    return "->".join(str(node) for node in _candidate_path(candidate))
+
+
+def _candidate_path_scope(candidate: Optional[Any]) -> str:
+    if isinstance(candidate, NextHopCandidate):
+        return "local_candidate_path"
+    if isinstance(candidate, BorderPairCandidate):
+        return "border_isl_only"
+    return ""
+
+
+def _diagnose_sbr_unavailable(
+        candidates: List[Any],
+        br: Optional[Any]) -> Optional[str]:
+    """Explain why the existing selector could not expose an SBR."""
+    if br is None:
+        return "no_br_candidate"
+    alternatives = [
+        candidate for candidate in candidates
+        if _candidate_identity(candidate) != _candidate_identity(br)
+    ]
+    if not alternatives:
+        return "no_alternative_candidate"
+    max_path_cost = br.path_cost * max(1.0, TRAFFIC_LIGHT_ALT_PATH_FACTOR)
+    if all(candidate.path_cost > max_path_cost for candidate in alternatives):
+        return "sbr_stretch_too_high"
+    return "sbr_not_available"
+
+
 def _explain_traffic_light_decision(
         selected: Optional[Any],
         br: Optional[Any],
-        sbr: Optional[Any]) -> str:
+        sbr: Optional[Any],
+        sbr_unavailable_reason: Optional[str] = None) -> str:
     """Describe the already-computed selector result without changing it."""
     if br is None:
         return "fallback_no_br_candidate"
     if not ENABLE_TRAFFIC_LIGHT:
         return "br_traffic_light_disabled"
     if sbr is None:
-        return "br_no_admissible_sbr"
+        return sbr_unavailable_reason or "br_no_admissible_sbr"
     if br.final_color == TrafficLightColor.GREEN:
         return "br_green"
     if br.final_color == TrafficLightColor.YELLOW:
@@ -742,13 +785,21 @@ def _record_br_sbr_diagnostic(
         br: Optional[Any],
         sbr: Optional[Any],
         actual_selected_next_hop: Optional[int] = None,
-        fallback_reason: Optional[str] = None) -> None:
+        fallback_reason: Optional[str] = None,
+        sbr_unavailable_reason: Optional[str] = None) -> None:
     if rows is None:
         return
 
     selected_identity = _candidate_identity(selected)
     sbr_identity = _candidate_identity(sbr)
-    if fallback_reason is not None or selected is None:
+    selected_next_hop = (
+        actual_selected_next_hop
+        if actual_selected_next_hop is not None
+        else _candidate_target(selected, current_node)
+    )
+    if selected is None and selected_next_hop is None:
+        selected_route_type = "NO_ROUTE"
+    elif fallback_reason is not None or selected is None:
         selected_route_type = "FALLBACK"
     elif selected_identity == sbr_identity and sbr is not None:
         selected_route_type = "SBR"
@@ -768,7 +819,15 @@ def _record_br_sbr_diagnostic(
     if br_cost is not None and sbr_cost is not None and br_cost > 0:
         path_stretch = sbr_cost / br_cost
 
-    decision_reason = fallback_reason or _explain_traffic_light_decision(selected, br, sbr)
+    decision_reason = fallback_reason or _explain_traffic_light_decision(
+        selected,
+        br,
+        sbr,
+        sbr_unavailable_reason=sbr_unavailable_reason,
+    )
+    br_path = _candidate_path(br)
+    sbr_path = _candidate_path(sbr)
+    selected_path = _candidate_path(selected)
     rows.append({
         "time_ns": time_ns,
         "src": src,
@@ -778,11 +837,7 @@ def _record_br_sbr_diagnostic(
         "case_type": case_type,
         "br_next_hop": _candidate_target(br, current_node),
         "sbr_next_hop": _candidate_target(sbr, current_node),
-        "selected_next_hop": (
-            actual_selected_next_hop
-            if actual_selected_next_hop is not None
-            else _candidate_target(selected, current_node)
-        ),
+        "selected_next_hop": selected_next_hop,
         "selected_route_type": selected_route_type,
         "br_max_color": br.final_color if br is not None else "",
         "sbr_max_color": sbr.final_color if sbr is not None else "",
@@ -810,10 +865,17 @@ def _record_br_sbr_diagnostic(
         "selected_decision_score": (
             selected.decision_score if selected is not None else None
         ),
-        "br_hop_count": "",
-        "sbr_hop_count": "",
+        "br_hop_count": max(0, len(br_path) - 1) if br_path else "",
+        "sbr_hop_count": max(0, len(sbr_path) - 1) if sbr_path else "",
         "path_stretch": path_stretch,
         "decision_reason": decision_reason,
+        "br_path": _format_candidate_path(br),
+        "sbr_path": _format_candidate_path(sbr),
+        "selected_path": _format_candidate_path(selected),
+        "path_scope": _candidate_path_scope(selected or br or sbr),
+        "br_contains_target_corridor": "unknown",
+        "sbr_contains_target_corridor": "unknown",
+        "selected_contains_target_corridor": "unknown",
         "br_border_u": br.u_border if isinstance(br, BorderPairCandidate) else "",
         "br_border_v": br.v_border if isinstance(br, BorderPairCandidate) else "",
         "sbr_border_u": sbr.u_border if isinstance(sbr, BorderPairCandidate) else "",
@@ -822,6 +884,7 @@ def _record_br_sbr_diagnostic(
         "selected_border_v": selected.v_border if isinstance(selected, BorderPairCandidate) else "",
         "installed_next_hop": "",
         "selected_applied": "",
+        "fstate_consistency_notes": "",
     })
 
 
@@ -836,6 +899,56 @@ def _write_csv_rows(
         if mode == "w":
             writer.writeheader()
         writer.writerows(rows)
+
+
+def _resolve_lhtr_diagnostics_dir(output_dynamic_state_dir: str) -> str:
+    relative_dir = os.path.normpath(LHTR_DIAGNOSTICS_DIR)
+    first_component = relative_dir.split(os.sep, 1)[0]
+    reserved_directories = {
+        "dynamic_state",
+        "logs_ns3",
+        "queue_stats",
+        "timing_results",
+    }
+    if (
+        os.path.isabs(relative_dir)
+        or relative_dir in (".", "..")
+        or relative_dir.startswith(".." + os.sep)
+        or first_component in reserved_directories
+    ):
+        raise ValueError(
+            "LHTR_DIAGNOSTICS_DIR must be a dedicated relative directory "
+            "within the algorithm run directory"
+        )
+    run_dir = os.path.dirname(os.path.abspath(output_dynamic_state_dir))
+    return os.path.join(run_dir, relative_dir)
+
+
+def _update_cumulative_reason_summary(
+        path: str,
+        reason_counts: Counter,
+        reset: bool) -> None:
+    cumulative = Counter()
+    if not reset and os.path.exists(path):
+        with open(path, newline="", encoding="utf-8") as f_in:
+            for row in csv.DictReader(f_in):
+                cumulative[row["decision_reason"]] += int(row["count"])
+    cumulative.update(reason_counts)
+    total = sum(cumulative.values())
+    rows = [
+        {
+            "decision_reason": reason,
+            "count": count,
+            "percentage": (100.0 * count / total) if total else 0.0,
+        }
+        for reason, count in sorted(cumulative.items())
+    ]
+    _write_csv_rows(
+        path,
+        ["decision_reason", "count", "percentage"],
+        rows,
+        True,
+    )
 
 
 def _write_traffic_light_diagnostics(
@@ -855,7 +968,7 @@ def _write_traffic_light_diagnostics(
     sample_rows: List[Dict[str, Any]] = []
     final_color_counts = Counter()
     qor_color_counts = Counter()
-    tqor_color_counts = Counter(state.node_color.values() if state is not None else [])
+    tqor_color_counts = Counter()
     tqor_upgrade_count = 0
 
     for u, v in G_sat.edges():
@@ -880,6 +993,7 @@ def _write_traffic_light_diagnostics(
             final_color = combine_traffic_light_colors(qor_color, tqor_color)
             final_color_counts[final_color] += 1
             qor_color_counts[qor_color] += 1
+            tqor_color_counts[tqor_color] += 1
             if _traffic_light_color_rank(final_color) > _traffic_light_color_rank(qor_color):
                 tqor_upgrade_count += 1
 
@@ -897,7 +1011,7 @@ def _write_traffic_light_diagnostics(
                 "next_hop": next_hop,
                 "dst": "",
                 "pid": sat_pid.get(current_node, ""),
-                "link_key": f"{current_node}->{next_hop}",
+                "link_key": f"ISL:{current_node}->{next_hop}",
                 "qor": qor,
                 "tqor": tqor,
                 "qor_color": qor_color,
@@ -907,6 +1021,7 @@ def _write_traffic_light_diagnostics(
                 "queue_capacity": TRAFFIC_LIGHT_BUFFER_SIZE,
                 "next_hop_total_queue_packets": node_queue_packets,
                 "next_hop_total_queue_capacity": node_queue_capacity,
+                "decision_context": "directional_isl_state",
             })
 
     color_summary_rows = [{
@@ -919,7 +1034,8 @@ def _write_traffic_light_diagnostics(
         "qor_red_count": qor_color_counts[TrafficLightColor.RED],
         "tqor_yellow_count": tqor_color_counts[TrafficLightColor.YELLOW],
         "tqor_red_count": tqor_color_counts[TrafficLightColor.RED],
-        "tqor_upgrade_count": tqor_upgrade_count,
+        "tqor_escalated_count": tqor_upgrade_count,
+        "total_colored_links": sum(final_color_counts.values()),
     }]
 
     decision_counts = Counter(row["selected_route_type"] for row in decision_rows)
@@ -955,20 +1071,31 @@ def _write_traffic_light_diagnostics(
         "br_selected_count": decision_counts["BR"],
         "sbr_selected_count": decision_counts["SBR"],
         "fallback_count": decision_counts["FALLBACK"],
+        "no_route_count": decision_counts["NO_ROUTE"],
         "yellow_count": br_color_counts[TrafficLightColor.YELLOW],
         "red_count": br_color_counts[TrafficLightColor.RED],
         "green_count": br_color_counts[TrafficLightColor.GREEN],
         "sbr_due_to_yellow_count": reason_counts["sbr_due_to_yellow"],
         "sbr_due_to_red_count": reason_counts["sbr_due_to_red"],
-        "fallback_due_to_no_sbr_count": reason_counts["fallback_no_sbr"],
-        "no_admissible_sbr_count": reason_counts["br_no_admissible_sbr"],
+        "fallback_due_to_no_sbr_count": (
+            reason_counts["br_no_admissible_sbr"]
+            + reason_counts["no_alternative_candidate"]
+            + reason_counts["sbr_not_available"]
+        ),
+        "fallback_due_to_sbr_red_count": (
+            reason_counts["br_yellow_sbr_red"]
+            + reason_counts["br_both_red"]
+        ),
+        "fallback_due_to_stretch_count": reason_counts["sbr_stretch_too_high"],
+        "no_admissible_sbr_count": (
+            reason_counts["br_no_admissible_sbr"]
+            + reason_counts["no_alternative_candidate"]
+            + reason_counts["sbr_not_available"]
+            + reason_counts["sbr_stretch_too_high"]
+        ),
         "decision_detail_total_count": len(decision_rows),
         "decision_detail_written_count": len(written_decision_rows),
     }]
-    reason_summary_rows = [
-        {"time_ns": time_ns, "decision_reason": reason, "count": count}
-        for reason, count in sorted(reason_counts.items())
-    ]
 
     _write_csv_rows(
         os.path.join(output_dir, "lhtr_traffic_light_color_summary.csv"),
@@ -982,7 +1109,7 @@ def _write_traffic_light_diagnostics(
             "time_ns", "current_node", "next_hop", "dst", "pid", "link_key",
             "qor", "tqor", "qor_color", "tqor_color", "final_color",
             "queue_packets", "queue_capacity", "next_hop_total_queue_packets",
-            "next_hop_total_queue_capacity",
+            "next_hop_total_queue_capacity", "decision_context",
         ],
         sample_rows,
         reset,
@@ -999,9 +1126,13 @@ def _write_traffic_light_diagnostics(
         "selected_applied_traffic_light_penalty", "br_decision_score",
         "sbr_decision_score", "selected_decision_score", "br_hop_count",
         "sbr_hop_count", "path_stretch",
-        "decision_reason", "br_border_u", "br_border_v", "sbr_border_u",
+        "decision_reason", "br_path", "sbr_path", "selected_path",
+        "path_scope", "br_contains_target_corridor",
+        "sbr_contains_target_corridor", "selected_contains_target_corridor",
+        "br_border_u", "br_border_v", "sbr_border_u",
         "sbr_border_v", "selected_border_u", "selected_border_v",
-        "installed_next_hop", "selected_applied", "diagnostic_sampled",
+        "installed_next_hop", "selected_applied", "fstate_consistency_notes",
+        "diagnostic_sampled",
     ]
     _write_csv_rows(
         os.path.join(output_dir, "lhtr_br_sbr_decision_log.csv"),
@@ -1015,10 +1146,34 @@ def _write_traffic_light_diagnostics(
         br_sbr_summary_rows,
         reset,
     )
-    _write_csv_rows(
+    consistency_rows = [
+        {
+            "time_ns": row["time_ns"],
+            "src": row["src"],
+            "dst": row["dst"],
+            "current_node": row["current_node"],
+            "case_type": row["case_type"],
+            "selected_route_type": row["selected_route_type"],
+            "selected_next_hop": row["selected_next_hop"],
+            "fstate_next_hop": row["installed_next_hop"],
+            "match": row["selected_applied"],
+            "notes": row["fstate_consistency_notes"],
+        }
+        for row in written_decision_rows
+    ]
+    _update_cumulative_reason_summary(
         os.path.join(output_dir, "lhtr_decision_reason_summary.csv"),
-        ["time_ns", "decision_reason", "count"],
-        reason_summary_rows,
+        reason_counts,
+        reset,
+    )
+    _write_csv_rows(
+        os.path.join(output_dir, "lhtr_fstate_decision_consistency.csv"),
+        [
+            "time_ns", "src", "dst", "current_node", "case_type",
+            "selected_route_type", "selected_next_hop", "fstate_next_hop",
+            "match", "notes",
+        ],
+        consistency_rows,
         reset,
     )
 
@@ -1927,6 +2082,7 @@ class BorderSelector:
                     ref_node=ref_node,
                     dst_sat=dst_sat,
                     scoring_mode=scoring_mode,
+                    path=(u, v),
                 )
             )
 
@@ -2103,6 +2259,29 @@ def _ensure_intra_group_routing_cache(target: int,
         }
 
 
+def _reconstruct_cached_path(
+        src: int,
+        target: int,
+        next_hop_map: Optional[Dict[int, int]]) -> Tuple[int, ...]:
+    """Reconstruct a cached local path without changing routing decisions."""
+    if src == target:
+        return (src,)
+    if not next_hop_map:
+        return ()
+
+    path = [src]
+    seen = {src}
+    current = src
+    while current != target:
+        next_hop = next_hop_map.get(current)
+        if next_hop is None or next_hop in seen:
+            return ()
+        path.append(next_hop)
+        seen.add(next_hop)
+        current = next_hop
+    return tuple(path)
+
+
 def _build_intra_pid_next_hop_candidates(src: int,
                                          target: int,
                                          pid: int,
@@ -2180,6 +2359,10 @@ def _build_intra_pid_next_hop_candidates(src: int,
     candidate_neighbors = sorted(candidate_neighbors, key=lambda neighbor: (dist_map[neighbor], neighbor))
 
     candidates: List[NextHopCandidate] = []
+    next_hop_map = (
+        intra_tree_cache.get((target, pid), {})
+        if intra_tree_cache is not None else {}
+    )
     for neighbor in candidate_neighbors:
         edge_data = G_sat.get_edge_data(src, neighbor, default={}) or {}
         edge_weight = float(edge_data.get('weight', 1.0))
@@ -2188,6 +2371,10 @@ def _build_intra_pid_next_hop_candidates(src: int,
         decision_score = _traffic_light_decision_score(path_cost, final_color)
         link_qor = traffic_light_state.link_qor.get((src, neighbor), 0.0) if traffic_light_state else 0.0
         queue_pkts = traffic_light_state.link_queue_packets.get((src, neighbor), 0) if traffic_light_state else 0
+        candidate_path: Tuple[int, ...] = ()
+        if ENABLE_TRAFFIC_LIGHT_DIAGNOSTICS:
+            suffix = _reconstruct_cached_path(neighbor, target, next_hop_map)
+            candidate_path = (src,) + suffix if suffix else (src, neighbor)
         candidates.append(
             NextHopCandidate(
                 next_hop=neighbor,
@@ -2197,6 +2384,7 @@ def _build_intra_pid_next_hop_candidates(src: int,
                 link_qor=link_qor,
                 queue_packets=queue_pkts,
                 route_kind=route_kind,
+                path=candidate_path,
             )
         )
 
@@ -2862,6 +3050,13 @@ def build_fstate_lhtr(
                     sbr_candidate,
                     actual_selected_next_hop=next_hop,
                     fallback_reason=fallback_reason,
+                    sbr_unavailable_reason=_diagnose_sbr_unavailable(
+                        intra_candidates,
+                        br_candidate,
+                    ) if (
+                        decision_diagnostics is not None
+                        and sbr_candidate is None
+                    ) else None,
                 )
                 
                 # ISL驗證
@@ -2882,6 +3077,19 @@ def build_fstate_lhtr(
             next_pid = prev.get(src_pid)
             
             if next_pid is None:
+                _record_br_sbr_diagnostic(
+                    decision_diagnostics,
+                    diagnostics_time_ns,
+                    u,
+                    dst_node,
+                    u,
+                    src_pid,
+                    "cross_pid_group_path",
+                    None,
+                    None,
+                    None,
+                    fallback_reason="no_valid_route_next_pid",
+                )
                 _record_missing(u, dst_node, "next_pid_none")
                 continue
             
@@ -2942,6 +3150,13 @@ def build_fstate_lhtr(
                     "fallback_no_border_candidate"
                     if selected_border is None else None
                 ),
+                sbr_unavailable_reason=_diagnose_sbr_unavailable(
+                    border_candidates,
+                    br_border,
+                ) if (
+                    decision_diagnostics is not None
+                    and sbr_border is None
+                ) else None,
             )
 
             _debug_border_selection_decision(
@@ -3100,6 +3315,13 @@ def build_fstate_lhtr(
                 sbr_candidate,
                 actual_selected_next_hop=next_hop,
                 fallback_reason=fallback_reason,
+                sbr_unavailable_reason=_diagnose_sbr_unavailable(
+                    intra_candidates,
+                    br_candidate,
+                ) if (
+                    decision_diagnostics is not None
+                    and sbr_candidate is None
+                ) else None,
             )
             
             # ISL驗證
@@ -3194,10 +3416,25 @@ def build_fstate_lhtr(
             installed = fstate.get((row["current_node"], row["dst"]))
             installed_next_hop = installed[0] if installed is not None else None
             row["installed_next_hop"] = installed_next_hop
-            if row["case_type"].endswith("_next_hop"):
+            if row["selected_route_type"] == "NO_ROUTE":
+                row["selected_applied"] = installed_next_hop in (None, -1)
+                row["fstate_consistency_notes"] = "no_route_drop_check"
+            elif row["case_type"].endswith("_next_hop"):
                 row["selected_applied"] = (
                     installed_next_hop == row["selected_next_hop"]
                 )
+                row["fstate_consistency_notes"] = "exact_next_hop_check"
+            elif row["case_type"] == "cross_pid_border_pair":
+                if row["current_node"] == row["selected_border_u"]:
+                    row["selected_applied"] = (
+                        installed_next_hop == row["selected_border_v"]
+                    )
+                    row["fstate_consistency_notes"] = "exact_border_isl_check"
+                else:
+                    row["selected_applied"] = ""
+                    row["fstate_consistency_notes"] = (
+                        "border_pair_is_a_hierarchical_target_not_an_immediate_next_hop"
+                    )
 
     return fstate, dst_sat_map, src_sat_map, dict(reason), dict(Counter(missing_reason.values()))
 
@@ -3588,14 +3825,23 @@ def algorithm_lhtr(
     # （第二次 _break_2cycles 已移除：HOLDOVER 加入的 entry 均通過 has_edge 驗證，
     #  幾乎不會製造新的 2-cycle；第一次在 build_fstate_lhtr 結尾已清理主流程產生的 cycle。）
 
-    _write_traffic_light_diagnostics(
-        output_dynamic_state_dir,
-        time_since_epoch_ns,
-        sat_net_graph_only_satellites_with_isls,
-        sat_to_pid,
-        traffic_light_state,
-        decision_diagnostics or [],
-    )
+    if ENABLE_TRAFFIC_LIGHT_DIAGNOSTICS:
+        diagnostics_output_dir = _resolve_lhtr_diagnostics_dir(
+            output_dynamic_state_dir
+        )
+        _write_traffic_light_diagnostics(
+            diagnostics_output_dir,
+            time_since_epoch_ns,
+            sat_net_graph_only_satellites_with_isls,
+            sat_to_pid,
+            traffic_light_state,
+            decision_diagnostics or [],
+        )
+        if enable_verbose_logs and time_since_epoch_ns == 0:
+            print(
+                "  > [LHTR-DIAGNOSTICS] Writing CSVs under %s"
+                % diagnostics_output_dir
+            )
 
     # 寫入 fstate
     output_filename = output_dynamic_state_dir + "/fstate_" + str(time_since_epoch_ns) + ".txt"

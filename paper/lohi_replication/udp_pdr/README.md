@@ -40,6 +40,7 @@ runs/<run_name>/<algorithm>/
   udp_burst_schedule.csv
   run_metadata.json
   dynamic_state/
+  lhtr_diagnostics/  # algorithm_lhtr only, when explicitly enabled
   logs_ns3/
   queue_stats/
   prev_output_cache/
@@ -563,6 +564,65 @@ and after fallback, and the added target/non-focus load estimates. The
 `flow_selection_hash` identifies the selected pair set independent of
 simulation duration; `selection_input_hash` identifies the selector settings
 and sampled baseline timestamps.
+
+## LHTR Traffic-Light Diagnostics
+
+LHTR diagnostics are disabled by default. Enable them for an LHTR run with:
+
+```bash
+LHTR_ENABLE_DIAGNOSTICS=1 python step_2_run.py <the usual run arguments>
+```
+
+The optional `LHTR_DIAGNOSTICS_DIR` variable changes the run-local relative
+directory. Its default is `lhtr_diagnostics`, producing:
+
+```text
+runs/<run_name>/algorithm_lhtr/lhtr_diagnostics/
+  lhtr_qor_tqor_samples.csv
+  lhtr_traffic_light_color_summary.csv
+  lhtr_br_sbr_decision_log.csv
+  lhtr_br_sbr_summary.csv
+  lhtr_decision_reason_summary.csv
+  lhtr_fstate_decision_consistency.csv
+```
+
+`lhtr_qor_tqor_samples.csv` records each directional ISL's QOR, its next-hop
+satellite TQOR, and the resulting maximum-severity color. QOR is the current
+outgoing direction's queue occupancy divided by its configured packet-buffer
+capacity. TQOR is **Total Queue Occupancy Rate**: the sum of all outgoing
+queue packets at the next-hop satellite divided by that satellite's total
+outgoing packet-buffer capacity (`degree * buffer size`). TQOR is not a
+temporal occupancy metric.
+
+`lhtr_traffic_light_color_summary.csv` gives GREEN/YELLOW/RED counts per
+routing snapshot and reports how often TQOR escalated the QOR-only color.
+`lhtr_br_sbr_decision_log.csv` records BR, SBR, selected route type, colors,
+costs, path stretch, decision reason, available candidate path information,
+and the installed fstate next hop. Local candidate paths are reconstructed
+within the current PID. Border-pair paths currently contain only the selected
+inter-PID border ISL, so target-corridor intersection fields remain `unknown`
+until a post-processing step joins them with the scenario corridor data.
+
+`lhtr_br_sbr_summary.csv` aggregates BR/SBR/fallback/no-route usage by
+snapshot. `lhtr_decision_reason_summary.csv` aggregates reasons over the whole
+run. `lhtr_fstate_decision_consistency.csv` performs exact selected-next-hop
+checks for local decisions and for border decisions made while already at the
+selected border; conceptual border targets are explicitly marked as not
+directly comparable to an immediate fstate next hop.
+
+Step 3 copies the four compact summary/consistency tables into:
+
+```text
+runs/<run_name>/comparison_packet_delivery/diagnostics/
+```
+
+It does not copy the potentially large per-link and per-decision raw tables.
+Missing diagnostics are accepted and produce empty summary tables with stable
+headers. When diagnostics are disabled, `algorithm_lhtr/lhtr_diagnostics/`
+and its raw CSV files are not created.
+
+These outputs are diagnostics only. Enabling them does not change LHTR's
+routing policy, traffic-light thresholds, BR/SBR selector, or delay cost.
 
 Core plots:
 

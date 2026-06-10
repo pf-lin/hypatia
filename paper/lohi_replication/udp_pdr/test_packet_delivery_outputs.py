@@ -23,6 +23,14 @@ class PacketDeliveryOutputsTest(unittest.TestCase):
             os.path.join(comparison_dir, "diagnostics", "physical_link_drops.csv"),
         )
         self.assertEqual(
+            output_path(comparison_dir, "lhtr_br_sbr_summary.csv"),
+            os.path.join(
+                comparison_dir,
+                "diagnostics",
+                "lhtr_br_sbr_summary.csv",
+            ),
+        )
+        self.assertEqual(
             output_path(comparison_dir, "link_drops.csv"),
             os.path.join(comparison_dir, "legacy", "link_drops.csv"),
         )
