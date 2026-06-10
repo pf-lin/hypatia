@@ -52,9 +52,12 @@ runs/<run_name>/<algorithm>/
 Runs only the two focus flows:
 
 ```text
-738 -> 793
-793 -> 738
+src_node_id -> dst_node_id
+dst_node_id -> src_node_id
 ```
+
+The default is `738 <-> 793`. Use `--src-node-id` and `--dst-node-id` to
+select another top-100 ground-station pair.
 
 `core_hotspot_specific`
 
@@ -123,6 +126,64 @@ stability. If explicit duration-dependent sampling is desired, pass
 Runs focus flows plus random endpoint traffic. This is intended for robustness
 checks rather than a controlled hotspot.
 
+## Focus Pair Configuration
+
+The legacy default focus pair remains:
+
+```text
+738 <-> 793
+Rio-de-Janeiro <-> Sankt-Peterburg-(Saint-Petersburg)
+```
+
+Step 1, step 2, and step 3 all accept:
+
+```bash
+--src-node-id 754 --dst-node-id 785
+```
+
+Both values must be different OneWeb top-100 ground-station node IDs in the
+inclusive range `720-819`. The reciprocal focus flows are generated
+automatically, so the example schedules both `754 -> 785` and `785 -> 754`.
+
+New run names include the ordered focus-pair tag:
+
+```text
+run_core_isl_hotspot_specific_src754_dst785_load_1p4x_bg_flow_count_24_oneweb_isls_moving_udp_pdr
+```
+
+This prevents different focus-pair experiments from overwriting one another.
+Step 2 and step 3 can still read old untagged run folders for the default
+`738 <-> 793` pair when no tagged folder exists. Custom pairs never fall back
+to an untagged folder. Cross-load and cross-background-count comparison plots
+are also written under a `srcXXX_dstYYY` subdirectory.
+
+The recommended main controlled-ISL pair is:
+
+```text
+754 <-> 785
+Johannesburg <-> Kitakyushu-Fukuoka-M.M.A.
+```
+
+Start with `load=1.4`, `background-flow-count=24`,
+`per-flow-rate-reference-background-flow-count=4`, and a 10 s smoke
+generation (`traffic-stop-time-s=8`). Follow with a 60 s sanity run only after
+the selection diagnostics are clean. Do not start with a 200 s formal run.
+
+Use `--dry-run` to execute focus-pair validation and background-flow selection
+without creating or overwriting a formal run directory and without launching
+NS-3. The terminal summary reports the planned tagged run name, selected flow
+count, strict/fallback counts, zero-overlap count, target/non-focus load ratio,
+maximum endpoint and satellite-interface ratios, and selection hashes.
+
+The generated `run_metadata.json`, `config_ns3.properties`,
+`udp_burst_schedule.csv` metadata, `schedule_summary.csv`, and all
+flow-selection diagnostic CSVs record the focus node IDs, names when
+available, `focus_pair_tag`, and reciprocal direction count.
+
+Only one focus pair can be selected per command invocation. Multi-pair list or
+CSV sweep syntax is not currently implemented; invoke the command once per
+pair. Tagged run names keep those invocations isolated.
+
 ## Load Mapping
 
 For `focus_only` and `random_general`, the legacy mapping is still:
@@ -146,7 +207,7 @@ scheduled_total_offered_rate_mbps = per_flow_rate_mbps * generated_flow_count
 The default reference background-flow count is `4`, so `--background-flow-count
 4 8 16 32 64` increases total scheduled traffic while leaving each flow's
 target rate unchanged. The generated run folder includes the count, e.g.
-`run_core_isl_hotspot_specific_load_1p2x_bg_flow_count_16_oneweb_isls_moving_udp_pdr`.
+`run_core_isl_hotspot_specific_src738_dst793_load_1p2x_bg_flow_count_16_oneweb_isls_moving_udp_pdr`.
 
 ## Traffic Timing and Drain Time
 
@@ -242,27 +303,29 @@ Small syntax/smoke generation check without running NS-3:
 ```bash
 python step_1_generate_runs.py \
   --traffic-mode core_isl_hotspot_specific \
-  --load-level 1.2 \
+  --src-node-id 754 \
+  --dst-node-id 785 \
+  --load-level 1.4 \
   --simulation-end-time-s 10 \
   --traffic-stop-time-s 8 \
-  --background-flow-count 4 \
-  --algorithms algorithm_free_one_only_over_isls algorithm_queue_aware_over_isls algorithm_lohi algorithm_lhtr \
-  --endpoint-load-cap-ratio 0.8 \
-  --max-background-flows-per-dst 1 \
-  --max-background-flows-per-src 1 \
+  --background-flow-count 24 \
+  --per-flow-rate-reference-background-flow-count 4 \
+  --algorithms algorithm_free_one_only_over_isls \
   --dry-run
 ```
 
-Generate short 10 s smoke runs for a background-flow-count sweep without
-launching NS-3:
+Generate the recommended short 10 s focus-pair run without launching NS-3:
 
 ```bash
 python step_1_generate_runs.py \
   --traffic-mode core_isl_hotspot_specific \
-  --load-level 1.2 \
+  --src-node-id 754 \
+  --dst-node-id 785 \
+  --load-level 1.4 \
   --simulation-end-time-s 10 \
   --traffic-stop-time-s 8 \
-  --background-flow-count 4 8 16 \
+  --background-flow-count 24 \
+  --per-flow-rate-reference-background-flow-count 4 \
   --algorithms algorithm_free_one_only_over_isls algorithm_queue_aware_over_isls algorithm_lohi algorithm_lhtr \
   --force
 ```
@@ -272,18 +335,24 @@ Then run and analyze that smoke case:
 ```bash
 python step_2_run.py \
   --traffic-mode core_isl_hotspot_specific \
-  --load-level 1.2 \
+  --src-node-id 754 \
+  --dst-node-id 785 \
+  --load-level 1.4 \
   --simulation-end-time-s 10 \
   --traffic-stop-time-s 8 \
-  --background-flow-count 4 \
+  --background-flow-count 24 \
+  --per-flow-rate-reference-background-flow-count 4 \
   --algorithms algorithm_free_one_only_over_isls algorithm_queue_aware_over_isls algorithm_lohi algorithm_lhtr
 
 python step_3_generate_plots.py \
   --traffic-mode core_isl_hotspot_specific \
-  --load-level 1.2 \
+  --src-node-id 754 \
+  --dst-node-id 785 \
+  --load-level 1.4 \
   --simulation-end-time-s 10 \
   --traffic-stop-time-s 8 \
-  --background-flow-count 4 \
+  --background-flow-count 24 \
+  --per-flow-rate-reference-background-flow-count 4 \
   --algorithms algorithm_free_one_only_over_isls algorithm_queue_aware_over_isls algorithm_lohi algorithm_lhtr
 ```
 

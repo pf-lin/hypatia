@@ -1,4 +1,5 @@
 import argparse
+import csv
 import os
 
 
@@ -84,6 +85,85 @@ def satellite_network_dir():
         "gen_data",
         full_satellite_network_isls,
     )
+
+
+def ground_station_info_by_node_id():
+    path = os.path.join(satellite_network_dir(), "ground_stations.txt")
+    result = {}
+    with open(path, newline="") as f_in:
+        for row in csv.reader(f_in):
+            if not row:
+                continue
+            ground_station_id = int(row[0])
+            node_id = satellite_count + ground_station_id
+            result[node_id] = {
+                "node_id": node_id,
+                "ground_station_id": ground_station_id,
+                "name": row[1],
+                "latitude_degrees": float(row[2]),
+                "longitude_degrees": float(row[3]),
+            }
+    return result
+
+
+def validate_focus_pair(src_node_id, dst_node_id):
+    src_node_id = int(src_node_id)
+    dst_node_id = int(dst_node_id)
+    valid_min = min(endpoint_node_ids)
+    valid_max = max(endpoint_node_ids)
+    if src_node_id == dst_node_id:
+        raise ValueError(
+            "Focus source and destination must differ "
+            "(got src_node_id=%d, dst_node_id=%d)."
+            % (src_node_id, dst_node_id)
+        )
+    invalid = [
+        node_id
+        for node_id in (src_node_id, dst_node_id)
+        if node_id not in endpoint_node_ids
+    ]
+    if invalid:
+        raise ValueError(
+            "Focus node IDs must be OneWeb top-100 ground-station node IDs "
+            "in the inclusive range %d-%d; invalid value(s): %s."
+            % (
+                valid_min,
+                valid_max,
+                ", ".join(str(node_id) for node_id in invalid),
+            )
+        )
+    return src_node_id, dst_node_id
+
+
+def validate_focus_pair_arguments(parser, args):
+    try:
+        validate_focus_pair(args.src_node_id, args.dst_node_id)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+
+def focus_pair_tag_for(src_node_id, dst_node_id):
+    src_node_id, dst_node_id = validate_focus_pair(src_node_id, dst_node_id)
+    return "src%d_dst%d" % (src_node_id, dst_node_id)
+
+
+def focus_pair_metadata(src_node_id, dst_node_id):
+    src_node_id, dst_node_id = validate_focus_pair(src_node_id, dst_node_id)
+    ground_stations = ground_station_info_by_node_id()
+    return {
+        "focus_src_node_id": src_node_id,
+        "focus_dst_node_id": dst_node_id,
+        "focus_src_name_if_available": ground_stations.get(src_node_id, {}).get(
+            "name",
+            "",
+        ),
+        "focus_dst_name_if_available": ground_stations.get(dst_node_id, {}).get(
+            "name",
+            "",
+        ),
+        "focus_pair_tag": focus_pair_tag_for(src_node_id, dst_node_id),
+        "focus_flow_direction_count": 2,
+    }
 
 
 def load_level_to_tag(load_level):
@@ -198,6 +278,27 @@ def add_algorithms_argument(parser):
         nargs="+",
         default=None,
         help="Routing algorithms to run. Default: %s" % " ".join(default_algorithms),
+    )
+
+
+def add_focus_pair_arguments(parser):
+    parser.add_argument(
+        "--src-node-id",
+        type=int,
+        default=focus_src_node_id,
+        help=(
+            "Focus-flow source ground-station node ID. The reciprocal direction "
+            "is generated automatically. Default: %d"
+        ) % focus_src_node_id,
+    )
+    parser.add_argument(
+        "--dst-node-id",
+        type=int,
+        default=focus_dst_node_id,
+        help=(
+            "Focus-flow destination ground-station node ID. The reciprocal "
+            "direction is generated automatically. Default: %d"
+        ) % focus_dst_node_id,
     )
 
 
@@ -347,6 +448,7 @@ def add_common_run_arguments(parser):
     add_traffic_mode_argument(parser)
     add_load_level_argument(parser)
     add_algorithms_argument(parser)
+    add_focus_pair_arguments(parser)
     add_runtime_override_arguments(parser)
 
 
@@ -401,7 +503,7 @@ def describe_selection(args):
     return selected_traffic_mode, selected_traffic_modes, selected_load_levels, selected_algorithms
 
 
-def run_name_for(traffic_mode, load_level, background_flow_count=None):
+def legacy_run_name_for(traffic_mode, load_level, background_flow_count=None):
     bg_tag = ""
     if background_flow_count is not None:
         bg_tag = "_bg_flow_count_%d" % int(background_flow_count)
@@ -410,6 +512,40 @@ def run_name_for(traffic_mode, load_level, background_flow_count=None):
         load_level_to_tag(load_level),
         bg_tag,
     )
+
+
+def run_name_for(
+    traffic_mode,
+    load_level,
+    background_flow_count=None,
+    src_node_id=focus_src_node_id,
+    dst_node_id=focus_dst_node_id,
+):
+    bg_tag = ""
+    if background_flow_count is not None:
+        bg_tag = "_bg_flow_count_%d" % int(background_flow_count)
+    return "run_%s_%s_load_%s%s_oneweb_isls_moving_udp_pdr" % (
+        traffic_mode,
+        focus_pair_tag_for(src_node_id, dst_node_id),
+        load_level_to_tag(load_level),
+        bg_tag,
+    )
+
+
+def resolve_existing_run(run, runs_root="runs"):
+    if os.path.isdir(os.path.join(runs_root, run["name"])):
+        return run
+    if (
+        run["src_node_id"] == focus_src_node_id
+        and run["dst_node_id"] == focus_dst_node_id
+        and os.path.isdir(os.path.join(runs_root, run["legacy_name"]))
+    ):
+        resolved = dict(run)
+        resolved["requested_name"] = run["name"]
+        resolved["name"] = run["legacy_name"]
+        resolved["using_legacy_run_name"] = True
+        return resolved
+    return run
 
 
 def get_udp_pdr_run_list(
@@ -432,6 +568,8 @@ def get_udp_pdr_run_list(
     min_overlap_ratio_override=None,
     selection_sample_horizon_s_override=None,
     selection_sample_times_s_override=None,
+    src_node_id_override=focus_src_node_id,
+    dst_node_id_override=focus_dst_node_id,
 ):
     load_levels = parse_load_levels(load_levels)
     algorithms = normalize_algorithms(algorithms)
@@ -512,6 +650,11 @@ def get_udp_pdr_run_list(
             float(value)
             for value in selection_sample_times_s_override
         ]
+    src_node_id, dst_node_id = validate_focus_pair(
+        src_node_id_override,
+        dst_node_id_override,
+    )
+    focus_metadata = focus_pair_metadata(src_node_id, dst_node_id)
 
     if sim_end_s <= 0:
         raise ValueError("simulation_end_time_s must be positive")
@@ -581,12 +724,20 @@ def get_udp_pdr_run_list(
             )
             for load_level in load_levels:
                 for algorithm in algorithms:
+                    legacy_name = legacy_run_name_for(
+                        traffic_mode,
+                        load_level,
+                        name_background_flow_count,
+                    )
                     run_list.append({
                         "name": run_name_for(
                             traffic_mode,
                             load_level,
                             name_background_flow_count,
+                            src_node_id,
+                            dst_node_id,
                         ),
+                        "legacy_name": legacy_name,
                         "traffic_mode": traffic_mode,
                         "movement": "moving",
                         "satellite_network": full_satellite_network_isls,
@@ -625,8 +776,9 @@ def get_udp_pdr_run_list(
                         "isl_utilization_tracking_interval_ns": isl_utilization_tracking_interval_ns,
                         "enable_link_queue_tracking": enable_link_queue_tracking,
                         "enable_physical_link_drop_tracking": enable_physical_link_drop_tracking,
-                        "src_node_id": focus_src_node_id,
-                        "dst_node_id": focus_dst_node_id,
+                        "src_node_id": src_node_id,
+                        "dst_node_id": dst_node_id,
+                        **focus_metadata,
                         "packet_trace_flow_count": default_packet_trace_flow_count,
                     })
     return run_list

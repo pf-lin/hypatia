@@ -8,7 +8,13 @@ from itertools import combinations
 import pandas as pd
 
 sys.path.append(os.path.join(os.path.dirname(__file__)))
-from dynamic_run_list import build_arg_parser, describe_selection, focus_dst_node_id, focus_src_node_id, get_udp_pdr_run_list
+from dynamic_run_list import (
+    build_arg_parser,
+    describe_selection,
+    get_udp_pdr_run_list,
+    resolve_existing_run,
+    validate_focus_pair_arguments,
+)
 from loss_attribution_v3 import (
     FLOW_PATH_TIMELINE_COLUMNS,
     LOSS_ATTRIBUTION_BREAKDOWN_V3_COLUMNS,
@@ -637,7 +643,7 @@ def read_udp_burst_csv(path, incoming=False):
     ]})
 
 
-def build_udp_flows_csv(algorithm_run_dir):
+def build_udp_flows_csv(algorithm_run_dir, run):
     logs_dir = os.path.join(algorithm_run_dir, "logs_ns3")
     outgoing_path = os.path.join(logs_dir, "udp_bursts_outgoing.csv")
     incoming_path = os.path.join(logs_dir, "udp_bursts_incoming.csv")
@@ -677,8 +683,8 @@ def build_udp_flows_csv(algorithm_run_dir):
         if not flow_class:
             pair = (int(row["src"]), int(row["dst"]))
             flow_class = "focus" if pair in {
-                (focus_src_node_id, focus_dst_node_id),
-                (focus_dst_node_id, focus_src_node_id),
+                (run["src_node_id"], run["dst_node_id"]),
+                (run["dst_node_id"], run["src_node_id"]),
             } else "background"
         rows.append({
             "flow_id": int(row["flow_id"]),
@@ -732,6 +738,18 @@ def summarize_algorithm(run, algorithm, flows):
     pdr_values = flows["pdr"]
     summary = {
         "run_name": run["name"],
+        "focus_src_node_id": run["src_node_id"],
+        "focus_dst_node_id": run["dst_node_id"],
+        "focus_src_name_if_available": run.get(
+            "focus_src_name_if_available",
+            "",
+        ),
+        "focus_dst_name_if_available": run.get(
+            "focus_dst_name_if_available",
+            "",
+        ),
+        "focus_pair_tag": run["focus_pair_tag"],
+        "focus_flow_direction_count": run["focus_flow_direction_count"],
         "traffic_mode": run["traffic_mode"],
         "load_level": run["load_level"],
         "background_flow_count": run["background_flow_count"],
@@ -1573,6 +1591,21 @@ def write_loss_diagnostics(
     with open(path, "w") as f_out:
         f_out.write("UDP/PDR Loss Attribution Diagnostics\n")
         f_out.write("=" * 40 + "\n\n")
+        f_out.write("focus_src_node_id = %d\n" % run["src_node_id"])
+        f_out.write("focus_dst_node_id = %d\n" % run["dst_node_id"])
+        f_out.write(
+            "focus_src_name_if_available = %s\n"
+            % run.get("focus_src_name_if_available", "")
+        )
+        f_out.write(
+            "focus_dst_name_if_available = %s\n"
+            % run.get("focus_dst_name_if_available", "")
+        )
+        f_out.write("focus_pair_tag = %s\n" % run["focus_pair_tag"])
+        f_out.write(
+            "focus_flow_direction_count = %d\n\n"
+            % run["focus_flow_direction_count"]
+        )
 
         f_out.write("How to read this report\n")
         f_out.write("-" * 40 + "\n")
@@ -2016,6 +2049,16 @@ def write_statistics(
     with open(path, "w") as f_out:
         f_out.write("UDP/PDR Packet Delivery Statistics\n")
         f_out.write("=" * 40 + "\n\n")
+        f_out.write(
+            "Focus pair: %d (%s) <-> %d (%s) [%s]\n\n"
+            % (
+                run["src_node_id"],
+                run.get("focus_src_name_if_available", ""),
+                run["dst_node_id"],
+                run.get("focus_dst_name_if_available", ""),
+                run["focus_pair_tag"],
+            )
+        )
 
         f_out.write("Run timing\n")
         f_out.write("-" * 40 + "\n")
@@ -2230,7 +2273,7 @@ def analyze_run(
             or ipv4_l3_drop_trace_available(algorithm_run_dir)
         )
 
-        flows, udp_flows_path = build_udp_flows_csv(algorithm_run_dir)
+        flows, udp_flows_path = build_udp_flows_csv(algorithm_run_dir, run)
         print("  > Wrote %s" % udp_flows_path)
 
         flows.insert(0, "algorithm", algorithm)
@@ -2242,6 +2285,9 @@ def analyze_run(
         )
         flows.insert(0, "load_level", run["load_level"])
         flows.insert(0, "traffic_mode", run["traffic_mode"])
+        flows.insert(0, "focus_pair_tag", run["focus_pair_tag"])
+        flows.insert(0, "focus_dst_node_id", run["dst_node_id"])
+        flows.insert(0, "focus_src_node_id", run["src_node_id"])
         flows.insert(0, "run_name", run["name"])
         for key, value in run_timing_fields(run).items():
             flows[key] = value
@@ -2254,6 +2300,9 @@ def analyze_run(
         if len(focus):
             focus_rows.append(focus[[
                 "run_name",
+                "focus_src_node_id",
+                "focus_dst_node_id",
+                "focus_pair_tag",
                 "background_flow_count",
                 "per_flow_rate_reference_background_flow_count",
                 "algorithm",
@@ -2568,6 +2617,7 @@ def analyze_run(
 def main():
     parser = build_arg_parser("Analyze UDP/PDR packet delivery results.")
     args = parser.parse_args()
+    validate_focus_pair_arguments(parser, args)
     selected_mode, modes, load_levels, algorithms = describe_selection(args)
     runs = get_udp_pdr_run_list(
         selected_mode,
@@ -2589,10 +2639,13 @@ def main():
         args.min_overlap_ratio,
         args.selection_sample_horizon_s,
         args.selection_sample_times_s,
+        args.src_node_id,
+        args.dst_node_id,
     )
 
     seen_run_names = set()
     for run in runs:
+        run = resolve_existing_run(run)
         if run["name"] in seen_run_names:
             continue
         seen_run_names.add(run["name"])

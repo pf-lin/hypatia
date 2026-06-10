@@ -11,7 +11,13 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 sys.path.append(os.path.join(os.path.dirname(__file__)))
-from dynamic_run_list import build_arg_parser, describe_selection, get_udp_pdr_run_list
+from dynamic_run_list import (
+    build_arg_parser,
+    describe_selection,
+    get_udp_pdr_run_list,
+    resolve_existing_run,
+    validate_focus_pair_arguments,
+)
 from packet_delivery_outputs import (
     ensure_standard_layout,
     output_path,
@@ -672,7 +678,7 @@ def plot_single_run(
     print("  > Wrote plots under %s" % comparison_dir)
 
 
-def plot_across_loads(runs_root, run_names):
+def plot_across_loads(runs_root, run_names, focus_pair_tag=None):
     rows = []
     for run_name in run_names:
         summary_path = resolve_input_path(
@@ -691,6 +697,8 @@ def plot_across_loads(runs_root, run_names):
     if df["load_level"].nunique() <= 1:
         return
     output_dir = os.path.join(runs_root, "comparison_packet_delivery_across_loads")
+    if focus_pair_tag:
+        output_dir = os.path.join(output_dir, focus_pair_tag)
     os.makedirs(output_dir, exist_ok=True)
     plt.figure(figsize=(8, 5))
     label_columns = ["algorithm"]
@@ -725,7 +733,11 @@ def plot_across_loads(runs_root, run_names):
     print("  > Wrote cross-load plot under %s" % output_dir)
 
 
-def plot_across_background_flow_counts(runs_root, run_names):
+def plot_across_background_flow_counts(
+    runs_root,
+    run_names,
+    focus_pair_tag=None,
+):
     rows = []
     for run_name in run_names:
         summary_path = resolve_input_path(
@@ -748,6 +760,8 @@ def plot_across_background_flow_counts(runs_root, run_names):
         runs_root,
         "comparison_packet_delivery_across_background_flow_counts",
     )
+    if focus_pair_tag:
+        output_dir = os.path.join(output_dir, focus_pair_tag)
     os.makedirs(output_dir, exist_ok=True)
     df.to_csv(
         os.path.join(output_dir, "summary_across_background_flow_counts.csv"),
@@ -800,6 +814,7 @@ def plot_across_background_flow_counts(runs_root, run_names):
 def main():
     parser = build_arg_parser("Plot UDP/PDR packet delivery comparison.")
     args = parser.parse_args()
+    validate_focus_pair_arguments(parser, args)
     selected_mode, _, load_levels, algorithms = describe_selection(args)
     runs = get_udp_pdr_run_list(
         selected_mode,
@@ -821,10 +836,15 @@ def main():
         args.min_overlap_ratio,
         args.selection_sample_horizon_s,
         args.selection_sample_times_s,
+        args.src_node_id,
+        args.dst_node_id,
     )
     run_names = []
     seen = set()
+    focus_pair_tag = None
     for run in runs:
+        run = resolve_existing_run(run)
+        focus_pair_tag = run["focus_pair_tag"]
         if run["name"] in seen:
             continue
         seen.add(run["name"])
@@ -835,8 +855,8 @@ def main():
             output_layout=args.output_layout,
             write_legacy_outputs=args.write_legacy_outputs,
         )
-    plot_across_loads("runs", run_names)
-    plot_across_background_flow_counts("runs", run_names)
+    plot_across_loads("runs", run_names, focus_pair_tag)
+    plot_across_background_flow_counts("runs", run_names, focus_pair_tag)
 
 
 if __name__ == "__main__":

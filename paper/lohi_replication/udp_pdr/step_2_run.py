@@ -4,7 +4,13 @@ import subprocess
 import sys
 
 sys.path.append(os.path.join(os.path.dirname(__file__)))
-from dynamic_run_list import build_arg_parser, describe_selection, get_udp_pdr_run_list
+from dynamic_run_list import (
+    build_arg_parser,
+    describe_selection,
+    get_udp_pdr_run_list,
+    resolve_existing_run,
+    validate_focus_pair_arguments,
+)
 from calculate_routes import (
     generate_single_fstate,
     persist_algorithm_state,
@@ -95,6 +101,7 @@ def validate_run_dir(run_dir):
 def main():
     parser = build_arg_parser("Run UDP/PDR dynamic closed-loop NS-3 simulations.")
     args = parser.parse_args()
+    validate_focus_pair_arguments(parser, args)
     selected_mode, modes, load_levels, algorithms = describe_selection(args)
     print("Traffic mode selection: %s (%s)" % (selected_mode, ", ".join(modes)))
     print("Load levels: %s" % ", ".join("%.3f" % x for x in load_levels))
@@ -120,7 +127,15 @@ def main():
         args.min_overlap_ratio,
         args.selection_sample_horizon_s,
         args.selection_sample_times_s,
+        args.src_node_id,
+        args.dst_node_id,
     ):
+        run = resolve_existing_run(run)
+        if run.get("using_legacy_run_name"):
+            print(
+                "Using legacy untagged run folder for default focus pair: %s"
+                % run["name"]
+            )
         run_dir = os.path.join("runs", run["name"], run["dynamic_state_algorithm"])
         validate_run_dir(run_dir)
 

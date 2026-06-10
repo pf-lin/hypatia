@@ -18,11 +18,10 @@ from dynamic_run_list import (
     build_arg_parser,
     describe_selection,
     endpoint_node_ids,
-    focus_dst_node_id,
-    focus_src_node_id,
     get_udp_pdr_run_list,
     satellite_count,
     satellite_network_dir,
+    validate_focus_pair_arguments,
 )
 
 
@@ -101,6 +100,12 @@ def _render_config(run, udp_logging_ids):
                 "true" if run["enable_physical_link_drop_tracking"] else "false"
             ),
             "[UDP-BURST-LOGGING-SET]": logging_set,
+            "[FOCUS-SRC-NODE-ID]": run["src_node_id"],
+            "[FOCUS-DST-NODE-ID]": run["dst_node_id"],
+            "[FOCUS-SRC-NAME]": run["focus_src_name_if_available"],
+            "[FOCUS-DST-NAME]": run["focus_dst_name_if_available"],
+            "[FOCUS-PAIR-TAG]": run["focus_pair_tag"],
+            "[FOCUS-FLOW-DIRECTION-COUNT]": run["focus_flow_direction_count"],
         },
     )
 
@@ -337,8 +342,8 @@ def _generate_random_general_pairs(run):
             "focus"
             if (src, dst)
             in {
-                (focus_src_node_id, focus_dst_node_id),
-                (focus_dst_node_id, focus_src_node_id),
+                (run["src_node_id"], run["dst_node_id"]),
+                (run["dst_node_id"], run["src_node_id"]),
             }
             else "background"
         )
@@ -1733,6 +1738,7 @@ def _build_core_isl_diagnostics(run, context, selected, warnings, pairs):
         satellite_interface_rows,
     ]:
         for row in rows:
+            row.update(_focus_identity_fields(run))
             row["background_flow_count"] = run["background_flow_count"]
             row["per_flow_rate_mbps"] = per_flow_rate
 
@@ -1839,6 +1845,9 @@ def write_udp_schedule(run_dir, run, pairs):
                 % run["per_flow_rate_reference_background_flow_count"],
                 "traffic_stop_time_ns=%d" % run["traffic_stop_time_ns"],
                 "drain_time_ns=%d" % run["drain_time_ns"],
+                "focus_src_node_id=%d" % run["src_node_id"],
+                "focus_dst_node_id=%d" % run["dst_node_id"],
+                "focus_pair_tag=%s" % run["focus_pair_tag"],
             ]
             if pair.get("score") != "":
                 metadata_items.append("hotspot_score=%s" % pair["score"])
@@ -1884,6 +1893,7 @@ def write_run_metadata(run_dir, run, pairs, per_flow_rate):
     )
     metadata = {
         "run": run,
+        **_focus_identity_fields(run),
         "flow_count": len(pairs),
         "flow_count_by_class": dict(by_class),
         "per_flow_rate_mbps": per_flow_rate,
@@ -1963,6 +1973,7 @@ def write_schedule_summary(run_parent_dir, run, pairs, per_flow_rate):
     selection_input_hash = pairs[0].get("selection_input_hash", "") if pairs else ""
     rows = [{
         "run_name": run["name"],
+        **_focus_identity_fields(run),
         "traffic_mode": run["traffic_mode"],
         "load_level": run["load_level"],
         "background_flow_count": run["background_flow_count"],
@@ -1989,6 +2000,12 @@ def write_schedule_summary(run_parent_dir, run, pairs, per_flow_rate):
         rows,
         [
             "run_name",
+            "focus_src_node_id",
+            "focus_dst_node_id",
+            "focus_src_name_if_available",
+            "focus_dst_name_if_available",
+            "focus_pair_tag",
+            "focus_flow_direction_count",
             "traffic_mode",
             "load_level",
             "background_flow_count",
@@ -2017,13 +2034,38 @@ def _write_csv(path, rows, fieldnames):
             writer.writerow(row)
 
 
+def _focus_identity_fields(run):
+    return {
+        "focus_src_node_id": run["src_node_id"],
+        "focus_dst_node_id": run["dst_node_id"],
+        "focus_src_name_if_available": run.get(
+            "focus_src_name_if_available",
+            "",
+        ),
+        "focus_dst_name_if_available": run.get(
+            "focus_dst_name_if_available",
+            "",
+        ),
+        "focus_pair_tag": run["focus_pair_tag"],
+        "focus_flow_direction_count": run["focus_flow_direction_count"],
+    }
+
+
 def write_selection_diagnostics(run_parent_dir, diagnostics):
     if diagnostics is None:
         return []
     os.makedirs(run_parent_dir, exist_ok=True)
     written = []
+    focus_columns = [
+        "focus_src_node_id",
+        "focus_dst_node_id",
+        "focus_src_name_if_available",
+        "focus_dst_name_if_available",
+        "focus_pair_tag",
+        "focus_flow_direction_count",
+    ]
     schemas = {
-        "flow_selection_diagnostics.csv": [
+        "flow_selection_diagnostics.csv": focus_columns + [
             "background_flow_count",
             "per_flow_rate_mbps",
             "flow_selection_hash",
@@ -2065,7 +2107,7 @@ def write_selection_diagnostics(run_parent_dir, diagnostics):
             "candidate_rank_before_fallback",
             "candidate_rank_after_fallback",
         ],
-        "corridor_overlap_summary.csv": [
+        "corridor_overlap_summary.csv": focus_columns + [
             "background_flow_count",
             "per_flow_rate_mbps",
             "flow_selection_hash",
@@ -2088,7 +2130,7 @@ def write_selection_diagnostics(run_parent_dir, diagnostics):
             "shared_undirected_edges",
             "non_focus_middle_edges",
         ],
-        "gsl_load_by_endpoint.csv": [
+        "gsl_load_by_endpoint.csv": focus_columns + [
             "background_flow_count",
             "per_flow_rate_mbps",
             "endpoint_node",
@@ -2103,7 +2145,7 @@ def write_selection_diagnostics(run_parent_dir, diagnostics):
             "over_endpoint_load_cap",
             "selected_flow_ids",
         ],
-        "isl_corridor_load_summary.csv": [
+        "isl_corridor_load_summary.csv": focus_columns + [
             "background_flow_count",
             "per_flow_rate_mbps",
             "edge_from",
@@ -2118,7 +2160,7 @@ def write_selection_diagnostics(run_parent_dir, diagnostics):
             "selected_flow_ids_using_edge",
             "edge_rank_by_load",
         ],
-        "fallback_phase_summary.csv": [
+        "fallback_phase_summary.csv": focus_columns + [
             "background_flow_count",
             "per_flow_rate_mbps",
             "phase",
@@ -2131,7 +2173,7 @@ def write_selection_diagnostics(run_parent_dir, diagnostics):
             "max_overlap",
             "notes",
         ],
-        "corridor_concentration_summary.csv": [
+        "corridor_concentration_summary.csv": focus_columns + [
             "background_flow_count",
             "per_flow_rate_mbps",
             "flow_selection_hash",
@@ -2149,7 +2191,7 @@ def write_selection_diagnostics(run_parent_dir, diagnostics):
             "top_non_focus_edge_load_ratio",
             "target_to_non_focus_load_ratio",
         ],
-        "satellite_interface_load_summary.csv": [
+        "satellite_interface_load_summary.csv": focus_columns + [
             "background_flow_count",
             "per_flow_rate_mbps",
             "satellite_id",
@@ -2196,6 +2238,72 @@ def prepare_run_dir(run_dir, force):
     )
 
 
+def print_dry_run_diagnostics(run, diagnostics):
+    if diagnostics is None:
+        return
+    fallback_rows = diagnostics.get("fallback_phase_summary.csv", [])
+    concentration_rows = diagnostics.get(
+        "corridor_concentration_summary.csv",
+        [],
+    )
+    gsl_rows = diagnostics.get("gsl_load_by_endpoint.csv", [])
+    satellite_rows = diagnostics.get(
+        "satellite_interface_load_summary.csv",
+        [],
+    )
+    strict_selected_count = sum(
+        int(row["selected_count"])
+        for row in fallback_rows
+        if row["phase"] == "strict"
+    )
+    fallback_selected_count = sum(
+        int(row["selected_count"])
+        for row in fallback_rows
+        if row["phase"] != "strict"
+    )
+    concentration = concentration_rows[0] if concentration_rows else {}
+    max_endpoint_ratio = max(
+        [float(row["load_ratio"]) for row in gsl_rows] or [0.0]
+    )
+    max_satellite_ratio = max(
+        [float(row["load_ratio"]) for row in satellite_rows] or [0.0]
+    )
+    print("  dry-run focus pair: %d (%s) <-> %d (%s)" % (
+        run["src_node_id"],
+        run["focus_src_name_if_available"],
+        run["dst_node_id"],
+        run["focus_dst_name_if_available"],
+    ))
+    print("  dry-run focus pair tag: %s" % run["focus_pair_tag"])
+    print(
+        "  dry-run selection quality: strict=%d fallback=%d zero_overlap=%s "
+        "target_to_non_focus=%s"
+        % (
+            strict_selected_count,
+            fallback_selected_count,
+            concentration.get("zero_overlap_selected_count", ""),
+            concentration.get("target_to_non_focus_load_ratio", ""),
+        )
+    )
+    print(
+        "  dry-run load caps: max_endpoint_ratio=%.6f cap=%.6f "
+        "max_satellite_interface_ratio=%.6f cap=%.6f"
+        % (
+            max_endpoint_ratio,
+            run["endpoint_load_cap_ratio"],
+            max_satellite_ratio,
+            run["satellite_interface_load_cap_ratio"],
+        )
+    )
+    print(
+        "  dry-run hashes: selection_input=%s flow_selection=%s"
+        % (
+            concentration.get("selection_input_hash", ""),
+            concentration.get("flow_selection_hash", ""),
+        )
+    )
+
+
 def main():
     parser = build_arg_parser("Generate UDP/PDR dynamic-routing run directories.")
     add_force_and_dry_run_arguments(parser)
@@ -2206,11 +2314,16 @@ def main():
         help="Number of baseline time samples used for core-hotspot selection.",
     )
     args = parser.parse_args()
+    validate_focus_pair_arguments(parser, args)
 
     selected_mode, modes, load_levels, algorithms = describe_selection(args)
     print("Traffic mode selection: %s (%s)" % (selected_mode, ", ".join(modes)))
     print("Load levels: %s" % ", ".join("%.3f" % x for x in load_levels))
     print("Algorithms: %s" % ", ".join(algorithms))
+    print(
+        "Focus pair: %d <-> %d"
+        % (args.src_node_id, args.dst_node_id)
+    )
 
     runs = get_udp_pdr_run_list(
         selected_mode,
@@ -2232,6 +2345,8 @@ def main():
         args.min_overlap_ratio,
         args.selection_sample_horizon_s,
         args.selection_sample_times_s,
+        args.src_node_id,
+        args.dst_node_id,
     )
 
     generated_pairs_by_run_name = {}
@@ -2266,6 +2381,8 @@ def main():
             run.get("min_overlap_ratio"),
             run.get("selection_sample_horizon_s"),
             tuple(run.get("selection_sample_times_s") or []),
+            run["src_node_id"],
+            run["dst_node_id"],
         )
         if pair_key not in generated_pairs_by_run_name:
             generated_pairs_by_run_name[pair_key] = generate_pairs_and_diagnostics(
@@ -2296,8 +2413,9 @@ def main():
                     )
                 )
             if diagnostics is not None:
+                print_dry_run_diagnostics(run, diagnostics)
                 print(
-                    "  dry-run diagnostics would write: %s"
+                    "  dry-run diagnostics (generation mode) would write: %s"
                     % ", ".join(SELECTION_DIAGNOSTIC_FILENAMES)
                 )
             continue

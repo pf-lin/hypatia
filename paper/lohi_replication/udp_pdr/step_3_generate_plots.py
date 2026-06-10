@@ -3,12 +3,13 @@ import subprocess
 import sys
 
 sys.path.append(os.path.join(os.path.dirname(__file__)))
-from dynamic_run_list import build_arg_parser
+from dynamic_run_list import build_arg_parser, validate_focus_pair_arguments
 
 
 def main():
     parser = build_arg_parser("Analyze and plot UDP/PDR packet delivery results.")
     args, passthrough = parser.parse_known_args()
+    validate_focus_pair_arguments(parser, args)
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     base_cmd = [
