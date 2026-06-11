@@ -129,6 +129,30 @@ class DynamicRunListFocusPairTest(unittest.TestCase):
         self.assertEqual(resolved["name"], run["pre_management_name"])
         self.assertTrue(resolved["using_pre_management_run_name"])
 
+    def test_non_default_capacities_are_isolated_and_recorded(self):
+        run = get_udp_pdr_run_list(
+            selected_mode="core_isl_hotspot_specific",
+            load_levels=[1.0],
+            algorithms=["algorithm_free_one_only_over_isls"],
+            background_flow_count_override=[16],
+            src_node_id_override=754,
+            dst_node_id_override=785,
+            isl_data_rate_megabit_per_s_override=10,
+            gsl_data_rate_megabit_per_s_override=100,
+        )[0]
+        self.assertIn("isl10mbps_gsl100mbps", run["name"])
+        self.assertEqual(run["isl_data_rate_megabit_per_s"], 10.0)
+        self.assertEqual(run["gsl_data_rate_megabit_per_s"], 100.0)
+        self.assertEqual(run["data_rate_megabit_per_s"], 10.0)
+
+        with tempfile.TemporaryDirectory() as runs_root:
+            os.makedirs(os.path.join(runs_root, run["legacy_name"]))
+            os.makedirs(os.path.join(runs_root, run["pre_management_name"]))
+            resolved = resolve_existing_run(run, runs_root)
+        self.assertEqual(resolved["name"], run["name"])
+        self.assertNotIn("using_legacy_run_name", resolved)
+        self.assertNotIn("using_pre_management_run_name", resolved)
+
 
 if __name__ == "__main__":
     unittest.main()

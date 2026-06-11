@@ -86,8 +86,12 @@ def _render_config(run, udp_logging_ids):
                 "dynamic_state_update_interval_ns"
             ],
             "[LOHI-MANAGEMENT-MODE]": run["lohi_management_mode"],
-            "[ISL-DATA-RATE-MEGABIT-PER-S]": run["data_rate_megabit_per_s"],
-            "[GSL-DATA-RATE-MEGABIT-PER-S]": run["data_rate_megabit_per_s"],
+            "[ISL-DATA-RATE-MEGABIT-PER-S]": run[
+                "isl_data_rate_megabit_per_s"
+            ],
+            "[GSL-DATA-RATE-MEGABIT-PER-S]": run[
+                "gsl_data_rate_megabit_per_s"
+            ],
             "[ISL-MAX-QUEUE-SIZE-PKTS]": run["queue_size_pkt"],
             "[GSL-MAX-QUEUE-SIZE-PKTS]": run["queue_size_pkt"],
             "[ENABLE-ISL-UTILIZATION-TRACKING]": (
@@ -782,7 +786,7 @@ def _select_core_isl_hotspot_candidates(run, context):
 
     expected_pair_count = len(_generate_focus_only_pairs(run)) + target_count
     per_flow_rate = compute_per_flow_rate_mbps(run, expected_pair_count)
-    gsl_capacity_mbps = run["data_rate_megabit_per_s"]
+    gsl_capacity_mbps = run["gsl_data_rate_megabit_per_s"]
     endpoint_cap_mbps = run["endpoint_load_cap_ratio"] * gsl_capacity_mbps
     relaxed_endpoint_cap_mbps = gsl_capacity_mbps
     satellite_interface_cap_mbps = None
@@ -1114,7 +1118,9 @@ def _core_isl_candidate_reject_reason(
         return "max_background_flows_per_dst"
 
     per_flow_rate = final_src_load["_per_flow_rate"]
-    endpoint_cap_mbps = run["endpoint_load_cap_ratio"] * run["data_rate_megabit_per_s"]
+    endpoint_cap_mbps = (
+        run["endpoint_load_cap_ratio"] * run["gsl_data_rate_megabit_per_s"]
+    )
     if final_src_load[candidate["src"]] + per_flow_rate > endpoint_cap_mbps + 1e-9:
         return "src_endpoint_load_cap"
     if final_dst_load[candidate["dst"]] + per_flow_rate > endpoint_cap_mbps + 1e-9:
@@ -1122,7 +1128,7 @@ def _core_isl_candidate_reject_reason(
     satellite_interface_cap_ratio = run.get("satellite_interface_load_cap_ratio", 0.0)
     if satellite_interface_cap_ratio > 0:
         satellite_interface_cap_mbps = (
-            satellite_interface_cap_ratio * run["data_rate_megabit_per_s"]
+            satellite_interface_cap_ratio * run["gsl_data_rate_megabit_per_s"]
         )
         for key in candidate["satellite_interface_keys"]:
             if (
@@ -1166,7 +1172,8 @@ def _selection_input_hash(run, context):
             run["per_flow_rate_reference_background_flow_count"]
         ),
         "focus_pair": [run["src_node_id"], run["dst_node_id"]],
-        "data_rate_megabit_per_s": run["data_rate_megabit_per_s"],
+        "isl_data_rate_megabit_per_s": run["isl_data_rate_megabit_per_s"],
+        "gsl_data_rate_megabit_per_s": run["gsl_data_rate_megabit_per_s"],
         "endpoint_load_cap_ratio": run["endpoint_load_cap_ratio"],
         "satellite_interface_load_cap_ratio": (
             run.get("satellite_interface_load_cap_ratio", 0.0)
@@ -1206,7 +1213,7 @@ def _flow_selection_hash(run, context, pairs):
 
 def _build_core_isl_diagnostics(run, context, selected, warnings, pairs):
     per_flow_rate = compute_per_flow_rate_mbps(run, len(pairs))
-    gsl_capacity_mbps = run["data_rate_megabit_per_s"]
+    gsl_capacity_mbps = run["gsl_data_rate_megabit_per_s"]
     endpoint_cap_mbps = run["endpoint_load_cap_ratio"] * gsl_capacity_mbps
     satellite_interface_cap_mbps = (
         run.get("satellite_interface_load_cap_ratio", 0.0) * gsl_capacity_mbps
@@ -1554,8 +1561,10 @@ def _build_core_isl_diagnostics(run, context, selected, warnings, pairs):
             "edge_to": edge[1],
             "selected_flow_count": len(flow_ids_for_edge),
             "estimated_offered_rate_mbps": estimated_load,
-            "isl_capacity_mbps": gsl_capacity_mbps,
-            "load_ratio": estimated_load / gsl_capacity_mbps,
+            "isl_capacity_mbps": run["isl_data_rate_megabit_per_s"],
+            "load_ratio": (
+                estimated_load / run["isl_data_rate_megabit_per_s"]
+            ),
             "on_focus_middle_corridor": _format_bool(
                 on_directed_focus_corridor
             ),
@@ -1803,7 +1812,9 @@ def generate_pairs(run, hotspot_sample_count):
 def compute_per_flow_rate_mbps(run, pair_count):
     if pair_count <= 0:
         raise ValueError("Cannot compute rate for zero flows")
-    aggregate_rate = run["load_level"] * run["data_rate_megabit_per_s"]
+    aggregate_rate = (
+        run["load_level"] * run["isl_data_rate_megabit_per_s"]
+    )
     reference_pair_count = pair_count
     if run["traffic_mode"] in background_flow_traffic_modes:
         reference_pair_count = (
@@ -1896,6 +1907,8 @@ def write_run_metadata(run_dir, run, pairs, per_flow_rate):
         "run": run,
         **_focus_identity_fields(run),
         "lohi_management_mode": run["lohi_management_mode"],
+        "isl_data_rate_megabit_per_s": run["isl_data_rate_megabit_per_s"],
+        "gsl_data_rate_megabit_per_s": run["gsl_data_rate_megabit_per_s"],
         "flow_count": len(pairs),
         "flow_count_by_class": dict(by_class),
         "per_flow_rate_mbps": per_flow_rate,
@@ -1904,7 +1917,7 @@ def write_run_metadata(run_dir, run, pairs, per_flow_rate):
         ],
         "reference_flow_count_for_per_flow_rate": reference_pair_count,
         "reference_aggregate_offered_rate_mbps": (
-            run["load_level"] * run["data_rate_megabit_per_s"]
+            run["load_level"] * run["isl_data_rate_megabit_per_s"]
         ),
         "aggregate_offered_rate_mbps": scheduled_total_rate,
         "background_offered_rate_mbps": (
@@ -1980,6 +1993,8 @@ def write_schedule_summary(run_parent_dir, run, pairs, per_flow_rate):
         "lohi_management_mode": run["lohi_management_mode"],
         "load_level": run["load_level"],
         "background_flow_count": run["background_flow_count"],
+        "isl_capacity_mbps": run["isl_data_rate_megabit_per_s"],
+        "gsl_capacity_mbps": run["gsl_data_rate_megabit_per_s"],
         "generated_background_flow_count": by_class.get("background", 0),
         "focus_flow_count": by_class.get("focus", 0),
         "total_flow_count": len(pairs),
@@ -1989,7 +2004,7 @@ def write_schedule_summary(run_parent_dir, run, pairs, per_flow_rate):
         ],
         "reference_flow_count_for_per_flow_rate": reference_pair_count,
         "reference_aggregate_offered_rate_mbps": (
-            run["load_level"] * run["data_rate_megabit_per_s"]
+            run["load_level"] * run["isl_data_rate_megabit_per_s"]
         ),
         "total_offered_rate_mbps": per_flow_rate * len(pairs),
         "background_offered_rate_mbps": per_flow_rate * by_class.get("background", 0),
@@ -2013,6 +2028,8 @@ def write_schedule_summary(run_parent_dir, run, pairs, per_flow_rate):
             "lohi_management_mode",
             "load_level",
             "background_flow_count",
+            "isl_capacity_mbps",
+            "gsl_capacity_mbps",
             "generated_background_flow_count",
             "focus_flow_count",
             "total_flow_count",
@@ -2352,6 +2369,8 @@ def main():
         args.src_node_id,
         args.dst_node_id,
         args.lohi_management_mode,
+        args.isl_data_rate_megabit_per_s,
+        args.gsl_data_rate_megabit_per_s,
     )
 
     generated_pairs_by_run_name = {}

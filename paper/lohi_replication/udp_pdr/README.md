@@ -27,7 +27,9 @@ paper/lohi_replication/udp_pdr/
   step_3_generate_plots.py
   calculate_routes.py
   analyze_packet_delivery.py
+  analyze_isl_focused_calibration.py
   plot_packet_delivery_comparison.py
+  run_isl_focused_calibration_sweep.py
   templates/template_config_ns3.properties
   runs/
 ```
@@ -209,6 +211,185 @@ The default reference background-flow count is `4`, so `--background-flow-count
 4 8 16 32 64` increases total scheduled traffic while leaving each flow's
 target rate unchanged. The generated run folder includes the count, e.g.
 `run_core_isl_hotspot_specific_src738_dst793_load_1p2x_bg_flow_count_16_oneweb_isls_moving_udp_pdr`.
+
+## ISL-Focused Congestion Calibration
+
+The calibration workflow separates access capacity from the ISL capacity:
+
+```text
+--isl-data-rate-megabit-per-s 10
+--gsl-data-rate-megabit-per-s 100
+```
+
+Both options default to `10` Mbps for backward compatibility. The ISL capacity
+remains 10 Mbps because it is the controlled bottleneck and the reference scale
+for `load_level`. A 100 Mbps GSL is recommended during calibration so endpoint
+and satellite-access links have enough headroom and do not dominate loss or
+queue saturation.
+
+Non-default capacities are part of the run identity:
+
+```text
+run_core_isl_hotspot_specific_src754_dst785_load_1x_bg_flow_count_16_isl10mbps_gsl100mbps_lohi_mgmt_legacy_oneweb_isls_moving_udp_pdr
+```
+
+The capacities are also recorded in `config_ns3.properties`,
+`run_metadata.json`, `schedule_summary.csv`, and
+`comparison_packet_delivery/core/summary_by_algorithm.csv`. This prevents
+10/10 Mbps and 10/100 Mbps runs from overwriting or being mistaken for one
+another.
+
+`load_level` is an offered-load input, not an observed utilization percentage.
+For background-flow sweeps, the current flow count can make total scheduled
+traffic much larger than `load_level * ISL capacity`. Congestion labels must
+therefore come from the measured ISL utilization produced by NS-3, not directly
+from `load_level`.
+
+Run the default short calibration sweep with:
+
+```bash
+python run_isl_focused_calibration_sweep.py --force
+```
+
+For a faster first-stage mapping sweep, run only the Queue-aware reference:
+
+```bash
+python run_isl_focused_calibration_sweep.py \
+  --algorithms algorithm_queue_aware_over_isls \
+  --force
+```
+
+This is sufficient to assign preliminary scenario levels. After selecting one
+or more settings in each desired band, run those settings with Baseline and
+Queue-aware together to validate improvement space. Only then promote them to
+the four-algorithm 60 s experiment.
+
+Its defaults are:
+
+```text
+focus pair: 754 <-> 785
+traffic mode: core_isl_hotspot_specific
+load levels: 1.0, 1.2, 1.4
+background flow counts: 16, 24, 32
+simulation duration: 10 s
+traffic stop: 8 s
+ISL/GSL capacity: 10/100 Mbps
+algorithms: baseline and queue-aware
+```
+
+Use `--generation-only` to create all run directories without starting NS-3,
+or `--dry-run` to print the commands only. Override `--algorithms` with all
+four formal algorithms after useful congestion levels have been identified.
+
+`step_3_generate_plots.py` automatically invokes the calibration analyzer for
+`core_isl_hotspot_specific`. It writes per-run files under:
+
+```text
+comparison_packet_delivery/calibration/
+  isl_focused_calibration_summary.csv
+  isl_focused_calibration_by_algorithm.csv
+  isl_focused_scenario_summary.csv
+  isl_gsl_bottleneck_check.csv
+  congestion_level_mapping.csv
+  formal_scenario_recommendations.csv
+  isl_utilization_vs_pdr.png
+  gsl_vs_isl_saturation.png
+  congestion_level_summary.png
+  algorithm_congestion_outcomes.png
+```
+
+A multi-setting invocation also writes an aggregate directory such as:
+
+```text
+runs/comparison_calibration/src754_dst785_isl10mbps_gsl100mbps_10s/
+```
+
+ISL p50/p90/p95/max values use duration-weighted, active directed-link samples
+from `logs_ns3/isl_utilization.csv` during the traffic-generation interval.
+Their source is `measured_throughput`: the NS-3 ISL net device reports its
+busy-time ratio for each interval. Target-corridor utilization filters those
+samples to directed ISLs marked by `isl_corridor_load_summary.csv`.
+
+There is currently no equivalent measured GSL throughput log. GSL p95/max
+values therefore use:
+
+```text
+queue_packets / gsl_max_queue_size_pkts
+```
+
+and are explicitly marked `queue_occupancy_proxy`. They must not be described
+as exact GSL link utilization.
+
+Calibration uses two different congestion labels:
+
+```text
+scenario_congestion_label
+  = congestion level measured under algorithm_queue_aware_over_isls
+
+algorithm_congestion_label
+  = congestion level observed separately for each routing algorithm
+```
+
+Queue-aware is the calibration reference because it can use alternate paths.
+Baseline shortest-path routing is intentionally not used to define scenario
+severity: it can overload one corridor while substantial path diversity remains
+available. Baseline remains essential as an outcome and improvement-space
+check. For example, one traffic setting can be a Queue-aware-reference `Light`
+scenario while the Baseline algorithm outcome is `Overload`.
+
+This is a Queue-aware-reference operational scale, not a routing-independent
+theoretical network-capacity bound. Formal results must report both the fixed
+scenario label and every algorithm's observed utilization/PDR.
+
+Both labels use measured p95 active-ISL utilization:
+
+```text
+Light:     p95 < 0.50
+Moderate:  0.50 <= p95 < 0.70
+High:      0.70 <= p95 < 0.85
+Severe:    0.85 <= p95 < 1.00
+Overload:  p95 >= 1.00, or at least three directed ISLs reach 100%
+```
+
+For the scenario label, all thresholds and the saturated-link rule are applied
+only to the Queue-aware reference row. For an algorithm label, they are applied
+to that algorithm's own utilization. Neither label is derived directly from
+`load_level`.
+
+For compatibility with earlier calibration consumers,
+`recommended_congestion_label` remains in the per-algorithm CSV but now aliases
+`scenario_congestion_label`; use `algorithm_congestion_label` for the row's own
+outcome.
+
+`safe_for_isl_focused_experiment=true` requires a completed Queue-aware
+reference with measured ISL utilization, actual target-corridor activity, no
+GSL bottleneck evidence in the calibration algorithms, and no dominant mixed
+loss association. A safe Light scenario does not need to reach 60% utilization;
+its low Queue-aware utilization is the intended classification. Associated loss
+remains a time/path correlation and is not physical-drop proof.
+
+`recommended_for_formal=true` additionally requires Baseline improvement
+space, detected from Baseline loss, a PDR gap, or a substantial utilization gap
+relative to Queue-aware. This verifies that the traffic setting can distinguish
+path concentration from adaptive load distribution without redefining scenario
+severity from the Baseline result.
+
+Choose 60 s formal candidates from
+`formal_scenario_recommendations.csv`, which selects candidates using the
+Queue-aware-reference fields. `isl_focused_scenario_summary.csv` contains one
+row per traffic setting; `isl_focused_calibration_by_algorithm.csv` shows how
+Baseline, Queue-aware, LoHi, and LHTR behave inside that fixed scenario. Prefer
+one safe setting in each available band, then run all four algorithms. Recheck
+the Queue-aware-reference label and GSL flag after extending duration. Only
+promote stable 60 s settings to 200 s; do not assume a 10 s label remains
+unchanged.
+
+Suggested paper wording:
+
+> To isolate the impact of ISL routing decisions, we configure the GSL capacity
+> to be sufficiently larger than the ISL capacity. This prevents access links
+> from becoming the dominant bottleneck and allows packet loss and congestion
+> to primarily reflect ISL-level routing behavior.
 
 ## Traffic Timing and Drain Time
 

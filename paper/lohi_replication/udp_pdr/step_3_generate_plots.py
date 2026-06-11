@@ -20,11 +20,19 @@ def main():
     print("[Step 3.1] Analyzing packet delivery...")
     subprocess.check_call(base_cmd + [os.path.join(script_dir, "analyze_packet_delivery.py")] + common_args)
 
-    print("\n[Step 3.2] Plotting packet delivery comparison...")
+    if args.traffic_mode in ("core_isl_hotspot_specific", "all"):
+        print("\n[Step 3.2] Analyzing ISL-focused calibration...")
+        subprocess.check_call(
+            base_cmd
+            + [os.path.join(script_dir, "analyze_isl_focused_calibration.py")]
+            + common_args
+        )
+
+    print("\n[Step 3.3] Plotting packet delivery comparison...")
     subprocess.check_call(base_cmd + [os.path.join(script_dir, "plot_packet_delivery_comparison.py")] + common_args)
 
     if args.enable_rtt_analysis:
-        print("\n[Step 3.3] Generating estimated RTT and route outputs...")
+        print("\n[Step 3.4] Generating estimated RTT and route outputs...")
         try:
             subprocess.check_call(
                 base_cmd

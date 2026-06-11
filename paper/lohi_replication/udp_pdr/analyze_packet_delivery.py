@@ -846,6 +846,8 @@ def summarize_algorithm(run, algorithm, flows):
         "traffic_mode": run["traffic_mode"],
         "load_level": run["load_level"],
         "background_flow_count": run["background_flow_count"],
+        "isl_capacity_mbps": run["isl_data_rate_megabit_per_s"],
+        "gsl_capacity_mbps": run["gsl_data_rate_megabit_per_s"],
         "per_flow_rate_reference_background_flow_count": run[
             "per_flow_rate_reference_background_flow_count"
         ],
@@ -2758,6 +2760,8 @@ def main():
         args.src_node_id,
         args.dst_node_id,
         args.lohi_management_mode,
+        args.isl_data_rate_megabit_per_s,
+        args.gsl_data_rate_megabit_per_s,
     )
 
     seen_run_names = set()

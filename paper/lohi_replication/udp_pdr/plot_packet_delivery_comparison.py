@@ -839,6 +839,8 @@ def main():
         args.src_node_id,
         args.dst_node_id,
         args.lohi_management_mode,
+        args.isl_data_rate_megabit_per_s,
+        args.gsl_data_rate_megabit_per_s,
     )
     run_names = []
     seen = set()

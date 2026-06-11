@@ -39,7 +39,10 @@ default_min_overlap_ratio = 0.0
 default_selection_sample_horizon_s = 60.0
 
 # Link/load defaults
-data_rate_megabit_per_s = 10.0
+default_isl_data_rate_megabit_per_s = 10.0
+default_gsl_data_rate_megabit_per_s = 10.0
+# Backward-compatible alias used by older helpers for the ISL-based load scale.
+data_rate_megabit_per_s = default_isl_data_rate_megabit_per_s
 queue_size_pkt = 100
 default_load_level = 1.0
 default_load_levels = [0.6, 0.8, 1.0, 1.2, 1.4, 1.8]
@@ -175,6 +178,36 @@ def focus_pair_metadata(src_node_id, dst_node_id):
 
 def load_level_to_tag(load_level):
     return ("%.3gx" % float(load_level)).replace(".", "p")
+
+
+def capacity_to_tag(capacity_mbps):
+    return ("%.6g" % float(capacity_mbps)).replace(".", "p")
+
+
+def capacity_identity_tag(isl_capacity_mbps, gsl_capacity_mbps):
+    return "isl%smbps_gsl%smbps" % (
+        capacity_to_tag(isl_capacity_mbps),
+        capacity_to_tag(gsl_capacity_mbps),
+    )
+
+
+def uses_default_capacities(run):
+    return (
+        float(
+            run.get(
+                "isl_data_rate_megabit_per_s",
+                default_isl_data_rate_megabit_per_s,
+            )
+        )
+        == default_isl_data_rate_megabit_per_s
+        and float(
+            run.get(
+                "gsl_data_rate_megabit_per_s",
+                default_gsl_data_rate_megabit_per_s,
+            )
+        )
+        == default_gsl_data_rate_megabit_per_s
+    )
 
 
 def parse_load_levels(values):
@@ -359,6 +392,23 @@ def add_runtime_override_arguments(parser):
         type=int,
         default=None,
         help="Override ISL/GSL queue size in packets.",
+    )
+    parser.add_argument(
+        "--isl-data-rate-megabit-per-s",
+        type=float,
+        default=None,
+        help=(
+            "Override ISL capacity in Mbit/s. This also defines the load-level "
+            "reference scale. Default: %.1f"
+        ) % default_isl_data_rate_megabit_per_s,
+    )
+    parser.add_argument(
+        "--gsl-data-rate-megabit-per-s",
+        type=float,
+        default=None,
+        help=(
+            "Override GSL/access capacity in Mbit/s. Default: %.1f"
+        ) % default_gsl_data_rate_megabit_per_s,
     )
     parser.add_argument(
         "--background-flow-count",
@@ -602,6 +652,8 @@ def run_name_for(
     src_node_id=focus_src_node_id,
     dst_node_id=focus_dst_node_id,
     lohi_management_mode=None,
+    isl_data_rate_megabit_per_s=default_isl_data_rate_megabit_per_s,
+    gsl_data_rate_megabit_per_s=default_gsl_data_rate_megabit_per_s,
 ):
     bg_tag = ""
     if background_flow_count is not None:
@@ -609,11 +661,23 @@ def run_name_for(
     management_tag = ""
     if lohi_management_mode is not None:
         management_tag = "_%s" % lohi_management_mode_tag(lohi_management_mode)
-    return "run_%s_%s_load_%s%s%s_oneweb_isls_moving_udp_pdr" % (
+    capacity_tag = ""
+    if (
+        float(isl_data_rate_megabit_per_s)
+        != default_isl_data_rate_megabit_per_s
+        or float(gsl_data_rate_megabit_per_s)
+        != default_gsl_data_rate_megabit_per_s
+    ):
+        capacity_tag = "_%s" % capacity_identity_tag(
+            isl_data_rate_megabit_per_s,
+            gsl_data_rate_megabit_per_s,
+        )
+    return "run_%s_%s_load_%s%s%s%s_oneweb_isls_moving_udp_pdr" % (
         traffic_mode,
         focus_pair_tag_for(src_node_id, dst_node_id),
         load_level_to_tag(load_level),
         bg_tag,
+        capacity_tag,
         management_tag,
     )
 
@@ -623,6 +687,7 @@ def resolve_existing_run(run, runs_root="runs"):
         return run
     if (
         run.get("lohi_management_mode") == "legacy"
+        and uses_default_capacities(run)
         and os.path.isdir(os.path.join(runs_root, run["pre_management_name"]))
     ):
         resolved = dict(run)
@@ -632,6 +697,7 @@ def resolve_existing_run(run, runs_root="runs"):
         return resolved
     if (
         run.get("lohi_management_mode") == "legacy"
+        and uses_default_capacities(run)
         and
         run["src_node_id"] == focus_src_node_id
         and run["dst_node_id"] == focus_dst_node_id
@@ -668,6 +734,8 @@ def get_udp_pdr_run_list(
     src_node_id_override=focus_src_node_id,
     dst_node_id_override=focus_dst_node_id,
     lohi_management_mode_override=default_lohi_management_mode,
+    isl_data_rate_megabit_per_s_override=None,
+    gsl_data_rate_megabit_per_s_override=None,
 ):
     load_levels = parse_load_levels(load_levels)
     algorithms = normalize_algorithms(algorithms)
@@ -690,6 +758,16 @@ def get_udp_pdr_run_list(
         queue_size_pkt
         if queue_size_pkt_override is None
         else int(queue_size_pkt_override)
+    )
+    isl_data_rate_mbps = (
+        default_isl_data_rate_megabit_per_s
+        if isl_data_rate_megabit_per_s_override is None
+        else float(isl_data_rate_megabit_per_s_override)
+    )
+    gsl_data_rate_mbps = (
+        default_gsl_data_rate_megabit_per_s
+        if gsl_data_rate_megabit_per_s_override is None
+        else float(gsl_data_rate_megabit_per_s_override)
     )
     background_flow_counts = parse_background_flow_counts(background_flow_count_override)
     random_flow_count = (
@@ -770,6 +848,10 @@ def get_udp_pdr_run_list(
         raise ValueError("dynamic_state_update_interval_ms must be positive")
     if queue_pkts <= 0:
         raise ValueError("queue_size_pkt must be positive")
+    if isl_data_rate_mbps <= 0:
+        raise ValueError("isl_data_rate_megabit_per_s must be positive")
+    if gsl_data_rate_mbps <= 0:
+        raise ValueError("gsl_data_rate_megabit_per_s must be positive")
     if random_flow_count <= 0:
         raise ValueError("random_flow_count must be positive")
     if per_flow_rate_reference_background_flow_count < 0:
@@ -836,6 +918,9 @@ def get_udp_pdr_run_list(
                         name_background_flow_count,
                         src_node_id,
                         dst_node_id,
+                        None,
+                        isl_data_rate_mbps,
+                        gsl_data_rate_mbps,
                     )
                     run_list.append({
                         "name": run_name_for(
@@ -845,6 +930,8 @@ def get_udp_pdr_run_list(
                             src_node_id,
                             dst_node_id,
                             lohi_management_mode,
+                            isl_data_rate_mbps,
+                            gsl_data_rate_mbps,
                         ),
                         "legacy_name": legacy_name,
                         "pre_management_name": pre_management_name,
@@ -862,7 +949,9 @@ def get_udp_pdr_run_list(
                         "drain_time_ns": drain_time_ns,
                         "drain_time_s": drain_time_s,
                         "drain_time_enabled": drain_time_ns > 0,
-                        "data_rate_megabit_per_s": data_rate_megabit_per_s,
+                        "data_rate_megabit_per_s": isl_data_rate_mbps,
+                        "isl_data_rate_megabit_per_s": isl_data_rate_mbps,
+                        "gsl_data_rate_megabit_per_s": gsl_data_rate_mbps,
                         "queue_size_pkt": queue_pkts,
                         "load_level": float(load_level),
                         "background_flow_count": background_flow_count,
