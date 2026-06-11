@@ -838,6 +838,7 @@ def main():
         args.selection_sample_times_s,
         args.src_node_id,
         args.dst_node_id,
+        args.lohi_management_mode,
     )
     run_names = []
     seen = set()

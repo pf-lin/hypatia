@@ -21,6 +21,7 @@ LoHi (Load-aware Hierarchical Routing) Algorithm
 from dataclasses import dataclass
 from typing import Dict, Set, Tuple, List, Optional, Callable, Any
 from collections import Counter, defaultdict
+import csv
 import datetime as _dt
 import heapq
 import json
@@ -69,6 +70,33 @@ CHAOS_LOG_FILE = os.environ.get('CHAOS_LOG_FILE', 'chaos_monkey_lohi.log')
 # Management-hop switches
 ENFORCE_MGMT_HOP_CROSS_PID = os.environ.get('LOHI_ENFORCE_MGMT_HOP_CROSS_PID', '0') not in ['0','false','False']
 ENFORCE_MGMT_HOP_SAME_PID  = os.environ.get('LOHI_ENFORCE_MGMT_HOP_SAME_PID', '0') not in ['0','false','False']
+
+LOHI_MANAGEMENT_MODES = (
+    'legacy',
+    'control_plane_only',
+    'strict_physical_waypoint',
+)
+
+
+def normalize_lohi_management_mode(value: Optional[str]) -> str:
+    mode = str(value or 'legacy').strip().lower().replace('-', '_')
+    aliases = {
+        'control_plane': 'control_plane_only',
+        'strict': 'strict_physical_waypoint',
+        'strict_waypoint': 'strict_physical_waypoint',
+    }
+    mode = aliases.get(mode, mode)
+    if mode not in LOHI_MANAGEMENT_MODES:
+        raise ValueError(
+            "Invalid LoHi management mode '%s'; expected one of: %s"
+            % (value, ", ".join(LOHI_MANAGEMENT_MODES))
+        )
+    return mode
+
+
+LOHI_MANAGEMENT_MODE = normalize_lohi_management_mode(
+    os.environ.get('LOHI_MANAGEMENT_MODE', 'legacy')
+)
 
 # Group-level cost
 TG_MODE = os.environ.get('LOHI_TG_MODE', 'constant')
@@ -1231,6 +1259,489 @@ def _build_ground_station_attachment_cache(
 
 
 # ==========================
+# LoHi manager diagnostics
+# ==========================
+LOHI_MANAGER_DIAGNOSTIC_HEADERS = {
+    "lohi_manager_mode_summary.csv": [
+        "time_ns",
+        "management_mode",
+        "src",
+        "dst",
+        "current_node",
+        "current_pid",
+        "next_pid",
+        "manager_node",
+        "u_border",
+        "v_border",
+        "physical_path_contains_manager",
+        "physical_path_contains_border",
+        "decision_scope",
+        "notes",
+    ],
+    "lohi_manager_waypoint_compliance.csv": [
+        "time_ns",
+        "src",
+        "dst",
+        "current_pid",
+        "manager_node",
+        "path",
+        "contains_manager",
+        "manager_position_in_path",
+        "contains_u_border",
+        "contains_v_border",
+        "compliance_status",
+        "failure_reason",
+    ],
+    "lohi_manager_path_segments.csv": [
+        "time_ns",
+        "src",
+        "dst",
+        "segment_index",
+        "segment_type",
+        "segment_start",
+        "segment_end",
+        "segment_path",
+        "segment_hop_count",
+        "segment_prop_delay_ms",
+    ],
+    "lohi_manager_hotspot_summary.csv": [
+        "time_ns",
+        "manager_node",
+        "pid",
+        "packets_or_routes_through_manager",
+        "route_count_through_manager",
+        "estimated_manager_queue_packets",
+        "manager_queue_max",
+        "manager_queue_mean",
+        "manager_is_hotspot",
+    ],
+    "lohi_manager_loop_check.csv": [
+        "time_ns",
+        "src",
+        "dst",
+        "current_node",
+        "path",
+        "has_loop",
+        "loop_node",
+        "loop_position",
+        "failure_reason",
+    ],
+}
+
+
+def strict_waypoint_support_report() -> Dict[str, Any]:
+    return {
+        "supported": False,
+        "reason": (
+            "strict_physical_waypoint requires forwarding state keyed by a "
+            "waypoint phase or packet segment tag; ArbiterSingleForward only "
+            "indexes next hops by final target_node_id"
+        ),
+        "required_changes": (
+            "extend the NS-3 arbiter and fstate format with pre-manager and "
+            "post-manager forwarding phases"
+        ),
+    }
+
+
+def _diagnostics_dir(output_dynamic_state_dir: str) -> str:
+    return os.path.join(
+        os.path.dirname(os.path.normpath(output_dynamic_state_dir)),
+        "lohi_manager_diagnostics",
+    )
+
+
+def _replace_diagnostic_snapshot_rows(
+    path: str,
+    headers: List[str],
+    time_ns: int,
+    rows: List[Dict[str, Any]],
+) -> None:
+    existing = []
+    if time_ns != 0 and os.path.exists(path):
+        with open(path, newline="", encoding="utf-8") as f_in:
+            for row in csv.DictReader(f_in):
+                if str(row.get("time_ns", "")) != str(time_ns):
+                    existing.append(row)
+
+    with open(path, "w", newline="", encoding="utf-8") as f_out:
+        writer = csv.DictWriter(f_out, fieldnames=headers, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(existing)
+        writer.writerows(rows)
+
+
+def _write_diagnostic_tables(
+    output_dynamic_state_dir: str,
+    time_ns: int,
+    tables: Dict[str, List[Dict[str, Any]]],
+) -> None:
+    output_dir = _diagnostics_dir(output_dynamic_state_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    for filename, headers in LOHI_MANAGER_DIAGNOSTIC_HEADERS.items():
+        _replace_diagnostic_snapshot_rows(
+            os.path.join(output_dir, filename),
+            headers,
+            time_ns,
+            tables.get(filename, []),
+        )
+
+
+def _write_strict_waypoint_unsupported_diagnostics(
+    output_dynamic_state_dir: str,
+    time_ns: int,
+) -> None:
+    report = strict_waypoint_support_report()
+    reason = report["reason"] + "; " + report["required_changes"]
+    _write_diagnostic_tables(
+        output_dynamic_state_dir,
+        time_ns,
+        {
+            "lohi_manager_mode_summary.csv": [{
+                "time_ns": time_ns,
+                "management_mode": "strict_physical_waypoint",
+                "decision_scope": "unsupported_forwarding_model",
+                "notes": reason,
+            }],
+            "lohi_manager_waypoint_compliance.csv": [{
+                "time_ns": time_ns,
+                "compliance_status": "FAIL_UNSUPPORTED_FORWARDING_MODEL",
+                "failure_reason": reason,
+            }],
+            "lohi_manager_loop_check.csv": [{
+                "time_ns": time_ns,
+                "has_loop": "",
+                "failure_reason": reason,
+            }],
+        },
+    )
+
+
+def _replay_tuple_fstate(
+    fstate: Dict[Tuple[int, int], Tuple[int, int, int]],
+    src: int,
+    dst: int,
+    num_nodes: int,
+    hop_limit: int = 1000,
+) -> Dict[str, Any]:
+    current = int(src)
+    path = [current]
+    visited = {current}
+    while current != dst:
+        if len(path) > hop_limit:
+            return {
+                "status": "hop_limit",
+                "path": path,
+                "loop_node": "",
+                "failure_reason": "path exceeded hop limit",
+            }
+        decision = fstate.get((current, dst))
+        if decision is None:
+            return {
+                "status": "missing_entry",
+                "path": path,
+                "loop_node": "",
+                "failure_reason": "missing forwarding entry at node %d" % current,
+            }
+        next_hop = int(decision[0])
+        if next_hop < 0:
+            return {
+                "status": "no_route",
+                "path": path,
+                "loop_node": "",
+                "failure_reason": "explicit no-route at node %d" % current,
+            }
+        if next_hop >= num_nodes:
+            return {
+                "status": "invalid_next_hop",
+                "path": path,
+                "loop_node": "",
+                "failure_reason": "invalid next hop %d" % next_hop,
+            }
+        path.append(next_hop)
+        if next_hop in visited:
+            return {
+                "status": "loop",
+                "path": path,
+                "loop_node": next_hop,
+                "failure_reason": "routing loop reaches node %d" % next_hop,
+            }
+        visited.add(next_hop)
+        current = next_hop
+    return {
+        "status": "success",
+        "path": path,
+        "loop_node": "",
+        "failure_reason": "",
+    }
+
+
+def _path_text(path: List[int]) -> str:
+    return ";".join(str(node) for node in path)
+
+
+def _segment_prop_delay_ms(path: List[int], G_sat: nx.Graph) -> float:
+    delay_s = 0.0
+    for u, v in zip(path, path[1:]):
+        edge_data = G_sat.get_edge_data(u, v)
+        if edge_data is None:
+            continue
+        distance_m = float(
+            edge_data.get("geo_len_m", edge_data.get("weight", 0.0))
+        )
+        delay_s += propagation_delay_seconds(distance_m)
+    return delay_s * 1000.0
+
+
+def _append_segment_row(
+    rows: List[Dict[str, Any]],
+    time_ns: int,
+    src: int,
+    dst: int,
+    segment_index: int,
+    segment_type: str,
+    path: List[int],
+    G_sat: nx.Graph,
+) -> int:
+    if not path:
+        return segment_index
+    rows.append({
+        "time_ns": time_ns,
+        "src": src,
+        "dst": dst,
+        "segment_index": segment_index,
+        "segment_type": segment_type,
+        "segment_start": path[0],
+        "segment_end": path[-1],
+        "segment_path": _path_text(path),
+        "segment_hop_count": max(0, len(path) - 1),
+        "segment_prop_delay_ms": "%.9f" % _segment_prop_delay_ms(path, G_sat),
+    })
+    return segment_index + 1
+
+
+def write_lohi_manager_diagnostics(
+    output_dynamic_state_dir: str,
+    time_ns: int,
+    management_mode: str,
+    diagnostic_pairs: Optional[List[Tuple[int, int]]],
+    fstate: Dict[Tuple[int, int], Tuple[int, int, int]],
+    G_sat: nx.Graph,
+    router: "VirtualPIDRouterPlaneBlock",
+    manager_decisions: Dict[Tuple[int, int], Dict[str, Any]],
+    num_sats: int,
+    num_nodes: int,
+    queue_packets: Optional[Dict[Tuple[int, int], int]] = None,
+) -> None:
+    tables = {filename: [] for filename in LOHI_MANAGER_DIAGNOSTIC_HEADERS}
+    route_counts = Counter()
+    pairs = diagnostic_pairs or []
+
+    for src, dst in pairs:
+        replay = _replay_tuple_fstate(fstate, src, dst, num_nodes)
+        path = replay["path"]
+        loop_node = replay["loop_node"]
+        tables["lohi_manager_loop_check.csv"].append({
+            "time_ns": time_ns,
+            "src": src,
+            "dst": dst,
+            "current_node": path[-1] if path else src,
+            "path": _path_text(path),
+            "has_loop": replay["status"] == "loop",
+            "loop_node": loop_node,
+            "loop_position": (
+                path.index(loop_node) if loop_node in path else ""
+            ),
+            "failure_reason": replay["failure_reason"],
+        })
+        if replay["status"] != "success":
+            tables["lohi_manager_waypoint_compliance.csv"].append({
+                "time_ns": time_ns,
+                "src": src,
+                "dst": dst,
+                "path": _path_text(path),
+                "compliance_status": (
+                    "FAIL_LOOP" if replay["status"] == "loop" else "FAIL_NO_ROUTE"
+                ),
+                "failure_reason": replay["failure_reason"],
+            })
+            continue
+
+        sat_path = [node for node in path if node < num_sats]
+        if not sat_path:
+            continue
+
+        pid_segments = []
+        start_idx = 0
+        for index in range(1, len(sat_path)):
+            if router.pid_of_sat.get(sat_path[index]) != router.pid_of_sat.get(
+                sat_path[index - 1]
+            ):
+                pid_segments.append((start_idx, index - 1))
+                start_idx = index
+        pid_segments.append((start_idx, len(sat_path) - 1))
+
+        segment_index = 0
+        for group_index, (seg_start, seg_end) in enumerate(pid_segments):
+            segment_nodes = sat_path[seg_start:seg_end + 1]
+            current_pid = router.pid_of_sat.get(segment_nodes[0])
+            manager = router.pid_mgmt_sat.get(current_pid)
+            contains_manager = manager in segment_nodes
+            if contains_manager:
+                route_counts[(current_pid, manager)] += 1
+
+            is_crossing = group_index + 1 < len(pid_segments)
+            if not is_crossing:
+                segment_index = _append_segment_row(
+                    tables["lohi_manager_path_segments.csv"],
+                    time_ns,
+                    src,
+                    dst,
+                    segment_index,
+                    (
+                        "manager_to_destination"
+                        if contains_manager else "direct_to_destination"
+                    ),
+                    segment_nodes,
+                    G_sat,
+                )
+                continue
+
+            next_start, _ = pid_segments[group_index + 1]
+            u_border = segment_nodes[-1]
+            v_border = sat_path[next_start]
+            next_pid = router.pid_of_sat.get(v_border)
+            decision = (
+                manager_decisions.get((segment_nodes[0], dst))
+                or manager_decisions.get((u_border, dst))
+                or {}
+            )
+            selected_u = decision.get("u_border", u_border)
+            selected_v = decision.get("v_border", v_border)
+            contains_u = selected_u in segment_nodes
+            contains_v = selected_v in sat_path[next_start:]
+
+            if management_mode == "control_plane_only":
+                compliance_status = "NOT_APPLICABLE_CONTROL_PLANE_ONLY"
+                failure_reason = (
+                    "manager selected the border in the control plane; "
+                    "physical manager traversal is not required"
+                )
+            else:
+                compliance_status = "NOT_APPLICABLE_LEGACY"
+                failure_reason = "legacy LoHi does not require a manager waypoint"
+
+            tables["lohi_manager_mode_summary.csv"].append({
+                "time_ns": time_ns,
+                "management_mode": management_mode,
+                "src": src,
+                "dst": dst,
+                "current_node": segment_nodes[0],
+                "current_pid": current_pid,
+                "next_pid": next_pid,
+                "manager_node": manager,
+                "u_border": selected_u,
+                "v_border": selected_v,
+                "physical_path_contains_manager": contains_manager,
+                "physical_path_contains_border": contains_u and contains_v,
+                "decision_scope": decision.get(
+                    "decision_scope",
+                    "current_satellite" if management_mode == "legacy"
+                    else "manager_assisted_border_selection",
+                ),
+                "notes": decision.get("notes", ""),
+            })
+            tables["lohi_manager_waypoint_compliance.csv"].append({
+                "time_ns": time_ns,
+                "src": src,
+                "dst": dst,
+                "current_pid": current_pid,
+                "manager_node": manager,
+                "path": _path_text(segment_nodes + [v_border]),
+                "contains_manager": contains_manager,
+                "manager_position_in_path": (
+                    segment_nodes.index(manager) if contains_manager else -1
+                ),
+                "contains_u_border": contains_u,
+                "contains_v_border": contains_v,
+                "compliance_status": compliance_status,
+                "failure_reason": failure_reason,
+            })
+
+            if contains_manager:
+                manager_idx = segment_nodes.index(manager)
+                segment_index = _append_segment_row(
+                    tables["lohi_manager_path_segments.csv"],
+                    time_ns,
+                    src,
+                    dst,
+                    segment_index,
+                    "to_manager",
+                    segment_nodes[:manager_idx + 1],
+                    G_sat,
+                )
+                segment_index = _append_segment_row(
+                    tables["lohi_manager_path_segments.csv"],
+                    time_ns,
+                    src,
+                    dst,
+                    segment_index,
+                    "manager_to_border",
+                    segment_nodes[manager_idx:],
+                    G_sat,
+                )
+            else:
+                segment_index = _append_segment_row(
+                    tables["lohi_manager_path_segments.csv"],
+                    time_ns,
+                    src,
+                    dst,
+                    segment_index,
+                    "direct_to_border",
+                    segment_nodes,
+                    G_sat,
+                )
+            segment_index = _append_segment_row(
+                tables["lohi_manager_path_segments.csv"],
+                time_ns,
+                src,
+                dst,
+                segment_index,
+                "cross_border",
+                [u_border, v_border],
+                G_sat,
+            )
+
+    queue_packets = queue_packets or {}
+    for pid, manager in sorted(router.pid_mgmt_sat.items()):
+        manager_queues = [
+            int(queue_packets.get((manager, neighbor), 0))
+            for neighbor in G_sat.neighbors(manager)
+        ]
+        queue_max = max(manager_queues) if manager_queues else 0
+        queue_mean = (
+            sum(manager_queues) / float(len(manager_queues))
+            if manager_queues else 0.0
+        )
+        route_count = route_counts.get((pid, manager), 0)
+        tables["lohi_manager_hotspot_summary.csv"].append({
+            "time_ns": time_ns,
+            "manager_node": manager,
+            "pid": pid,
+            "packets_or_routes_through_manager": route_count,
+            "route_count_through_manager": route_count,
+            "estimated_manager_queue_packets": sum(manager_queues),
+            "manager_queue_max": queue_max,
+            "manager_queue_mean": "%.6f" % queue_mean,
+            "manager_is_hotspot": (
+                queue_max >= 0.8 * max(1, QUEUE_NORMALIZE_MAX_PACKETS)
+            ),
+        })
+
+    _write_diagnostic_tables(output_dynamic_state_dir, time_ns, tables)
+
+
+# ==========================
 # 主要 fstate 建構函數
 # ==========================
 def build_fstate_lohi(
@@ -1250,6 +1761,8 @@ def build_fstate_lohi(
     queue_bytes: Optional[Dict[Tuple[int,int], int]] = None,
     link_rate_bps: Optional[Dict[Tuple[int,int], float]] = None,
     default_link_capacity_bps: Optional[float] = None,
+    management_mode: str = 'legacy',
+    manager_decisions: Optional[Dict[Tuple[int, int], Dict[str, Any]]] = None,
 ) -> Tuple[
     Dict[Tuple[int,int], Tuple[int,int,int]],
     Dict[int,int],
@@ -1266,6 +1779,10 @@ def build_fstate_lohi(
     
     基於 algorithm_lohi_kun.py 的 build_fstate_lohi，保留完整階層路由邏輯
     """
+    management_mode = normalize_lohi_management_mode(management_mode)
+    if manager_decisions is None:
+        manager_decisions = {}
+
     num_sats = len(satellites) if not isinstance(satellites,int) else satellites
     num_gs = len(ground_stations) if not isinstance(ground_stations,int) else ground_stations
 
@@ -1538,6 +2055,28 @@ def build_fstate_lohi(
                 continue
             
             # QUEUE-AWARE: 邊界衛星對選擇（傳入 queue_packets、dst 資訊，使用預計算快取）
+            management_sat = router.pid_mgmt_sat.get(src_pid)
+            border_selection_origin = u
+            border_selection_dists = src_side_dists_cache.get(u)
+            decision_scope = "current_satellite"
+            if management_mode == "control_plane_only":
+                border_selection_origin = management_sat
+                border_selection_dists = src_side_dists_cache.get(management_sat, {})
+                decision_scope = "manager_assisted_border_selection"
+                if management_sat is None or not border_selection_dists:
+                    manager_decisions[(u, dst_node)] = {
+                        "current_pid": src_pid,
+                        "next_pid": next_pid,
+                        "manager_node": management_sat,
+                        "u_border": "",
+                        "v_border": "",
+                        "decision_origin": management_sat,
+                        "decision_scope": decision_scope,
+                        "notes": "management satellite is unavailable or disconnected",
+                    }
+                    _record_missing(u, dst_node, "manager_unavailable")
+                    continue
+
             _ref_for_dst_cache = dst_sat if next_pid == dst_pid else router.pid_mgmt_sat.get(next_pid)
             border_pair = BorderSelector.pick_border_pair(
                 G_sat, gplanner, src_pid, next_pid, sat_pid,
@@ -1546,15 +2085,39 @@ def build_fstate_lohi(
                 link_rate_bps=link_rate_bps,
                 default_link_capacity_bps=default_link_capacity_bps,
                 dst_sat=dst_sat, dst_pid=dst_pid,
-                pre_src_side_dists=src_side_dists_cache.get(u),
+                pre_src_side_dists=border_selection_dists,
                 pre_dst_side_dists=dst_side_dists_cache.get((next_pid, _ref_for_dst_cache)),
             )
             
             if not border_pair:
+                manager_decisions[(u, dst_node)] = {
+                    "current_pid": src_pid,
+                    "next_pid": next_pid,
+                    "manager_node": management_sat,
+                    "u_border": "",
+                    "v_border": "",
+                    "decision_origin": border_selection_origin,
+                    "decision_scope": decision_scope,
+                    "notes": "no reachable border candidate",
+                }
                 _record_missing(u, dst_node, "border_none")
                 continue
             
             u_border, v_border = border_pair
+            manager_decisions[(u, dst_node)] = {
+                "current_pid": src_pid,
+                "next_pid": next_pid,
+                "manager_node": management_sat,
+                "u_border": u_border,
+                "v_border": v_border,
+                "decision_origin": border_selection_origin,
+                "decision_scope": decision_scope,
+                "notes": (
+                    "physical path is not required to traverse the manager"
+                    if management_mode == "control_plane_only"
+                    else "legacy current-satellite border selection"
+                ),
+            }
             u_border2, v_border2 = None, None
             
             # B1. 硬規則：邊界直接跳轉
@@ -1727,12 +2290,15 @@ _PREV_SRC_SAT_MAP: Dict[int,int] = {}
 
 def init(config: Optional[dict] = None):
     """初始化 LoHi 模組"""
-    global BETA_Q, BETA_S
+    global BETA_Q, BETA_S, LOHI_MANAGEMENT_MODE
     global _ROUTER, _GPLANNER
 
     cfg = config or {}
     BETA_Q = float(cfg.get('beta_q', BETA_Q))
     BETA_S = float(cfg.get('beta_s', BETA_S))
+    LOHI_MANAGEMENT_MODE = normalize_lohi_management_mode(
+        cfg.get('management_mode', LOHI_MANAGEMENT_MODE)
+    )
 
     planes_per_group = cfg.get('planes_per_group', PLANES_PER_GROUP)
     sats_per_plane = cfg.get('sats_per_plane_in_group', SATS_PER_PLANE_IN_GROUP)
@@ -1746,7 +2312,13 @@ def init(config: Optional[dict] = None):
     
     _get_process_local_stats().reset()
     
-    return {'ok': True, 'msg': f'algorithm_lohi initialized with p={planes_per_group}, s={sats_per_plane}'}
+    return {
+        'ok': True,
+        'msg': (
+            f'algorithm_lohi initialized with p={planes_per_group}, '
+            f's={sats_per_plane}, management_mode={LOHI_MANAGEMENT_MODE}'
+        ),
+    }
 
 
 # Version guard for pickle compatibility
@@ -1831,6 +2403,8 @@ def algorithm_lohi(
     time_step_ns: Optional[int] = None,
     group_cost_mode: str = 'hop',
     isl_link_capacity_bps: Optional[float] = None,
+    management_mode: Optional[str] = None,
+    diagnostic_pairs: Optional[List[Tuple[int, int]]] = None,
 ):
     """
     LoHi (Load-aware Hierarchical Routing) Algorithm
@@ -1845,6 +2419,20 @@ def algorithm_lohi(
     
     assert _ROUTER is not None and _GPLANNER is not None, "call init() first"
 
+    active_management_mode = normalize_lohi_management_mode(
+        management_mode or LOHI_MANAGEMENT_MODE
+    )
+    if active_management_mode == "strict_physical_waypoint":
+        _write_strict_waypoint_unsupported_diagnostics(
+            output_dynamic_state_dir,
+            int(time_since_epoch_ns),
+        )
+        report = strict_waypoint_support_report()
+        raise RuntimeError(
+            "LoHi strict physical waypoint mode is unavailable: %s. %s"
+            % (report["reason"], report["required_changes"])
+        )
+
     assert time_step_ns is not None
     step_ns = int(time_step_ns)
     snapshot_idx = int(time_since_epoch_ns // step_ns)
@@ -1855,6 +2443,7 @@ def algorithm_lohi(
     if enable_verbose_logs:
         print(f"\n{'='*70}")
         print(f"LoHi Algorithm at t={time_since_epoch_ns} ns (snapshot {snapshot_idx})")
+        print(f"Management mode: {active_management_mode}")
         print(f"{'='*70}")
 
     num_sats = len(satellites) if not isinstance(satellites, int) else satellites
@@ -1951,6 +2540,7 @@ def algorithm_lohi(
     _SAT_NEI_TO_IF = sat_neighbor_to_if
     
     # QUEUE-AWARE: 生成 fstate (傳入 queue_packets)
+    manager_decisions: Dict[Tuple[int, int], Dict[str, Any]] = {}
     fstate, dst_sat_map, src_sat_map, reason_counters, missing_reason_counts = build_fstate_lohi(
         sat_net_graph_only_satellites_with_isls,
         sat_to_pid,
@@ -1968,6 +2558,8 @@ def algorithm_lohi(
         queue_bytes=queue_bytes,
         link_rate_bps=link_rate_bps,
         default_link_capacity_bps=default_link_capacity_bps,
+        management_mode=active_management_mode,
+        manager_decisions=manager_decisions,
     )
     if enable_verbose_logs:
         _dump_pid_snapshot(
@@ -1982,7 +2574,7 @@ def algorithm_lohi(
     
     _PREV_DST_SAT_MAP = dst_sat_map
     _PREV_SRC_SAT_MAP = src_sat_map
-    
+
     # HOLDOVER 機制
     if prev_fstate:
         holdover_count = 0
@@ -2024,6 +2616,20 @@ def algorithm_lohi(
     
     # （第二次 _break_2cycles 已移除：HOLDOVER 加入的 entry 均通過 has_edge 驗證，
     #  幾乎不會製造新的 2-cycle；第一次在 build_fstate_lohi 結尾已清理主流程產生的 cycle。）
+
+    write_lohi_manager_diagnostics(
+        output_dynamic_state_dir,
+        int(time_since_epoch_ns),
+        active_management_mode,
+        diagnostic_pairs,
+        fstate,
+        sat_net_graph_only_satellites_with_isls,
+        _ROUTER,
+        manager_decisions,
+        num_sats,
+        num_sats + num_ground_stations,
+        queue_packets=queue_packets,
+    )
 
     # 寫入 fstate
     output_filename = output_dynamic_state_dir + "/fstate_" + str(time_since_epoch_ns) + ".txt"

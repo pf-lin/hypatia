@@ -68,6 +68,13 @@ background_flow_traffic_modes = {
 traffic_mode_selections = traffic_modes + ["all"]
 default_traffic_mode_selection = "core_hotspot_specific"
 
+lohi_management_modes = [
+    "legacy",
+    "control_plane_only",
+    "strict_physical_waypoint",
+]
+default_lohi_management_mode = "legacy"
+
 
 def repo_root():
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
@@ -242,6 +249,29 @@ def normalize_algorithms(algorithms=None):
     if algorithms is None or len(algorithms) == 0:
         return list(default_algorithms)
     return list(algorithms)
+
+
+def normalize_lohi_management_mode(value=None):
+    mode = str(value or default_lohi_management_mode).strip().lower().replace("-", "_")
+    aliases = {
+        "control_plane": "control_plane_only",
+        "strict": "strict_physical_waypoint",
+        "strict_waypoint": "strict_physical_waypoint",
+    }
+    mode = aliases.get(mode, mode)
+    if mode not in lohi_management_modes:
+        raise ValueError(
+            "Invalid LoHi management mode '%s'. Expected one of: %s"
+            % (value, ", ".join(lohi_management_modes))
+        )
+    return mode
+
+
+def lohi_management_mode_tag(mode):
+    mode = normalize_lohi_management_mode(mode)
+    if mode == "strict_physical_waypoint":
+        return "lohi_mgmt_strict_waypoint"
+    return "lohi_mgmt_%s" % mode
 
 
 def seconds_to_ns(seconds):
@@ -450,6 +480,16 @@ def add_common_run_arguments(parser):
     add_algorithms_argument(parser)
     add_focus_pair_arguments(parser)
     add_runtime_override_arguments(parser)
+    parser.add_argument(
+        "--lohi-management-mode",
+        choices=lohi_management_modes,
+        default=default_lohi_management_mode,
+        help=(
+            "LoHi management-satellite behavior. strict_physical_waypoint "
+            "currently fails closed because the NS-3 arbiter has no waypoint "
+            "phase. Default: %s"
+        ) % default_lohi_management_mode,
+    )
 
 
 def add_analysis_output_arguments(parser):
@@ -561,15 +601,20 @@ def run_name_for(
     background_flow_count=None,
     src_node_id=focus_src_node_id,
     dst_node_id=focus_dst_node_id,
+    lohi_management_mode=None,
 ):
     bg_tag = ""
     if background_flow_count is not None:
         bg_tag = "_bg_flow_count_%d" % int(background_flow_count)
-    return "run_%s_%s_load_%s%s_oneweb_isls_moving_udp_pdr" % (
+    management_tag = ""
+    if lohi_management_mode is not None:
+        management_tag = "_%s" % lohi_management_mode_tag(lohi_management_mode)
+    return "run_%s_%s_load_%s%s%s_oneweb_isls_moving_udp_pdr" % (
         traffic_mode,
         focus_pair_tag_for(src_node_id, dst_node_id),
         load_level_to_tag(load_level),
         bg_tag,
+        management_tag,
     )
 
 
@@ -577,6 +622,17 @@ def resolve_existing_run(run, runs_root="runs"):
     if os.path.isdir(os.path.join(runs_root, run["name"])):
         return run
     if (
+        run.get("lohi_management_mode") == "legacy"
+        and os.path.isdir(os.path.join(runs_root, run["pre_management_name"]))
+    ):
+        resolved = dict(run)
+        resolved["requested_name"] = run["name"]
+        resolved["name"] = run["pre_management_name"]
+        resolved["using_pre_management_run_name"] = True
+        return resolved
+    if (
+        run.get("lohi_management_mode") == "legacy"
+        and
         run["src_node_id"] == focus_src_node_id
         and run["dst_node_id"] == focus_dst_node_id
         and os.path.isdir(os.path.join(runs_root, run["legacy_name"]))
@@ -611,6 +667,7 @@ def get_udp_pdr_run_list(
     selection_sample_times_s_override=None,
     src_node_id_override=focus_src_node_id,
     dst_node_id_override=focus_dst_node_id,
+    lohi_management_mode_override=default_lohi_management_mode,
 ):
     load_levels = parse_load_levels(load_levels)
     algorithms = normalize_algorithms(algorithms)
@@ -696,6 +753,9 @@ def get_udp_pdr_run_list(
         dst_node_id_override,
     )
     focus_metadata = focus_pair_metadata(src_node_id, dst_node_id)
+    lohi_management_mode = normalize_lohi_management_mode(
+        lohi_management_mode_override
+    )
 
     if sim_end_s <= 0:
         raise ValueError("simulation_end_time_s must be positive")
@@ -770,6 +830,13 @@ def get_udp_pdr_run_list(
                         load_level,
                         name_background_flow_count,
                     )
+                    pre_management_name = run_name_for(
+                        traffic_mode,
+                        load_level,
+                        name_background_flow_count,
+                        src_node_id,
+                        dst_node_id,
+                    )
                     run_list.append({
                         "name": run_name_for(
                             traffic_mode,
@@ -777,8 +844,11 @@ def get_udp_pdr_run_list(
                             name_background_flow_count,
                             src_node_id,
                             dst_node_id,
+                            lohi_management_mode,
                         ),
                         "legacy_name": legacy_name,
+                        "pre_management_name": pre_management_name,
+                        "lohi_management_mode": lohi_management_mode,
                         "traffic_mode": traffic_mode,
                         "movement": "moving",
                         "satellite_network": full_satellite_network_isls,

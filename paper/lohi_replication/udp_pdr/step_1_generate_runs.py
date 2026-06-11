@@ -85,6 +85,7 @@ def _render_config(run, udp_logging_ids):
             "[DYNAMIC-STATE-UPDATE-INTERVAL-NS]": run[
                 "dynamic_state_update_interval_ns"
             ],
+            "[LOHI-MANAGEMENT-MODE]": run["lohi_management_mode"],
             "[ISL-DATA-RATE-MEGABIT-PER-S]": run["data_rate_megabit_per_s"],
             "[GSL-DATA-RATE-MEGABIT-PER-S]": run["data_rate_megabit_per_s"],
             "[ISL-MAX-QUEUE-SIZE-PKTS]": run["queue_size_pkt"],
@@ -1894,6 +1895,7 @@ def write_run_metadata(run_dir, run, pairs, per_flow_rate):
     metadata = {
         "run": run,
         **_focus_identity_fields(run),
+        "lohi_management_mode": run["lohi_management_mode"],
         "flow_count": len(pairs),
         "flow_count_by_class": dict(by_class),
         "per_flow_rate_mbps": per_flow_rate,
@@ -1975,6 +1977,7 @@ def write_schedule_summary(run_parent_dir, run, pairs, per_flow_rate):
         "run_name": run["name"],
         **_focus_identity_fields(run),
         "traffic_mode": run["traffic_mode"],
+        "lohi_management_mode": run["lohi_management_mode"],
         "load_level": run["load_level"],
         "background_flow_count": run["background_flow_count"],
         "generated_background_flow_count": by_class.get("background", 0),
@@ -2007,6 +2010,7 @@ def write_schedule_summary(run_parent_dir, run, pairs, per_flow_rate):
             "focus_pair_tag",
             "focus_flow_direction_count",
             "traffic_mode",
+            "lohi_management_mode",
             "load_level",
             "background_flow_count",
             "generated_background_flow_count",
@@ -2347,6 +2351,7 @@ def main():
         args.selection_sample_times_s,
         args.src_node_id,
         args.dst_node_id,
+        args.lohi_management_mode,
     )
 
     generated_pairs_by_run_name = {}

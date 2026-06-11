@@ -71,6 +71,11 @@ def generate_initial_fstate(run, run_dir):
         None,
         time_step_ns=run["dynamic_state_update_interval_ns"],
         isl_link_capacity_bps=read_isl_link_capacity_bps(run_dir),
+        lohi_management_mode=run["lohi_management_mode"],
+        lohi_diagnostic_pairs=[
+            (run["src_node_id"], run["dst_node_id"]),
+            (run["dst_node_id"], run["src_node_id"]),
+        ],
     )
 
     if prev_output:
@@ -129,8 +134,14 @@ def main():
         args.selection_sample_times_s,
         args.src_node_id,
         args.dst_node_id,
+        args.lohi_management_mode,
     ):
         run = resolve_existing_run(run)
+        if run.get("using_pre_management_run_name"):
+            print(
+                "Using pre-management-mode legacy run folder: %s"
+                % run["name"]
+            )
         if run.get("using_legacy_run_name"):
             print(
                 "Using legacy untagged run folder for default focus pair: %s"

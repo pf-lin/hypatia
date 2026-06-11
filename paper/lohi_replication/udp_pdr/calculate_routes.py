@@ -46,6 +46,21 @@ def read_isl_link_capacity_bps(run_dir):
     return float(props["isl_data_rate_megabit_per_s"]) * 1e6
 
 
+def read_lohi_management_mode(run_dir):
+    props = read_properties(os.path.join(run_dir, "config_ns3.properties"))
+    return props.get("lohi_management_mode", "legacy")
+
+
+def read_lohi_diagnostic_pairs(run_dir):
+    props = read_properties(os.path.join(run_dir, "config_ns3.properties"))
+    try:
+        src = int(props["focus_src_node_id"])
+        dst = int(props["focus_dst_node_id"])
+    except (KeyError, TypeError, ValueError):
+        return []
+    return [(src, dst), (dst, src)]
+
+
 def process_queue_statistics(logs_dir, output_file):
     isl_queue_pkt_file = os.path.join(logs_dir, "isl_queue_pkt.csv")
     isl_queue_byte_file = os.path.join(logs_dir, "isl_queue_byte.csv")
@@ -174,7 +189,15 @@ def generate_single_fstate(
     beta=0.3,
     time_step_ns=None,
     isl_link_capacity_bps=None,
+    lohi_management_mode=None,
+    lohi_diagnostic_pairs=None,
 ):
+    run_dir = os.path.dirname(os.path.abspath(dynamic_state_dir))
+    if lohi_management_mode is None:
+        lohi_management_mode = read_lohi_management_mode(run_dir)
+    if lohi_diagnostic_pairs is None:
+        lohi_diagnostic_pairs = read_lohi_diagnostic_pairs(run_dir)
+
     ground_stations = read_ground_stations_extended(
         os.path.join(satellite_network_dir, "ground_stations.txt")
     )
@@ -212,6 +235,8 @@ def generate_single_fstate(
         beta,
         time_step_ns,
         isl_link_capacity_bps,
+        lohi_management_mode,
+        lohi_diagnostic_pairs,
     )
 
 
@@ -235,6 +260,8 @@ def main():
     current_time_ns = args.current_time_ns
     time_step_ns = read_dynamic_interval_ns(run_dir)
     isl_link_capacity_bps = read_isl_link_capacity_bps(run_dir)
+    lohi_management_mode = read_lohi_management_mode(run_dir)
+    lohi_diagnostic_pairs = read_lohi_diagnostic_pairs(run_dir)
     prev_time_ns = current_time_ns - time_step_ns
 
     dynamic_state_dir = os.path.join(run_dir, "dynamic_state")
@@ -267,6 +294,8 @@ def main():
         args.beta,
         time_step_ns,
         isl_link_capacity_bps,
+        lohi_management_mode,
+        lohi_diagnostic_pairs,
     )
 
     print("Step 4: Saving current output for next iteration...")

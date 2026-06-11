@@ -33,6 +33,8 @@ class DynamicRunListFocusPairTest(unittest.TestCase):
         self.assertEqual(run["focus_src_name_if_available"], "Johannesburg")
         self.assertIn("Fukuoka", run["focus_dst_name_if_available"])
         self.assertEqual(run["focus_flow_direction_count"], 2)
+        self.assertEqual(run["lohi_management_mode"], "legacy")
+        self.assertIn("lohi_mgmt_legacy", run["name"])
 
     def test_focus_pair_validation_rejects_same_or_non_ground_station_nodes(self):
         with self.assertRaisesRegex(ValueError, "must differ"):
@@ -88,6 +90,44 @@ class DynamicRunListFocusPairTest(unittest.TestCase):
         metadata = focus_pair_metadata(738, 793)
         self.assertEqual(metadata["focus_src_name_if_available"], "Rio-de-Janeiro")
         self.assertIn("Saint-Petersburg", metadata["focus_dst_name_if_available"])
+
+    def test_management_modes_have_isolated_run_names(self):
+        legacy = get_udp_pdr_run_list(
+            selected_mode="focus_only",
+            load_levels=[1.0],
+            algorithms=["algorithm_lohi"],
+            lohi_management_mode_override="legacy",
+        )[0]
+        control_plane = get_udp_pdr_run_list(
+            selected_mode="focus_only",
+            load_levels=[1.0],
+            algorithms=["algorithm_lohi"],
+            lohi_management_mode_override="control_plane_only",
+        )[0]
+        strict = get_udp_pdr_run_list(
+            selected_mode="focus_only",
+            load_levels=[1.0],
+            algorithms=["algorithm_lohi"],
+            lohi_management_mode_override="strict_physical_waypoint",
+        )[0]
+
+        self.assertIn("lohi_mgmt_legacy", legacy["name"])
+        self.assertIn("lohi_mgmt_control_plane_only", control_plane["name"])
+        self.assertIn("lohi_mgmt_strict_waypoint", strict["name"])
+        self.assertEqual(len({legacy["name"], control_plane["name"], strict["name"]}), 3)
+
+    def test_legacy_mode_can_read_pre_management_run_name(self):
+        run = get_udp_pdr_run_list(
+            selected_mode="focus_only",
+            load_levels=[1.0],
+            algorithms=["algorithm_lohi"],
+            lohi_management_mode_override="legacy",
+        )[0]
+        with tempfile.TemporaryDirectory() as runs_root:
+            os.makedirs(os.path.join(runs_root, run["pre_management_name"]))
+            resolved = resolve_existing_run(run, runs_root)
+        self.assertEqual(resolved["name"], run["pre_management_name"])
+        self.assertTrue(resolved["using_pre_management_run_name"])
 
 
 if __name__ == "__main__":

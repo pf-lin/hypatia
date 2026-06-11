@@ -1038,6 +1038,77 @@ CSVs to inspect path asymmetry, hop counts, component delays, replay failures,
 and queue-data quality. The route figures use a lightweight longitude/latitude
 view of the selected path and do not require downloading an online map.
 
+## LoHi Management Satellite Modes
+
+UDP/PDR accepts:
+
+```bash
+--lohi-management-mode legacy
+--lohi-management-mode control_plane_only
+--lohi-management-mode strict_physical_waypoint
+```
+
+`legacy` preserves the existing LoHi forwarding behavior: each current
+satellite participates directly in border selection and packets are not
+required to visit the PID management satellite.
+
+`control_plane_only` uses the management satellite's intra-PID distance field
+when selecting the border pair. The physical forwarding state still routes the
+current satellite directly toward that selected border. This is
+**manager-assisted border selection**, not manager waypoint routing. It does
+not necessarily increase hop count or RTT and does not make the manager a
+physical queue hotspot; those metrics change only indirectly if a different
+border/path is selected.
+
+`strict_physical_waypoint` is intentionally fail-closed in the current
+implementation. The NS-3 `ArbiterSingleForward` table is indexed only by final
+destination, so it cannot distinguish a packet traveling toward the manager
+from the same packet traveling from the manager toward a border. A safe strict
+implementation needs a waypoint phase or route-segment packet tag and an
+extended fstate/arbiter format. Selecting strict mode writes diagnostics and
+then stops before generating an ambiguous forwarding state.
+
+Management mode is recorded in `run_metadata.json`,
+`config_ns3.properties`, and the run name:
+
+```text
+lohi_mgmt_legacy
+lohi_mgmt_control_plane_only
+lohi_mgmt_strict_waypoint
+```
+
+LoHi writes focus-pair diagnostics beside, not inside, `dynamic_state/`:
+
+```text
+lohi_manager_diagnostics/
+  lohi_manager_mode_summary.csv
+  lohi_manager_waypoint_compliance.csv
+  lohi_manager_path_segments.csv
+  lohi_manager_hotspot_summary.csv
+  lohi_manager_loop_check.csv
+```
+
+Use a short smoke before longer experiments:
+
+```bash
+COMMON="--traffic-mode core_isl_hotspot_specific --src-node-id 754 \
+--dst-node-id 785 --load-level 1.4 --simulation-end-time-s 10 \
+--traffic-stop-time-s 8 --background-flow-count 16 \
+--per-flow-rate-reference-background-flow-count 4 \
+--algorithms algorithm_lohi"
+
+python step_1_generate_runs.py $COMMON \
+  --lohi-management-mode control_plane_only --force
+python step_2_run.py $COMMON \
+  --lohi-management-mode control_plane_only
+python step_3_generate_plots.py $COMMON \
+  --lohi-management-mode control_plane_only
+```
+
+Do not start with a 200-second strict run. Implement and validate NS-3 waypoint
+phase support first, then run 10-second and 60-second loop/no-route and manager
+compliance checks.
+
 ## Current Limitations
 
 PDR remains the primary end-to-end metric. The synthetic loss value

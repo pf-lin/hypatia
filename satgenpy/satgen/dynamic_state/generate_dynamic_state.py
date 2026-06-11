@@ -111,6 +111,8 @@ def generate_dynamic_state_at(
         beta=0.3,               # weight for queue delay
         time_step_ns=None,      # time step for dynamic algorithms
         isl_link_capacity_bps=None,
+        lohi_management_mode=None,
+        lohi_diagnostic_pairs=None,
 ):
     if enable_verbose_logs:
         print("FORWARDING STATE AT T = " + (str(time_since_epoch_ns))
@@ -422,6 +424,8 @@ def generate_dynamic_state_at(
             queue_stats_file,
             time_step_ns=time_step_ns,
             isl_link_capacity_bps=isl_link_capacity_bps,
+            management_mode=lohi_management_mode,
+            diagnostic_pairs=lohi_diagnostic_pairs,
         )
 
     elif dynamic_state_algorithm == "algorithm_lhtr":
