@@ -4,6 +4,7 @@ import unittest
 
 import pandas as pd
 
+from dynamic_run_list import build_arg_parser
 from udp_rtt_analysis import (
     build_sample_times_ns,
     build_summary,
@@ -13,6 +14,15 @@ from udp_rtt_analysis import (
 
 
 class UdpRttAnalysisTest(unittest.TestCase):
+    def test_default_rtt_sampling_is_every_100_ms(self):
+        args = build_arg_parser("test").parse_args([])
+        self.assertEqual(args.rtt_sample_interval_s, 0.1)
+
+        times = build_sample_times_ns(60, 58, args.rtt_sample_interval_s)
+        self.assertEqual(len(times), 581)
+        self.assertEqual(times[:3], [0, 100_000_000, 200_000_000])
+        self.assertEqual(times[-1], 58_000_000_000)
+
     def test_interval_sampling_includes_traffic_stop_time(self):
         self.assertEqual(
             build_sample_times_ns(60, 58, 5),

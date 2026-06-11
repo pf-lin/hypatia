@@ -846,6 +846,7 @@ def plot_rtt_over_time(rtt_df, output_file, field, ylabel, title):
     ax.set_xlabel("Simulation time (s)")
     ax.set_ylabel(ylabel)
     ax.set_title(title)
+    ax.set_ylim(bottom=0)
     ax.grid(True, alpha=0.25)
     ax.legend(fontsize=7, ncol=2)
     _save_figure(fig, output_file)

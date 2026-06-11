@@ -546,10 +546,10 @@ def add_analysis_output_arguments(parser):
     parser.add_argument(
         "--rtt-sample-interval-s",
         type=float,
-        default=5.0,
+        default=0.1,
         help=(
             "Estimated RTT sample interval in seconds. The traffic stop time "
-            "is also sampled. Default: 5"
+            "is also sampled. Default: 0.1 (100 ms)"
         ),
     )
     parser.add_argument(

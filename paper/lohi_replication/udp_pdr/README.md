@@ -983,8 +983,9 @@ This differs from the TCP `traffic_matrix` RTT output, which primarily sums
 forward and reverse propagation distance and does not add UDP/PDR queue
 occupancy.
 
-The default step 3 invocation writes RTT CSVs and plots every 5 seconds and
-also samples the traffic stop time:
+The default step 3 invocation writes RTT CSVs and plots every 100 ms, matching
+the default dynamic forwarding-state update interval. It also samples the
+traffic stop time:
 
 ```bash
 python step_3_generate_plots.py \
@@ -999,11 +1000,13 @@ python step_3_generate_plots.py \
     algorithm_lohi \
     algorithm_lhtr \
   --enable-rtt-analysis \
-  --rtt-sample-interval-s 5
+  --rtt-sample-interval-s 0.1
 ```
 
-Use `--rtt-sample-times 0,10,20,30,40,50,58` for explicit samples. Route PNGs
-are optional to avoid producing many figures:
+The RTT-over-time plots always start their Y-axis at zero. Use
+`--rtt-sample-times 0,10,20,30,40,50,58` only when an intentionally sparse
+diagnostic view is desired. Route PNGs remain separately sampled and optional
+to avoid producing hundreds of figures:
 
 ```bash
 python step_3_generate_plots.py <same run selection arguments> \
