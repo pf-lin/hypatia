@@ -34,6 +34,22 @@ class PacketDeliveryOutputsTest(unittest.TestCase):
             output_path(comparison_dir, "link_drops.csv"),
             os.path.join(comparison_dir, "legacy", "link_drops.csv"),
         )
+        self.assertEqual(
+            output_path(comparison_dir, "udp_rtt_summary_by_algorithm.csv"),
+            os.path.join(
+                comparison_dir,
+                "core",
+                "udp_rtt_summary_by_algorithm.csv",
+            ),
+        )
+        self.assertEqual(
+            output_path(comparison_dir, "udp_focus_rtt_timeseries.csv"),
+            os.path.join(
+                comparison_dir,
+                "diagnostics",
+                "udp_focus_rtt_timeseries.csv",
+            ),
+        )
 
     def test_archive_flat_outputs_preserves_duplicates(self):
         with tempfile.TemporaryDirectory() as comparison_dir:

@@ -919,6 +919,125 @@ Any mismatch or exact-event overflow is written to `reconciliation_error`; it
 is never silently discarded. v3 also reports path-replay success, flow-tag
 coverage, attribution coverage, confidence, and explanatory notes.
 
+## UDP/PDR RTT and Route Visualization
+
+Step 3 also produces focus-flow route and estimated RTT analysis without
+rerunning NS-3. The focus pair is read from `run_metadata.json`, with
+`udp_burst_schedule.csv`, the step 3 CLI, and the legacy `738 <-> 793` pair as
+fallbacks.
+
+Forward and reverse paths are reconstructed by cumulatively applying every
+`dynamic_state/fstate_<time_ns>.txt` delta up to each sample time. The shared
+`dynamic_path_replay.py` helper detects missing entries, explicit no-route
+entries, loops, invalid next hops, and hop-limit exhaustion. Both directions
+are retained because UDP/PDR routes can be asymmetric.
+
+The propagation-only estimate is:
+
+```text
+propagation_only_rtt
+  = forward_path_distance / 299792458
+  + reverse_path_distance / 299792458
+```
+
+The queue-aware estimate is:
+
+```text
+queue_aware_rtt
+  = propagation_only_rtt
+  + forward_transmission_delay
+  + reverse_transmission_delay
+  + forward_queue_delay
+  + reverse_queue_delay
+```
+
+Transmission delay is computed per hop as
+`packet_size_bits / link_capacity_bps`. ISL and GSL capacities come from
+`config_ns3.properties`. Packet size follows
+`QUEUE_DEFAULT_PACKET_SIZE_BYTES` when set and otherwise uses the routing-cost
+default of 1500 bytes.
+
+Queue delay uses the latest completed queue-history interval satisfying
+`interval_end_ns <= RTT sample time`. Byte histories are preferred:
+
+```text
+D_queue = queue_bytes * 8 / link_capacity_bps
+```
+
+If a byte history is unavailable for an interface, packet history is used:
+
+```text
+D_queue = queue_packets * packet_size_bytes * 8 / link_capacity_bps
+```
+
+The CSV records `queue_bytes`, `queue_packets_fallback`, and
+`missing_queue_data` sources. A missing hop contributes zero queue delay and is
+counted in `queue_samples_missing_count`; this makes the estimate a documented
+lower bound rather than causing analysis to fail.
+
+These values are path-replay and queue-occupancy estimates. They are not
+packet-level measured RTT. In particular, the queue histories contain
+per-window maxima, and the estimate does not model application processing,
+retransmission, or the exact queue occupancy seen by an individual packet.
+This differs from the TCP `traffic_matrix` RTT output, which primarily sums
+forward and reverse propagation distance and does not add UDP/PDR queue
+occupancy.
+
+The default step 3 invocation writes RTT CSVs and plots every 5 seconds and
+also samples the traffic stop time:
+
+```bash
+python step_3_generate_plots.py \
+  --traffic-mode core_isl_hotspot_specific \
+  --src-node-id 754 \
+  --dst-node-id 785 \
+  --load-level 1.4 \
+  --background-flow-count 16 \
+  --algorithms \
+    algorithm_free_one_only_over_isls \
+    algorithm_queue_aware_over_isls \
+    algorithm_lohi \
+    algorithm_lhtr \
+  --enable-rtt-analysis \
+  --rtt-sample-interval-s 5
+```
+
+Use `--rtt-sample-times 0,10,20,30,40,50,58` for explicit samples. Route PNGs
+are optional to avoid producing many figures:
+
+```bash
+python step_3_generate_plots.py <same run selection arguments> \
+  --enable-route-visualization \
+  --route-plot-times 0,30,58
+```
+
+With the standard output layout, the generated files are:
+
+```text
+comparison_packet_delivery/
+  core/
+    udp_rtt_summary_by_algorithm.csv
+    udp_rtt_components_by_algorithm.csv
+    focus_rtt_over_time.png
+    focus_queue_aware_rtt_over_time.png
+    rtt_summary_by_algorithm.png
+    rtt_component_breakdown.png
+    focus_forward_reverse_hop_count.png
+  diagnostics/
+    udp_focus_rtt_timeseries.csv
+    udp_focus_path_timeseries.csv
+    udp_rtt_diagnostics.txt
+  graphical_routes/
+    <algorithm>_focus_forward_path_t<time>s.png
+    <algorithm>_focus_reverse_path_t<time>s.png
+    <algorithm>_focus_round_trip_path_t<time>s.png
+```
+
+Start with the two summary CSVs and RTT comparison plots. Use the timeseries
+CSVs to inspect path asymmetry, hop counts, component delays, replay failures,
+and queue-data quality. The route figures use a lightweight longitude/latitude
+view of the selected path and do not require downloading an online map.
+
 ## Current Limitations
 
 PDR remains the primary end-to-end metric. The synthetic loss value

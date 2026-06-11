@@ -23,6 +23,21 @@ def main():
     print("\n[Step 3.2] Plotting packet delivery comparison...")
     subprocess.check_call(base_cmd + [os.path.join(script_dir, "plot_packet_delivery_comparison.py")] + common_args)
 
+    if args.enable_rtt_analysis:
+        print("\n[Step 3.3] Generating estimated RTT and route outputs...")
+        try:
+            subprocess.check_call(
+                base_cmd
+                + [os.path.join(script_dir, "udp_rtt_analysis.py")]
+                + common_args
+            )
+        except subprocess.CalledProcessError as exc:
+            print(
+                "Warning: RTT analysis failed with exit code %d; existing "
+                "packet-delivery outputs remain available." % exc.returncode,
+                file=sys.stderr,
+            )
+
     print("\nStep 3 complete.")
 
 

@@ -489,6 +489,47 @@ def add_analysis_output_arguments(parser):
             "file can be multiple gigabytes."
         ),
     )
+    rtt_group = parser.add_mutually_exclusive_group()
+    rtt_group.add_argument(
+        "--enable-rtt-analysis",
+        dest="enable_rtt_analysis",
+        action="store_true",
+        help="Generate focus-flow estimated RTT CSVs and comparison plots.",
+    )
+    rtt_group.add_argument(
+        "--no-rtt-analysis",
+        dest="enable_rtt_analysis",
+        action="store_false",
+        help="Skip focus-flow estimated RTT analysis.",
+    )
+    parser.set_defaults(enable_rtt_analysis=True)
+    parser.add_argument(
+        "--rtt-sample-interval-s",
+        type=float,
+        default=5.0,
+        help=(
+            "Estimated RTT sample interval in seconds. The traffic stop time "
+            "is also sampled. Default: 5"
+        ),
+    )
+    parser.add_argument(
+        "--rtt-sample-times",
+        default=None,
+        help=(
+            "Comma-separated explicit RTT sample times in seconds. Overrides "
+            "--rtt-sample-interval-s."
+        ),
+    )
+    parser.add_argument(
+        "--enable-route-visualization",
+        action="store_true",
+        help="Generate focus forward, reverse, and round-trip route PNGs.",
+    )
+    parser.add_argument(
+        "--route-plot-times",
+        default="0,30,58",
+        help="Comma-separated route plot times in seconds. Default: 0,30,58",
+    )
 
 
 def describe_selection(args):
