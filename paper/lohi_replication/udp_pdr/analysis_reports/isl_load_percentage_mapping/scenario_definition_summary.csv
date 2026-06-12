@@ -1,0 +1,11 @@
+definition_type,label,metric,rule,uses_pdr,notes
+traffic_load_label,Low,offered_isl_resource_load_percent,0.0 <= offered load < 50.0,false,Official routing-independent label; denominator is total directed constellation ISL capacity.
+traffic_load_label,Medium,offered_isl_resource_load_percent,50.0 <= offered load < 70.0,false,Official routing-independent label; denominator is total directed constellation ISL capacity.
+traffic_load_label,High,offered_isl_resource_load_percent,70.0 <= offered load < 85.0,false,Official routing-independent label; denominator is total directed constellation ISL capacity.
+traffic_load_label,Severe,offered_isl_resource_load_percent,85.0 <= offered load < 100.0,false,Official routing-independent label; denominator is total directed constellation ISL capacity.
+traffic_load_label,Overload,offered_isl_resource_load_percent,100.0 <= offered load < infinity,false,Official routing-independent label; denominator is total directed constellation ISL capacity.
+observed_pressure_condition,Non-congested,Queue-aware observed throughput and queue pressure,"target active p95 < 0.60, links over 80% = 0, and ISL capacity samples = 0",false,Adaptive observed validation only.
+observed_pressure_condition,Localized congestion,Queue-aware observed throughput and queue pressure,"target active p95 >= 0.60, or links over 80% > 0, or 0 < ISL capacity samples < 1000; sustained/overloaded rules take precedence",false,Adaptive observed validation only.
+observed_pressure_condition,Sustained congestion,Queue-aware observed throughput and queue pressure,"ISL capacity samples >= 1000, or saturation observation span >= 4 s with at least one link over 90%; overloaded rule takes precedence",false,"Saturation duration is a first-to-last observation-span proxy, not proof of continuous saturation."
+observed_pressure_condition,Overloaded,Queue-aware observed throughput and queue pressure,"ISL capacity samples >= 25000, or saturation observation span >= 6 s and links over 90% >= 3",false,Adaptive observed validation only.
+gsl_safety_gate,Safe,"GSL capacity, queue saturation, and associated loss","GSL capacity = 100 Mbps, GSL capacity samples = 0, GSL-associated loss = 0, and mixed loss does not dominate",false,"Associated loss is time/path correlation, not physical drop proof."

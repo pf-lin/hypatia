@@ -1,0 +1,31 @@
+setting_id,load_level,background_flow_count,global_offered_isl_load_percent,hotspot_reference_load_percent,target_corridor_offered_load_percent,peak_reference_link_offered_load_percent,global_traffic_load_label,hotspot_traffic_load_label,observed_pressure_condition,queue_aware_pdr,gsl_bottleneck_flag,safe_for_isl_focused_experiment
+"load=1.0,bg=24",1.000000000,24,1.841724537,47.358630953,75.333333335,133.333333336,Low,Hotspot-Light,Localized congestion,0.998824018,false,true
+"load=1.0,bg=32",1.000000000,32,2.327835648,49.295343138,90.666666668,183.333333337,Low,Hotspot-Light,Localized congestion,0.993678587,false,true
+"load=1.0,bg=16",1.000000000,16,1.319444444,50.000000001,58.000000001,133.333333336,Low,Hotspot-Moderate,Non-congested,1.000000000,false,true
+"load=1.2,bg=24",1.200000000,24,2.210069444,56.830357143,90.400000000,160.000000000,Low,Hotspot-Moderate,Localized congestion,0.995992388,false,true
+"load=1.2,bg=32",1.200000000,32,2.793402778,59.154411765,108.800000000,220.000000000,Low,Hotspot-Moderate,Localized congestion,0.985602787,false,true
+"load=1.2,bg=16",1.200000000,16,1.583333333,60.000000000,69.600000000,160.000000000,Low,Hotspot-Moderate,Non-congested,1.000000000,false,true
+"load=1.4,bg=24",1.400000000,24,2.578414352,66.302083332,105.466666665,186.666666664,Low,Hotspot-Moderate,Localized congestion,0.992090172,false,true
+"load=1.4,bg=32",1.400000000,32,3.258969907,69.013480391,126.933333332,256.666666663,Low,Hotspot-Moderate,Sustained congestion,0.971212007,false,true
+"load=1.4,bg=16",1.400000000,16,1.847222222,69.999999999,81.199999999,186.666666664,Low,Hotspot-High,Localized congestion,0.999178806,false,true
+"load=1.6,bg=24",1.600000000,24,2.946759259,75.773809525,120.533333335,213.333333336,Low,Hotspot-High,Localized congestion,0.989573419,false,true
+"load=1.6,bg=32",1.600000000,32,3.724537037,78.872549021,145.066666668,293.333333337,Low,Hotspot-High,Sustained congestion,0.950555813,false,true
+"load=1.8,bg=24",1.800000000,24,3.315104167,85.245535714,135.600000000,240.000000000,Low,Hotspot-Severe,Localized congestion,0.977903846,false,true
+"load=1.6,bg=40",1.600000000,40,4.206018519,86.523809525,166.933333335,400.000000005,Low,Hotspot-Severe,Sustained congestion,0.918782474,false,true
+"load=1.8,bg=32",1.800000000,32,4.190104167,88.731617647,163.200000000,330.000000000,Low,Hotspot-Severe,Sustained congestion,0.933367647,false,true
+"load=2.2,bg=48",2.200000000,48,7.027777778,91.171171172,243.466666669,623.333333339,Low,Hotspot-Severe,Sustained congestion,0.832711656,false,true
+"load=2.0,bg=24",2.000000000,24,3.683449074,94.717261904,150.666666665,266.666666664,Low,Hotspot-Severe,Sustained congestion,0.951659227,false,true
+"load=1.8,bg=40",1.800000000,40,4.731770833,97.339285714,187.800000000,450.000000000,Low,Hotspot-Severe,Sustained congestion,0.904750000,false,true
+"load=2.0,bg=32",2.000000000,32,4.655671296,98.590686274,181.333333332,366.666666663,Low,Hotspot-Severe,Sustained congestion,0.904818608,false,true
+"load=2.4,bg=48",2.400000000,48,7.666666667,99.459459459,265.600000000,680.000000000,Low,Hotspot-Severe,Sustained congestion,0.797262842,false,true
+"load=2.6,bg=48",2.600000000,48,8.305555555,107.747747747,287.733333331,736.666666661,Low,Hotspot-Overload,Sustained congestion,0.760657667,false,true
+"load=2.0,bg=40",2.000000000,40,5.257523148,108.154761904,208.666666665,499.999999995,Low,Hotspot-Overload,Sustained congestion,0.856061093,false,true
+"load=2.2,bg=32",2.200000000,32,5.121238426,108.449754903,199.466666668,403.333333337,Low,Hotspot-Overload,Sustained congestion,0.872320462,false,true
+"load=2.8,bg=48",2.800000000,48,8.944444445,116.036036037,309.866666669,793.333333339,Low,Hotspot-Overload,Overloaded,0.741831620,false,true
+"load=2.4,bg=32",2.400000000,32,5.586805556,118.308823529,217.600000000,440.000000000,Low,Hotspot-Overload,Sustained congestion,0.855643045,false,true
+"load=2.2,bg=40",2.200000000,40,5.783275463,118.970238096,229.533333335,550.000000005,Low,Hotspot-Overload,Sustained congestion,0.819924043,false,true
+"load=3.0,bg=48",3.000000000,48,9.583333333,124.324324324,332.000000000,850.000000000,Low,Hotspot-Overload,Overloaded,0.717060588,false,true
+"load=2.6,bg=56",2.600000000,56,9.840277778,125.398230088,343.199999997,909.999999993,Low,Hotspot-Overload,Overloaded,0.697896898,false,true
+"load=2.4,bg=40",2.400000000,40,6.309027778,129.785714286,250.400000000,600.000000000,Low,Hotspot-Overload,Sustained congestion,0.802015819,false,true
+"load=2.8,bg=56",2.800000000,56,10.597222222,135.044247789,369.600000003,980.000000007,Low,Hotspot-Overload,Overloaded,0.670086872,false,true
+"load=3.0,bg=56",3.000000000,56,11.354166667,144.690265487,396.000000000,1050.000000000,Low,Hotspot-Overload,Overloaded,0.640733922,false,true
