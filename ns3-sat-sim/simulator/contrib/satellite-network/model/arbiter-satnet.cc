@@ -60,8 +60,36 @@ ArbiterResult ArbiterSatnet::Decide(
     int32_t own_if_id = std::get<1>(next_node_id_my_if_next_if);
     int32_t next_if_id = std::get<2>(next_node_id_my_if_next_if);
 
-    // If the result is invalid
-    NS_ABORT_MSG_IF(next_node_id == -2 || own_if_id == -2 || next_if_id == -2, "Forwarding state is not set for this node to this target node (invalid).");
+    bool forwarding_state_is_invalid =
+            next_node_id == -2 || own_if_id == -2 || next_if_id == -2;
+
+    // The generated forwarding state intentionally contains only
+    // ground-station destinations. Under severe transient routing loops, a
+    // satellite can originate an ICMP error toward another satellite
+    // interface. Treat that unsupported control-plane route as a normal
+    // route failure instead of aborting the entire simulation.
+    if (
+            forwarding_state_is_invalid
+            && is_socket_request_for_source_ip
+            && ipHeader.GetProtocol() == 1  // ICMPv4
+    ) {
+        return ArbiterResult(true, 0, 0);
+    }
+
+    // Any other invalid entry indicates an incomplete data-plane state.
+    NS_ABORT_MSG_IF(
+        forwarding_state_is_invalid,
+        "Forwarding state is not set for current_node=" << m_node_id
+        << ", source_node=" << source_node_id
+        << ", target_node=" << target_node_id
+        << ", source_ip=" << ipHeader.GetSource()
+        << ", destination_ip=" << ipHeader.GetDestination()
+        << ", protocol=" << static_cast<uint32_t>(ipHeader.GetProtocol())
+        << ", packet_uid=" << pkt->GetUid()
+        << ", packet_size=" << pkt->GetSize()
+        << ", socket_source_ip_request=" << is_socket_request_for_source_ip
+        << " (invalid)."
+    );
 
     // Check whether it is a drop or not
     if (next_node_id != -1) {
