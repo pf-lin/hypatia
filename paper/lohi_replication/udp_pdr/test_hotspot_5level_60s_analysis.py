@@ -9,6 +9,7 @@ from analyze_hotspot_5level_60s_formal import (
     build_rankings,
     parse_flow_ids,
     safe_ratio,
+    scenario_order,
 )
 
 
@@ -63,6 +64,23 @@ class HotspotFiveLevelAnalysisTest(unittest.TestCase):
             "hotspot_5level_cross_level_summary.csv",
             set(catalog["filename"]),
         )
+
+    def test_partial_scenario_order_and_catalog_metadata(self):
+        summary = pd.DataFrame(
+            [
+                {"scenario": "H100+"},
+                {"scenario": "H80"},
+            ]
+        )
+        self.assertEqual(scenario_order(summary), ["H80", "H100+"])
+        catalog = build_output_catalog(
+            build_plot_manifest(),
+            simulation_end_time_s=200,
+            traffic_stop_time_s=198,
+            scenario_set="H80,H100+",
+        )
+        self.assertEqual(set(catalog["duration_label"]), {"200s"})
+        self.assertEqual(set(catalog["scenario_set"]), {"H80,H100+"})
 
 
 if __name__ == "__main__":

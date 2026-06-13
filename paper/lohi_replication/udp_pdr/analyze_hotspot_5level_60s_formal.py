@@ -13,20 +13,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from run_hotspot_5level_60s_formal import (
+    DEFAULT_DRAIN_TIME_S,
+    DEFAULT_SIMULATION_END_TIME_S,
+    duration_label,
+    output_paths as formal_output_paths,
+    selected_scenarios,
+)
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_MANIFEST = SCRIPT_DIR / "runs" / "hotspot_5level_60s_formal_manifest.csv"
-DEFAULT_FORMAL_SUMMARY = (
-    SCRIPT_DIR
-    / "analysis_reports"
-    / "hotspot_5level_60s_formal"
-    / "hotspot_5level_60s_formal_summary.csv"
-)
-DEFAULT_OUTPUT_DIR = (
-    SCRIPT_DIR
-    / "analysis_reports"
-    / "hotspot_5level_60s_comparison"
-)
 
 SCENARIO_ORDER = ["H40", "H60", "H80", "H90", "H100+"]
 ALGORITHM_ORDER = [
@@ -55,6 +51,10 @@ ALGORITHM_MARKERS = {
 }
 
 SUMMARY_FIELDS = [
+    "scenario_set",
+    "simulation_end_time_s",
+    "traffic_stop_time_s",
+    "duration_label",
     "scenario",
     "hotspot_label",
     "load_level",
@@ -98,14 +98,66 @@ SUMMARY_FIELDS = [
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Build read-only cross-level comparisons for the five completed "
-            "60 s UDP/PDR hotspot formal scenarios."
+            "Build read-only comparisons for completed duration-aware UDP/PDR "
+            "hotspot formal scenarios."
         )
     )
-    parser.add_argument("--manifest", default=str(DEFAULT_MANIFEST))
-    parser.add_argument("--formal-summary", default=str(DEFAULT_FORMAL_SUMMARY))
-    parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR))
-    return parser.parse_args()
+    parser.add_argument(
+        "--simulation-end-time-s",
+        type=float,
+        default=DEFAULT_SIMULATION_END_TIME_S,
+    )
+    parser.add_argument(
+        "--traffic-stop-time-s",
+        type=float,
+        default=None,
+        help="Default: simulation_end_time_s - 2.",
+    )
+    parser.add_argument(
+        "--scenarios",
+        nargs="+",
+        help="Scenario IDs to analyze. Missing scenarios are warned and skipped.",
+    )
+    parser.add_argument("--manifest", default=None)
+    parser.add_argument("--formal-summary", default=None)
+    parser.add_argument("--output-dir", default=None)
+    args = parser.parse_args()
+    if args.traffic_stop_time_s is None:
+        args.traffic_stop_time_s = (
+            args.simulation_end_time_s - DEFAULT_DRAIN_TIME_S
+        )
+    if args.simulation_end_time_s <= 0:
+        parser.error("--simulation-end-time-s must be positive")
+    if not 0 <= args.traffic_stop_time_s <= args.simulation_end_time_s:
+        parser.error("--traffic-stop-time-s must satisfy 0 <= stop <= end")
+    try:
+        args.selected_scenarios = selected_scenarios(args.scenarios)
+    except ValueError as exc:
+        parser.error(str(exc))
+    formal_paths = formal_output_paths(
+        args.simulation_end_time_s,
+        args.traffic_stop_time_s,
+    )
+    label = duration_label(
+        args.simulation_end_time_s,
+        args.traffic_stop_time_s,
+    )
+    if args.manifest is None:
+        args.manifest = formal_paths["manifest_path"]
+    if args.formal_summary is None:
+        args.formal_summary = formal_paths["summary_path"]
+    if args.output_dir is None:
+        args.output_dir = str(
+            SCRIPT_DIR
+            / "analysis_reports"
+            / ("hotspot_5level_%s_comparison" % label)
+        )
+    return args
+
+
+def scenario_order(summary):
+    present = set(summary["scenario"].astype(str))
+    return [scenario for scenario in SCENARIO_ORDER if scenario in present]
 
 
 def require_csv(path):
@@ -210,9 +262,41 @@ def loss_metrics(loss_row):
     }
 
 
-def load_cross_level_summary(manifest_path, formal_summary_path):
+def load_cross_level_summary(
+    manifest_path,
+    formal_summary_path,
+    requested_scenarios=None,
+    simulation_end_time_s=DEFAULT_SIMULATION_END_TIME_S,
+    traffic_stop_time_s=DEFAULT_SIMULATION_END_TIME_S - DEFAULT_DRAIN_TIME_S,
+):
     manifest = require_csv(manifest_path)
     formal_summary = require_csv(formal_summary_path)
+    requested_ids = (
+        [scenario["scenario_id"] for scenario in requested_scenarios]
+        if requested_scenarios is not None
+        else list(SCENARIO_ORDER)
+    )
+    available_ids = set(manifest["scenario_id"].astype(str))
+    missing_ids = [
+        scenario for scenario in requested_ids if scenario not in available_ids
+    ]
+    if missing_ids:
+        print(
+            "Warning: missing formal scenarios were skipped: %s"
+            % ", ".join(missing_ids)
+        )
+    manifest = manifest[
+        manifest["scenario_id"].astype(str).isin(requested_ids)
+    ].copy()
+    incomplete = manifest[manifest["status"] != "complete"]
+    if len(incomplete):
+        print(
+            "Warning: incomplete formal scenarios were skipped: %s"
+            % ", ".join(incomplete["scenario_id"].astype(str))
+        )
+        manifest = manifest[manifest["status"] == "complete"].copy()
+    if len(manifest) == 0:
+        raise RuntimeError("No complete requested formal scenarios are available")
     manifest["scenario_id"] = pd.Categorical(
         manifest["scenario_id"],
         categories=SCENARIO_ORDER,
@@ -220,13 +304,11 @@ def load_cross_level_summary(manifest_path, formal_summary_path):
     )
     manifest = manifest.sort_values("scenario_id")
     scenario_ids = manifest["scenario_id"].astype(str).tolist()
-    if scenario_ids != SCENARIO_ORDER:
-        raise RuntimeError(
-            "Manifest scenarios must be exactly %s; got %s"
-            % (SCENARIO_ORDER, scenario_ids)
-        )
-    if not (manifest["status"] == "complete").all():
-        raise RuntimeError("All formal scenarios must be complete before analysis")
+    selected_set = ",".join(scenario_ids)
+    selected_duration_label = duration_label(
+        simulation_end_time_s,
+        traffic_stop_time_s,
+    )
 
     rows = []
     for _, scenario in manifest.iterrows():
@@ -280,6 +362,10 @@ def load_cross_level_summary(manifest_path, formal_summary_path):
                 rtt_row["mean_reverse_queue_delay_ms"]
             )
             row = {
+                "scenario_set": selected_set,
+                "simulation_end_time_s": simulation_end_time_s,
+                "traffic_stop_time_s": traffic_stop_time_s,
+                "duration_label": selected_duration_label,
                 "scenario": scenario_id,
                 "hotspot_label": scenario["label"],
                 "load_level": float(scenario["load_level"]),
@@ -340,7 +426,7 @@ def load_cross_level_summary(manifest_path, formal_summary_path):
 
 def build_rankings(summary):
     rows = []
-    for scenario in SCENARIO_ORDER:
+    for scenario in scenario_order(summary):
         group = summary[summary["scenario"] == scenario].copy()
         group["aggregate_pdr_rank"] = group["aggregate_pdr"].rank(
             ascending=False,
@@ -404,10 +490,11 @@ def plot_lines(
     log_scale=False,
 ):
     fig, ax = plt.subplots(figsize=(8.2, 5.0))
-    x_values = np.arange(len(SCENARIO_ORDER))
+    levels = scenario_order(summary)
+    x_values = np.arange(len(levels))
     for algorithm in algorithms:
         data = summary[summary["algorithm"] == algorithm].set_index("scenario")
-        values = [float(data.loc[level, metric]) for level in SCENARIO_ORDER]
+        values = [float(data.loc[level, metric]) for level in levels]
         ax.plot(
             x_values,
             values,
@@ -417,7 +504,7 @@ def plot_lines(
             linewidth=2.2,
             markersize=6,
         )
-    ax.set_xticks(x_values, SCENARIO_ORDER)
+    ax.set_xticks(x_values, levels)
     ax.set_xlabel("Hotspot congestion level")
     ax.set_ylabel(ylabel)
     ax.set_title(title)
@@ -433,14 +520,15 @@ def plot_lines(
 
 
 def plot_lhtr_sbr_ratio(summary, output_path):
+    levels = scenario_order(summary)
     data = summary[summary["algorithm"] == "algorithm_lhtr"].set_index("scenario")
     values = [
         100.0 * float(data.loc[level, "lhtr_sbr_selection_ratio"])
-        for level in SCENARIO_ORDER
+        for level in levels
     ]
     fig, ax = plt.subplots(figsize=(8.2, 4.8))
     ax.plot(
-        SCENARIO_ORDER,
+        levels,
         values,
         color=ALGORITHM_COLORS["algorithm_lhtr"],
         marker="D",
@@ -456,12 +544,13 @@ def plot_lhtr_sbr_ratio(summary, output_path):
 
 
 def plot_lhtr_colors(summary, output_path):
+    levels = scenario_order(summary)
     data = summary[summary["algorithm"] == "algorithm_lhtr"].set_index("scenario")
-    yellow = [int(data.loc[level, "lhtr_yellow_count"]) for level in SCENARIO_ORDER]
-    red = [int(data.loc[level, "lhtr_red_count"]) for level in SCENARIO_ORDER]
+    yellow = [int(data.loc[level, "lhtr_yellow_count"]) for level in levels]
+    red = [int(data.loc[level, "lhtr_red_count"]) for level in levels]
     fig, ax = plt.subplots(figsize=(8.2, 4.8))
     ax.plot(
-        SCENARIO_ORDER,
+        levels,
         yellow,
         label="Yellow observations",
         color="#E69F00",
@@ -469,7 +558,7 @@ def plot_lhtr_colors(summary, output_path):
         linewidth=2.2,
     )
     ax.plot(
-        SCENARIO_ORDER,
+        levels,
         red,
         label="Red observations",
         color="#CC3311",
@@ -488,6 +577,7 @@ def plot_lhtr_colors(summary, output_path):
 
 
 def plot_flow_tail(summary, output_path):
+    levels = scenario_order(summary)
     fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.5), sharey=True)
     for axis, metric, title in [
         (axes[0], "min_pdr", "Minimum flow PDR"),
@@ -496,8 +586,8 @@ def plot_flow_tail(summary, output_path):
         for algorithm in ALGORITHM_ORDER:
             data = summary[summary["algorithm"] == algorithm].set_index("scenario")
             axis.plot(
-                SCENARIO_ORDER,
-                [float(data.loc[level, metric]) for level in SCENARIO_ORDER],
+                levels,
+                [float(data.loc[level, metric]) for level in levels],
                 label=ALGORITHM_LABELS[algorithm],
                 color=ALGORITHM_COLORS[algorithm],
                 marker=ALGORITHM_MARKERS[algorithm],
@@ -516,6 +606,7 @@ def plot_flow_tail(summary, output_path):
 
 
 def plot_rtt_components(summary, output_path):
+    levels = scenario_order(summary)
     fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.5))
     for algorithm in ALGORITHM_ORDER:
         data = summary[summary["algorithm"] == algorithm].set_index("scenario")
@@ -526,18 +617,18 @@ def plot_rtt_components(summary, output_path):
             "linewidth": 2.0,
         }
         axes[0].plot(
-            SCENARIO_ORDER,
+            levels,
             [
                 float(data.loc[level, "mean_propagation_rtt_ms"])
-                for level in SCENARIO_ORDER
+                for level in levels
             ],
             **kwargs,
         )
         axes[1].plot(
-            SCENARIO_ORDER,
+            levels,
             [
                 float(data.loc[level, "mean_queueing_delay_ms"])
-                for level in SCENARIO_ORDER
+                for level in levels
             ],
             **kwargs,
         )
@@ -691,7 +782,12 @@ def build_plot_manifest():
     )
 
 
-def build_output_catalog(plot_manifest):
+def build_output_catalog(
+    plot_manifest,
+    simulation_end_time_s=DEFAULT_SIMULATION_END_TIME_S,
+    traffic_stop_time_s=DEFAULT_SIMULATION_END_TIME_S - DEFAULT_DRAIN_TIME_S,
+    scenario_set="H40,H60,H80,H90,H100+",
+):
     rows = [
         (
             "analysis_report_zh.md",
@@ -703,7 +799,7 @@ def build_output_catalog(plot_manifest):
             "hotspot_5level_cross_level_summary.csv",
             "table",
             "A",
-            "Canonical 20-row cross-level dataset.",
+            "Canonical completed-scenario comparison dataset.",
         ),
         (
             "hotspot_5level_algorithm_rankings.csv",
@@ -805,18 +901,28 @@ def build_output_catalog(plot_manifest):
         )
         for _, row in plot_manifest.iterrows()
     )
-    return pd.DataFrame(
+    catalog = pd.DataFrame(
         rows,
         columns=["filename", "output_type", "tier", "recommended_usage"],
     )
+    catalog.insert(0, "scenario_set", scenario_set)
+    catalog.insert(1, "simulation_end_time_s", simulation_end_time_s)
+    catalog.insert(2, "traffic_stop_time_s", traffic_stop_time_s)
+    catalog.insert(
+        3,
+        "duration_label",
+        duration_label(simulation_end_time_s, traffic_stop_time_s),
+    )
+    return catalog
 
 
 def write_metric_table(summary, metric, path):
+    levels = scenario_order(summary)
     table = summary.pivot(
         index="scenario",
         columns="algorithm_label",
         values=metric,
-    ).reindex(SCENARIO_ORDER)
+    ).reindex(levels)
     table = table.reindex(
         columns=[ALGORITHM_LABELS[item] for item in ALGORITHM_ORDER]
     )
@@ -825,11 +931,12 @@ def write_metric_table(summary, metric, path):
 
 
 def pdr_gap_table(summary):
+    levels = scenario_order(summary)
     pivot = summary.pivot(
         index="scenario",
         columns="algorithm_label",
         values="aggregate_pdr",
-    ).reindex(SCENARIO_ORDER)
+    ).reindex(levels)
     rows = []
     ideal_order = ["Baseline", "LoHi", "LHTR", "Queue-aware"]
     for scenario, row in pivot.iterrows():
@@ -856,8 +963,60 @@ def fmt_pp(value):
     return "%.2f percentage points" % float(value)
 
 
-def write_report(summary, output_catalog, pdr_gaps, output_dir):
+def write_report(
+    summary,
+    output_catalog,
+    pdr_gaps,
+    output_dir,
+    simulation_end_time_s=DEFAULT_SIMULATION_END_TIME_S,
+    traffic_stop_time_s=DEFAULT_SIMULATION_END_TIME_S - DEFAULT_DRAIN_TIME_S,
+):
     output_dir = Path(output_dir)
+    levels = scenario_order(summary)
+    if levels != SCENARIO_ORDER:
+        best_by_level = []
+        for level in levels:
+            group = summary[summary["scenario"] == level]
+            best = group.loc[group["aggregate_pdr"].astype(float).idxmax()]
+            best_by_level.append(
+                "- %s：最高 aggregate PDR 為 %s（%.6f）。"
+                % (level, best["algorithm_label"], best["aggregate_pdr"])
+            )
+        report = """# Hotspot Formal Partial Comparison ({duration})
+
+## 分析範圍
+
+- Simulation end: {simulation} s
+- Traffic stop: {traffic_stop} s
+- Scenario set: `{scenario_set}`
+- 本報告只讀取已完成 scenario；未完成或不存在的 scenario 不會阻擋分析。
+- RTT 為 queue-history-based estimated RTT，不是 packet-level measured RTT。
+
+## PDR 摘要
+
+{best_by_level}
+
+## 使用限制
+
+目前不是完整五級 cross-level curve。圖表與 CSV 可用於已完成 scenario 的演算法
+比較；加入其他相同 duration 的 scenario 後，可在同一 duration-aware comparison folder
+重新執行分析以擴充結果。
+""".format(
+            duration=duration_label(
+                simulation_end_time_s,
+                traffic_stop_time_s,
+            ),
+            simulation=simulation_end_time_s,
+            traffic_stop=traffic_stop_time_s,
+            scenario_set=",".join(levels),
+            best_by_level="\n".join(best_by_level),
+        )
+        (output_dir / "analysis_report_zh.md").write_text(
+            report,
+            encoding="utf-8",
+        )
+        return
+
     lhtr = summary[summary["algorithm"] == "algorithm_lhtr"].set_index("scenario")
     lohi = summary[summary["algorithm"] == "algorithm_lohi"].set_index("scenario")
     queue = summary[
@@ -876,7 +1035,7 @@ def write_report(summary, output_catalog, pdr_gaps, output_dir):
     ideal_levels = pdr_gaps[pdr_gaps["matches_ideal_order"]]["scenario"].tolist()
     sbr_ratios = {
         level: 100.0 * float(lhtr.loc[level, "lhtr_sbr_selection_ratio"])
-        for level in SCENARIO_ORDER
+        for level in levels
     }
 
     tier_lines = []
@@ -893,11 +1052,11 @@ def write_report(summary, output_catalog, pdr_gaps, output_dir):
             )
         tier_lines.append("")
 
-    report = f"""# 5-Level UDP/PDR 60s Formal Cross-Level Analysis
+    report = f"""# 5-Level UDP/PDR {duration_label(simulation_end_time_s, traffic_stop_time_s)} Formal Cross-Level Analysis
 
 ## 1. 分析範圍
 
-本報告只讀取既有五個 60 秒 formal runs 的 compact comparison CSV；沒有執行
+本報告只讀取既有五個 {simulation_end_time_s:g} 秒 formal runs 的 compact comparison CSV；沒有執行
 step 1、step 2、step 3，也沒有修改任何 routing algorithm。X 軸固定為
 `H40, H60, H80, H90, H100+`。RTT 是 queue-history-based estimated RTT，
 不是 packet-level measured RTT。
@@ -993,7 +1152,7 @@ rank 的等權總和；它只用於摘要，不取代個別 PDR/RTT 指標。
 
 ## 9. Limitations
 
-- 每個 scenario 目前只有一個 60s run，沒有重複實驗與 confidence interval。
+- 每個 scenario 目前只有一個 {simulation_end_time_s:g}s run，沒有重複實驗與 confidence interval。
 - BG flow count 在 level 間改變，因此這是一條 formal scenario severity curve，
   不是只改單一連續自變數的 controlled sweep。
 - Estimated RTT 包含 replayed path 與 queue history，不能宣稱為封包實測 RTT。
@@ -1032,10 +1191,22 @@ def main():
     figures_dir.mkdir(parents=True, exist_ok=True)
     tables_dir.mkdir(parents=True, exist_ok=True)
 
-    summary = load_cross_level_summary(args.manifest, args.formal_summary)
+    summary = load_cross_level_summary(
+        args.manifest,
+        args.formal_summary,
+        args.selected_scenarios,
+        args.simulation_end_time_s,
+        args.traffic_stop_time_s,
+    )
+    selected_set = ",".join(scenario_order(summary))
     rankings = build_rankings(summary)
     plot_manifest = build_plot_manifest()
-    output_catalog = build_output_catalog(plot_manifest)
+    output_catalog = build_output_catalog(
+        plot_manifest,
+        args.simulation_end_time_s,
+        args.traffic_stop_time_s,
+        selected_set,
+    )
     gaps = pdr_gap_table(summary)
 
     write_csv(summary, output_dir / "hotspot_5level_cross_level_summary.csv")
@@ -1185,7 +1356,14 @@ def main():
         figures_dir / "loss_attribution_proportions_across_hotspot_levels.png",
     )
 
-    write_report(summary, output_catalog, gaps, output_dir)
+    write_report(
+        summary,
+        output_catalog,
+        gaps,
+        output_dir,
+        args.simulation_end_time_s,
+        args.traffic_stop_time_s,
+    )
     validate_outputs(output_dir, output_catalog)
     print("Cross-level summary: %s" % (
         output_dir / "hotspot_5level_cross_level_summary.csv"

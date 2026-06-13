@@ -8,7 +8,11 @@ from run_hotspot_5level_60s_formal import (
     ALGORITHMS,
     SCENARIOS,
     common_args,
+    default_route_plot_times,
+    default_rtt_sample_interval_s,
+    duration_label,
     formal_metadata,
+    output_paths,
     planned_commands,
     run_name_for_scenario,
     selected_scenarios,
@@ -64,6 +68,37 @@ class HotspotFiveLevelFormalRunnerTest(unittest.TestCase):
         self.assertTrue(metadata["lhtr_diagnostics_enabled"])
         self.assertTrue(metadata["rtt_analysis_enabled"])
         self.assertTrue(metadata["route_visualization_enabled"])
+
+    def test_200s_defaults_use_two_second_drain_and_bounded_visualization(self):
+        scenario = SCENARIOS[2]
+        step1, _, step3 = planned_commands(
+            scenario,
+            force=False,
+            simulation_end_time_s=200,
+            traffic_stop_time_s=198,
+        )
+        self.assertIn("200", step1)
+        self.assertIn("198", step1)
+        self.assertIn("1", step3)
+        self.assertIn("0,30,60,90,120,150,180,198", step3)
+        self.assertEqual(default_rtt_sample_interval_s(200), 1.0)
+        self.assertEqual(
+            default_route_plot_times(198),
+            [0.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0, 198.0],
+        )
+
+    def test_duration_aware_output_paths_share_normal_200s_scenarios(self):
+        paths = output_paths(200, 198)
+        self.assertEqual(duration_label(200, 198), "200s")
+        self.assertTrue(
+            paths["report_dir"].endswith("hotspot_5level_200s_formal")
+        )
+        self.assertTrue(
+            paths["manifest_path"].endswith(
+                "hotspot_5level_200s_formal_manifest.csv"
+            )
+        )
+        self.assertEqual(duration_label(200, 195), "200s_stop195s")
 
     def test_scenario_filter_accepts_comma_and_space_forms(self):
         selected = selected_scenarios(["H40,H80", "H100+"])

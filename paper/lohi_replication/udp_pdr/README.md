@@ -1293,9 +1293,9 @@ Do not start with a 200-second strict run. Implement and validate NS-3 waypoint
 phase support first, then run 10-second and 60-second loop/no-route and manager
 compliance checks.
 
-## Hotspot 5-Level 60s Formal Workflow
+## Hotspot Formal Runner Duration
 
-The fixed Johannesburg-Fukuoka formal workflow uses the five
+The Johannesburg-Fukuoka formal workflow uses the five
 hotspot-reference candidates selected by
 `analysis_reports/hotspot_reference_load_mapping/hotspot_formal_candidate_table.csv`.
 It does not use PDR to reselect scenarios:
@@ -1308,68 +1308,118 @@ H90   load=2.2 bg=48 hotspot=91.171%  Hotspot-Severe
 H100+ load=2.8 bg=48 hotspot=116.036% Hotspot-Overload
 ```
 
-Use the formal runner from this directory:
+Use the duration-aware runner from this directory. The simulation defaults to
+60 s, and `traffic_stop_time_s` defaults to
+`simulation_end_time_s - 2`, so the normal command only needs one duration
+argument:
 
 ```bash
-python run_hotspot_5level_60s_formal.py --dry-run
-python run_hotspot_5level_60s_formal.py --generation-only --force
-python run_hotspot_5level_60s_formal.py --scenarios H40 --force
-python run_hotspot_5level_60s_formal.py --force
-python run_hotspot_5level_60s_formal.py --aggregate-only
+python run_hotspot_5level_formal.py --dry-run
+python run_hotspot_5level_formal.py --generation-only --force
+python run_hotspot_5level_formal.py --scenarios H40 --force
+python run_hotspot_5level_formal.py --force
+python run_hotspot_5level_formal.py --aggregate-only
 ```
 
-Every scenario uses simulation end 60 s, traffic stop 58 s, ISL 10 Mbps,
-GSL 100 Mbps, LoHi `control_plane_only`, and
-`LHTR_ENABLE_DIAGNOSTICS=1`. Step 3 enables 100 ms estimated RTT samples and
-route plots at 0, 30, and 58 s.
+`run_hotspot_5level_60s_formal.py` remains as a backward-compatible entry
+point with the same 60/58 defaults.
 
-New run names include timing, capacity, and LoHi management identity:
+Prepare H80 at 200 s without running NS-3:
+
+```bash
+python run_hotspot_5level_formal.py \
+  --scenarios H80 \
+  --simulation-end-time-s 200 \
+  --dry-run
+
+python run_hotspot_5level_formal.py \
+  --scenarios H80 \
+  --simulation-end-time-s 200 \
+  --generation-only \
+  --force
+```
+
+Run H80 manually after inspecting the generated inputs:
+
+```bash
+python run_hotspot_5level_formal.py \
+  --scenarios H80 \
+  --simulation-end-time-s 200 \
+  --force
+```
+
+H100+ can later be added to the same 200 s report set:
+
+```bash
+python run_hotspot_5level_formal.py \
+  --scenarios H100+ \
+  --simulation-end-time-s 200 \
+  --force
+```
+
+Every scenario uses ISL 10 Mbps, GSL 100 Mbps, LoHi
+`control_plane_only`, and `LHTR_ENABLE_DIAGNOSTICS=1`. Run identity includes
+both simulation end and traffic stop, so 60/58 and 200/198 cannot overwrite
+each other:
 
 ```text
-run_core_isl_hotspot_specific_src754_dst785_load_1x_bg_flow_count_24_
-sim60s_stop58s_isl10mbps_gsl100mbps_lohi_mgmt_control_plane_only_
+run_core_isl_hotspot_specific_src754_dst785_load_1p6x_bg_flow_count_32_
+sim200s_stop198s_isl10mbps_gsl100mbps_lohi_mgmt_control_plane_only_
 oneweb_isls_moving_udp_pdr
 ```
 
-This isolates formal runs from 10 s calibration, legacy LoHi, and different
-capacity runs. A pre-timing legacy folder is read only when its metadata
-matches the requested simulation end and traffic stop times.
-
-The runner writes:
+Normal two-second-drain reports are grouped by simulation duration, not by
+individual scenario. This lets an H80-only run and a later H100+ run accumulate
+under the same 200 s folder:
 
 ```text
 runs/hotspot_5level_60s_formal_manifest.csv
 analysis_reports/hotspot_5level_60s_formal/
-  hotspot_5level_60s_formal_summary.csv
-  hotspot_5level_60s_formal_status.md
-  logs/<scenario>/step{1,2,3}.log
+runs/hotspot_5level_200s_formal_manifest.csv
+analysis_reports/hotspot_5level_200s_formal/
+analysis_reports/hotspot_5level_60s_comparison/
+analysis_reports/hotspot_5level_200s_comparison/
 ```
 
-Each generated run also has `formal_scenario.json`, and each algorithm's
-`run_metadata.json` records the scenario ID, hotspot/global/corridor load
-values, calibration condition, formal timing, LoHi mode, and enabled
-diagnostics.
+If traffic stop is explicitly changed from the normal two-second drain, the
+folder label also includes the stop time, for example
+`hotspot_5level_200s_stop195s_formal`. Manifest, formal summary, comparison
+summary, and output catalog record `scenario_set`, simulation end, traffic
+stop, and duration label.
 
-`--aggregate-only` is read-only with respect to run data. It rebuilds the
-five-scenario manifest, summary, and status files from existing outputs after a
-partial retry. Packet-delivery analysis scans large queue-history CSVs in
-chunks and retains only saturation rows needed by the formal diagnostics, so
-the H100+ analysis does not require loading multi-gigabyte histories at once.
+RTT and route visualization defaults scale with duration:
 
-Run the read-only cross-level analysis after all five formal scenarios are
-complete:
+- Up to 60 s: RTT interval 0.1 s.
+- Longer runs: RTT interval 1 s. For 200/198 this gives about 199 samples,
+  avoiding the sparse 40-sample shape produced by a 5 s interval without the
+  roughly 1,981 samples produced by 0.1 s.
+- Route plots are sampled every 30 s, include traffic stop, and are capped at
+  10 timestamps. For 200/198 the timestamps are
+  `0,30,60,90,120,150,180,198`.
+- Override these choices with `--rtt-sample-interval-s` and
+  `--route-plot-times`.
+
+Analyze any completed subset. Missing scenarios produce warnings instead of
+blocking H80-only analysis:
 
 ```bash
-python analyze_hotspot_5level_60s_formal.py
+python analyze_hotspot_5level_formal.py \
+  --scenarios H80 \
+  --simulation-end-time-s 200
 ```
 
-It reads only the formal manifest and compact `comparison_packet_delivery`
-CSVs. Figures, comparison tables, rankings, the tier catalog, and the
-Traditional Chinese report are written under:
+After adding H100+, rerun with both scenarios to expand the same comparison
+folder:
 
-```text
-analysis_reports/hotspot_5level_60s_comparison/
+```bash
+python analyze_hotspot_5level_formal.py \
+  --scenarios H80,H100+ \
+  --simulation-end-time-s 200
 ```
+
+The runner's `--aggregate-only` mode remains read-only with respect to run
+data. Packet-delivery analysis still scans large queue-history CSVs in chunks
+and retains only saturation rows needed by the formal diagnostics.
 
 ## Current Limitations
 

@@ -2,32 +2,21 @@ import argparse
 import csv
 import glob
 import json
+import math
 import os
 import subprocess
 import sys
 from collections import Counter
 
-from dynamic_run_list import get_udp_pdr_run_list
+from dynamic_run_list import get_udp_pdr_run_list, seconds_to_tag
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 RUNS_DIR = os.path.join(SCRIPT_DIR, "runs")
-REPORT_DIR = os.path.join(
-    SCRIPT_DIR,
-    "analysis_reports",
-    "hotspot_5level_60s_formal",
-)
-MANIFEST_PATH = os.path.join(
-    RUNS_DIR,
-    "hotspot_5level_60s_formal_manifest.csv",
-)
-SUMMARY_PATH = os.path.join(
-    REPORT_DIR,
-    "hotspot_5level_60s_formal_summary.csv",
-)
-STATUS_PATH = os.path.join(
-    REPORT_DIR,
-    "hotspot_5level_60s_formal_status.md",
+DEFAULT_SIMULATION_END_TIME_S = 60.0
+DEFAULT_DRAIN_TIME_S = 2.0
+DEFAULT_TRAFFIC_STOP_TIME_S = (
+    DEFAULT_SIMULATION_END_TIME_S - DEFAULT_DRAIN_TIME_S
 )
 
 ALGORITHMS = [
@@ -96,6 +85,10 @@ SCENARIOS = [
 ]
 
 MANIFEST_FIELDS = [
+    "scenario_set",
+    "simulation_end_time_s",
+    "traffic_stop_time_s",
+    "duration_label",
     "scenario_id",
     "load_level",
     "background_flow_count",
@@ -111,6 +104,10 @@ MANIFEST_FIELDS = [
 ]
 
 SUMMARY_FIELDS = [
+    "scenario_set",
+    "simulation_end_time_s",
+    "traffic_stop_time_s",
+    "duration_label",
     "scenario_id",
     "load_level",
     "background_flow_count",
@@ -150,7 +147,39 @@ LHTR_REQUIRED_FILES = [
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run the five fixed 60 s UDP/PDR hotspot formal scenarios."
+        description="Run duration-aware UDP/PDR hotspot formal scenarios."
+    )
+    parser.add_argument(
+        "--simulation-end-time-s",
+        type=float,
+        default=DEFAULT_SIMULATION_END_TIME_S,
+        help="Simulation duration in seconds. Default: 60.",
+    )
+    parser.add_argument(
+        "--traffic-stop-time-s",
+        type=float,
+        default=None,
+        help=(
+            "Stop generating traffic at this time. Default: "
+            "simulation_end_time_s - 2."
+        ),
+    )
+    parser.add_argument(
+        "--rtt-sample-interval-s",
+        type=float,
+        default=None,
+        help=(
+            "RTT sample interval. Default: 0.1 s for runs up to 60 s, "
+            "otherwise 1 s."
+        ),
+    )
+    parser.add_argument(
+        "--route-plot-times",
+        default=None,
+        help=(
+            "Comma-separated route plot times. Default: every 30 s through "
+            "traffic stop, capped at 10 times."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -188,6 +217,27 @@ def parse_args():
         help="Read existing outputs and rebuild the manifest/summary/status only.",
     )
     args = parser.parse_args()
+    if args.traffic_stop_time_s is None:
+        args.traffic_stop_time_s = (
+            args.simulation_end_time_s - DEFAULT_DRAIN_TIME_S
+        )
+    if args.simulation_end_time_s <= 0:
+        parser.error("--simulation-end-time-s must be positive")
+    if not 0 <= args.traffic_stop_time_s <= args.simulation_end_time_s:
+        parser.error(
+            "--traffic-stop-time-s must satisfy 0 <= stop <= simulation end; "
+            "the implicit default requires simulation end >= 2"
+        )
+    if args.rtt_sample_interval_s is not None and args.rtt_sample_interval_s <= 0:
+        parser.error("--rtt-sample-interval-s must be positive")
+    if args.route_plot_times is not None:
+        try:
+            parse_route_plot_times(
+                args.route_plot_times,
+                args.traffic_stop_time_s,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
     if args.generation_only and (args.skip_step2 or args.skip_step3):
         parser.error("--generation-only cannot be combined with skip flags")
     if args.aggregate_only and (
@@ -199,6 +249,99 @@ def parse_args():
     ):
         parser.error("--aggregate-only cannot be combined with execution flags")
     return args
+
+
+def format_seconds(value):
+    return seconds_to_tag(value).replace("p", ".")
+
+
+def duration_label(simulation_end_time_s, traffic_stop_time_s):
+    simulation_tag = "%ss" % seconds_to_tag(simulation_end_time_s)
+    expected_stop = simulation_end_time_s - DEFAULT_DRAIN_TIME_S
+    if math.isclose(traffic_stop_time_s, expected_stop, abs_tol=1e-9):
+        return simulation_tag
+    return "%s_stop%ss" % (
+        simulation_tag,
+        seconds_to_tag(traffic_stop_time_s),
+    )
+
+
+def output_paths(simulation_end_time_s, traffic_stop_time_s):
+    label = duration_label(simulation_end_time_s, traffic_stop_time_s)
+    prefix = "hotspot_5level_%s" % label
+    report_dir = os.path.join(
+        SCRIPT_DIR,
+        "analysis_reports",
+        prefix + "_formal",
+    )
+    return {
+        "duration_label": label,
+        "report_dir": report_dir,
+        "manifest_path": os.path.join(
+            RUNS_DIR,
+            prefix + "_formal_manifest.csv",
+        ),
+        "summary_path": os.path.join(
+            report_dir,
+            prefix + "_formal_summary.csv",
+        ),
+        "status_path": os.path.join(
+            report_dir,
+            prefix + "_formal_status.md",
+        ),
+    }
+
+
+def default_rtt_sample_interval_s(simulation_end_time_s):
+    return 0.1 if simulation_end_time_s <= 60 else 1.0
+
+
+def parse_route_plot_times(value, traffic_stop_time_s):
+    times = []
+    for item in str(value).split(","):
+        item = item.strip()
+        if not item:
+            continue
+        time_s = float(item)
+        if time_s < 0 or time_s > traffic_stop_time_s:
+            raise ValueError(
+                "route plot times must be between 0 and traffic stop (%s)"
+                % format_seconds(traffic_stop_time_s)
+            )
+        if not any(math.isclose(time_s, existing) for existing in times):
+            times.append(time_s)
+    if not times:
+        raise ValueError("--route-plot-times must contain at least one time")
+    return sorted(times)
+
+
+def default_route_plot_times(traffic_stop_time_s, interval_s=30.0, limit=10):
+    times = [0.0]
+    next_time = interval_s
+    while next_time < traffic_stop_time_s:
+        times.append(next_time)
+        next_time += interval_s
+    if not math.isclose(times[-1], traffic_stop_time_s):
+        times.append(float(traffic_stop_time_s))
+    if len(times) <= limit:
+        return times
+    return [
+        float(traffic_stop_time_s) * index / (limit - 1)
+        for index in range(limit)
+    ]
+
+
+def route_plot_times_text(times):
+    return ",".join(format_seconds(value) for value in times)
+
+
+def scenario_set_text(scenarios):
+    selected_ids = {scenario["scenario_id"] for scenario in scenarios}
+    return ",".join(
+        scenario["scenario_id"]
+        for scenario in SCENARIOS
+        if scenario["scenario_id"] in selected_ids
+    )
 
 
 def selected_scenarios(values):
@@ -221,7 +364,11 @@ def selected_scenarios(values):
     return result
 
 
-def common_args(scenario):
+def common_args(
+    scenario,
+    simulation_end_time_s=DEFAULT_SIMULATION_END_TIME_S,
+    traffic_stop_time_s=DEFAULT_TRAFFIC_STOP_TIME_S,
+):
     return [
         "--traffic-mode",
         "core_isl_hotspot_specific",
@@ -232,9 +379,9 @@ def common_args(scenario):
         "--load-level",
         str(scenario["load_level"]),
         "--simulation-end-time-s",
-        "60",
+        format_seconds(simulation_end_time_s),
         "--traffic-stop-time-s",
-        "58",
+        format_seconds(traffic_stop_time_s),
         "--background-flow-count",
         str(scenario["background_flow_count"]),
         "--per-flow-rate-reference-background-flow-count",
@@ -249,13 +396,17 @@ def common_args(scenario):
     ] + ALGORITHMS
 
 
-def run_name_for_scenario(scenario):
+def run_name_for_scenario(
+    scenario,
+    simulation_end_time_s=DEFAULT_SIMULATION_END_TIME_S,
+    traffic_stop_time_s=DEFAULT_TRAFFIC_STOP_TIME_S,
+):
     runs = get_udp_pdr_run_list(
         selected_mode="core_isl_hotspot_specific",
         load_levels=[scenario["load_level"]],
         algorithms=[ALGORITHMS[0]],
-        simulation_end_time_s_override=60,
-        traffic_stop_time_s_override=58,
+        simulation_end_time_s_override=simulation_end_time_s,
+        traffic_stop_time_s_override=traffic_stop_time_s,
         background_flow_count_override=[scenario["background_flow_count"]],
         per_flow_rate_reference_background_flow_count_override=4,
         src_node_id_override=754,
@@ -267,8 +418,25 @@ def run_name_for_scenario(scenario):
     return runs[0]["name"]
 
 
-def planned_commands(scenario, force):
-    args = common_args(scenario)
+def planned_commands(
+    scenario,
+    force,
+    simulation_end_time_s=DEFAULT_SIMULATION_END_TIME_S,
+    traffic_stop_time_s=DEFAULT_TRAFFIC_STOP_TIME_S,
+    rtt_sample_interval_s=None,
+    route_plot_times=None,
+):
+    args = common_args(
+        scenario,
+        simulation_end_time_s,
+        traffic_stop_time_s,
+    )
+    if rtt_sample_interval_s is None:
+        rtt_sample_interval_s = default_rtt_sample_interval_s(
+            simulation_end_time_s
+        )
+    if route_plot_times is None:
+        route_plot_times = default_route_plot_times(traffic_stop_time_s)
     step1 = [sys.executable, "step_1_generate_runs.py"] + args
     if force:
         step1.append("--force")
@@ -279,10 +447,10 @@ def planned_commands(scenario, force):
         + [
             "--enable-rtt-analysis",
             "--rtt-sample-interval-s",
-            "0.1",
+            format_seconds(rtt_sample_interval_s),
             "--enable-route-visualization",
             "--route-plot-times",
-            "0,30,58",
+            route_plot_times_text(route_plot_times),
         ]
     )
     return step1, step2, step3
@@ -335,8 +503,24 @@ def read_csv(path):
         return []
 
 
-def formal_metadata(scenario):
+def formal_metadata(
+    scenario,
+    simulation_end_time_s=DEFAULT_SIMULATION_END_TIME_S,
+    traffic_stop_time_s=DEFAULT_TRAFFIC_STOP_TIME_S,
+    scenarios=None,
+    rtt_sample_interval_s=None,
+    route_plot_times=None,
+):
+    if scenarios is None:
+        scenarios = [scenario]
+    if rtt_sample_interval_s is None:
+        rtt_sample_interval_s = default_rtt_sample_interval_s(
+            simulation_end_time_s
+        )
+    if route_plot_times is None:
+        route_plot_times = default_route_plot_times(traffic_stop_time_s)
     return {
+        "scenario_set": scenario_set_text(scenarios),
         "scenario_id": scenario["scenario_id"],
         "hotspot_reference_load_percent": scenario[
             "hotspot_reference_load_percent"
@@ -354,8 +538,17 @@ def formal_metadata(scenario):
         "observed_pressure_condition_from_10s_calibration": scenario[
             "observed_pressure_condition"
         ],
-        "formal_duration_s": 60,
-        "formal_traffic_stop_s": 58,
+        "duration_label": duration_label(
+            simulation_end_time_s,
+            traffic_stop_time_s,
+        ),
+        "simulation_end_time_s": simulation_end_time_s,
+        "traffic_stop_time_s": traffic_stop_time_s,
+        "formal_duration_s": simulation_end_time_s,
+        "formal_traffic_stop_s": traffic_stop_time_s,
+        "rtt_sample_interval_s": rtt_sample_interval_s,
+        "route_plot_count": len(route_plot_times),
+        "route_plot_times_s": route_plot_times,
         "lohi_management_mode": "control_plane_only",
         "lhtr_diagnostics_enabled": True,
         "rtt_analysis_enabled": True,
@@ -363,8 +556,23 @@ def formal_metadata(scenario):
     }
 
 
-def augment_run_metadata(scenario, run_dir):
-    metadata = formal_metadata(scenario)
+def augment_run_metadata(
+    scenario,
+    run_dir,
+    simulation_end_time_s=DEFAULT_SIMULATION_END_TIME_S,
+    traffic_stop_time_s=DEFAULT_TRAFFIC_STOP_TIME_S,
+    scenarios=None,
+    rtt_sample_interval_s=None,
+    route_plot_times=None,
+):
+    metadata = formal_metadata(
+        scenario,
+        simulation_end_time_s,
+        traffic_stop_time_s,
+        scenarios,
+        rtt_sample_interval_s,
+        route_plot_times,
+    )
     with open(os.path.join(run_dir, "formal_scenario.json"), "w") as f_out:
         json.dump(metadata, f_out, indent=2, sort_keys=True)
         f_out.write("\n")
@@ -381,9 +589,27 @@ def augment_run_metadata(scenario, run_dir):
             f_out.write("\n")
 
 
-def manifest_row(scenario):
-    run_name = run_name_for_scenario(scenario)
+def manifest_row(
+    scenario,
+    simulation_end_time_s=DEFAULT_SIMULATION_END_TIME_S,
+    traffic_stop_time_s=DEFAULT_TRAFFIC_STOP_TIME_S,
+    scenarios=None,
+):
+    if scenarios is None:
+        scenarios = [scenario]
+    run_name = run_name_for_scenario(
+        scenario,
+        simulation_end_time_s,
+        traffic_stop_time_s,
+    )
     return {
+        "scenario_set": scenario_set_text(scenarios),
+        "simulation_end_time_s": simulation_end_time_s,
+        "traffic_stop_time_s": traffic_stop_time_s,
+        "duration_label": duration_label(
+            simulation_end_time_s,
+            traffic_stop_time_s,
+        ),
         "scenario_id": scenario["scenario_id"],
         "load_level": scenario["load_level"],
         "background_flow_count": scenario["background_flow_count"],
@@ -476,10 +702,26 @@ def top_lhtr_reasons(rows, limit=5):
     )
 
 
-def build_summary(scenarios):
+def build_summary(
+    scenarios,
+    simulation_end_time_s=DEFAULT_SIMULATION_END_TIME_S,
+    traffic_stop_time_s=DEFAULT_TRAFFIC_STOP_TIME_S,
+    route_plot_times=None,
+):
+    if route_plot_times is None:
+        route_plot_times = default_route_plot_times(traffic_stop_time_s)
+    selected_set = scenario_set_text(scenarios)
+    selected_duration_label = duration_label(
+        simulation_end_time_s,
+        traffic_stop_time_s,
+    )
     rows = []
     for scenario in scenarios:
-        run_name = run_name_for_scenario(scenario)
+        run_name = run_name_for_scenario(
+            scenario,
+            simulation_end_time_s,
+            traffic_stop_time_s,
+        )
         run_dir = os.path.join(RUNS_DIR, run_name)
         comparison = os.path.join(run_dir, "comparison_packet_delivery")
         core = os.path.join(comparison, "core")
@@ -544,7 +786,8 @@ def build_summary(scenarios):
                 notes.append("missing packet-delivery summary")
             if not rtt:
                 notes.append("missing RTT summary")
-            if len(route_plots) < 6:
+            expected_route_plots = len(route_plot_times) * 3
+            if len(route_plots) < expected_route_plots:
                 notes.append("missing route plots")
             if algorithm == "algorithm_lhtr":
                 source_dir = os.path.join(algorithm_dir, "lhtr_diagnostics")
@@ -566,6 +809,10 @@ def build_summary(scenarios):
 
             rows.append(
                 {
+                    "scenario_set": selected_set,
+                    "simulation_end_time_s": simulation_end_time_s,
+                    "traffic_stop_time_s": traffic_stop_time_s,
+                    "duration_label": selected_duration_label,
                     "scenario_id": scenario["scenario_id"],
                     "load_level": scenario["load_level"],
                     "background_flow_count": scenario["background_flow_count"],
@@ -636,25 +883,45 @@ def build_summary(scenarios):
                         if algorithm == "algorithm_lhtr"
                         else ""
                     ),
-                    "route_plots_exist": bool_text(len(route_plots) >= 6),
+                    "route_plots_exist": bool_text(
+                        len(route_plots) >= expected_route_plots
+                    ),
                     "notes": "; ".join(notes),
                 }
             )
     return rows
 
 
-def write_status(manifest_rows, summary_rows):
+def write_status(
+    manifest_rows,
+    summary_rows,
+    status_path,
+    simulation_end_time_s,
+    traffic_stop_time_s,
+    rtt_sample_interval_s,
+    route_plot_times,
+):
     complete = sum(
         1
         for row in summary_rows
         if row["finished"] == "true" and not row["notes"]
     )
-    with open(STATUS_PATH, "w") as f_out:
-        f_out.write("# Hotspot 5-Level 60s Formal Status\n\n")
+    with open(status_path, "w") as f_out:
+        f_out.write(
+            "# Hotspot Formal Status (%s)\n\n"
+            % duration_label(simulation_end_time_s, traffic_stop_time_s)
+        )
         f_out.write(
             "Fixed configuration: `src754 <-> dst785`, ISL 10 Mbps, "
-            "GSL 100 Mbps, simulation 60 s, traffic stop 58 s, "
-            "LoHi `control_plane_only`, LHTR diagnostics enabled.\n\n"
+            "GSL 100 Mbps, simulation %s s, traffic stop %s s, "
+            "LoHi `control_plane_only`, LHTR diagnostics enabled, "
+            "RTT interval %s s, route times `%s`.\n\n"
+            % (
+                format_seconds(simulation_end_time_s),
+                format_seconds(traffic_stop_time_s),
+                format_seconds(rtt_sample_interval_s),
+                route_plot_times_text(route_plot_times),
+            )
         )
         f_out.write("## Scenario Status\n\n")
         f_out.write("| Scenario | Run folder | Step 1 | Step 2 | Step 3 | Status |\n")
@@ -683,9 +950,29 @@ def write_status(manifest_rows, summary_rows):
             f_out.write("- Warnings: none\n")
 
 
-def rebuild_existing_reports(scenarios):
-    manifest_rows = [manifest_row(scenario) for scenario in scenarios]
-    summary_rows = build_summary(scenarios)
+def rebuild_existing_reports(
+    scenarios,
+    simulation_end_time_s,
+    traffic_stop_time_s,
+    paths,
+    rtt_sample_interval_s,
+    route_plot_times,
+):
+    manifest_rows = [
+        manifest_row(
+            scenario,
+            simulation_end_time_s,
+            traffic_stop_time_s,
+            scenarios,
+        )
+        for scenario in scenarios
+    ]
+    summary_rows = build_summary(
+        scenarios,
+        simulation_end_time_s,
+        traffic_stop_time_s,
+        route_plot_times,
+    )
     by_scenario = {}
     for summary_row in summary_rows:
         by_scenario.setdefault(summary_row["scenario_id"], []).append(summary_row)
@@ -718,14 +1005,76 @@ def rebuild_existing_reports(scenarios):
         else:
             row["status"] = "incomplete_warning"
         row["notes"] = " | ".join(warnings)
-    write_csv(MANIFEST_PATH, manifest_rows, MANIFEST_FIELDS)
-    write_csv(SUMMARY_PATH, summary_rows, SUMMARY_FIELDS)
-    write_status(manifest_rows, summary_rows)
+    write_csv(paths["manifest_path"], manifest_rows, MANIFEST_FIELDS)
+    write_csv(paths["summary_path"], summary_rows, SUMMARY_FIELDS)
+    write_status(
+        manifest_rows,
+        summary_rows,
+        paths["status_path"],
+        simulation_end_time_s,
+        traffic_stop_time_s,
+        rtt_sample_interval_s,
+        route_plot_times,
+    )
     return manifest_rows, summary_rows
+
+
+def scenarios_from_manifest_rows(rows):
+    scenario_ids = {row.get("scenario_id") for row in rows}
+    return [
+        scenario
+        for scenario in SCENARIOS
+        if scenario["scenario_id"] in scenario_ids
+    ]
+
+
+def merge_manifest_rows(
+    existing_rows,
+    planned_rows,
+    simulation_end_time_s,
+    traffic_stop_time_s,
+):
+    by_id = {
+        row.get("scenario_id"): row
+        for row in existing_rows
+        if row.get("scenario_id")
+    }
+    by_id.update({row["scenario_id"]: row for row in planned_rows})
+    merged_scenarios = [
+        scenario
+        for scenario in SCENARIOS
+        if scenario["scenario_id"] in by_id
+    ]
+    selected_set = scenario_set_text(merged_scenarios)
+    merged = []
+    for scenario in merged_scenarios:
+        row = by_id[scenario["scenario_id"]]
+        row["scenario_set"] = selected_set
+        row["simulation_end_time_s"] = simulation_end_time_s
+        row["traffic_stop_time_s"] = traffic_stop_time_s
+        row["duration_label"] = duration_label(
+            simulation_end_time_s,
+            traffic_stop_time_s,
+        )
+        merged.append(row)
+    return merged
 
 
 def main():
     args = parse_args()
+    simulation_end_time_s = args.simulation_end_time_s
+    traffic_stop_time_s = args.traffic_stop_time_s
+    paths = output_paths(simulation_end_time_s, traffic_stop_time_s)
+    rtt_sample_interval_s = (
+        args.rtt_sample_interval_s
+        if args.rtt_sample_interval_s is not None
+        else default_rtt_sample_interval_s(simulation_end_time_s)
+    )
+    route_plot_times = (
+        parse_route_plot_times(args.route_plot_times, traffic_stop_time_s)
+        if args.route_plot_times is not None
+        else default_route_plot_times(traffic_stop_time_s)
+    )
     try:
         scenarios = selected_scenarios(args.scenarios)
     except ValueError as exc:
@@ -733,18 +1082,63 @@ def main():
         return 2
 
     if args.aggregate_only:
-        os.makedirs(REPORT_DIR, exist_ok=True)
+        existing_rows = read_csv(paths["manifest_path"])
+        report_scenarios = scenarios_from_manifest_rows(existing_rows)
+        selected_ids = {scenario["scenario_id"] for scenario in scenarios}
+        known_ids = {scenario["scenario_id"] for scenario in report_scenarios}
+        report_scenarios.extend(
+            scenario
+            for scenario in scenarios
+            if scenario["scenario_id"] in selected_ids
+            and scenario["scenario_id"] not in known_ids
+        )
+        report_scenarios = [
+            scenario
+            for scenario in SCENARIOS
+            if scenario in report_scenarios
+        ]
+        os.makedirs(paths["report_dir"], exist_ok=True)
         os.makedirs(RUNS_DIR, exist_ok=True)
-        rebuild_existing_reports(scenarios)
-        print("Manifest: %s" % MANIFEST_PATH)
-        print("Summary: %s" % SUMMARY_PATH)
-        print("Status: %s" % STATUS_PATH)
+        rebuild_existing_reports(
+            report_scenarios,
+            simulation_end_time_s,
+            traffic_stop_time_s,
+            paths,
+            rtt_sample_interval_s,
+            route_plot_times,
+        )
+        print("Manifest: %s" % paths["manifest_path"])
+        print("Summary: %s" % paths["summary_path"])
+        print("Status: %s" % paths["status_path"])
         return 0
 
-    manifest_rows = [manifest_row(scenario) for scenario in scenarios]
+    planned_rows = [
+        manifest_row(
+            scenario,
+            simulation_end_time_s,
+            traffic_stop_time_s,
+            scenarios,
+        )
+        for scenario in scenarios
+    ]
+    manifest_rows = merge_manifest_rows(
+        read_csv(paths["manifest_path"]),
+        planned_rows,
+        simulation_end_time_s,
+        traffic_stop_time_s,
+    )
     by_scenario = {row["scenario_id"]: row for row in manifest_rows}
 
-    print("Selected formal scenarios:")
+    print(
+        "Selected formal scenarios: simulation=%s s, traffic_stop=%s s, "
+        "RTT interval=%s s, route times=%s"
+        % (
+            format_seconds(simulation_end_time_s),
+            format_seconds(traffic_stop_time_s),
+            format_seconds(rtt_sample_interval_s),
+            route_plot_times_text(route_plot_times),
+        )
+    )
     for scenario in scenarios:
         print(
             "  %s load=%g bg=%d hotspot=%.3f%% global=%.3f%% label=%s"
@@ -757,8 +1151,22 @@ def main():
                 scenario["label"],
             )
         )
-        print("    run folder: runs/%s" % run_name_for_scenario(scenario))
-        step1, step2, step3 = planned_commands(scenario, args.force)
+        print(
+            "    run folder: runs/%s"
+            % run_name_for_scenario(
+                scenario,
+                simulation_end_time_s,
+                traffic_stop_time_s,
+            )
+        )
+        step1, step2, step3 = planned_commands(
+            scenario,
+            args.force,
+            simulation_end_time_s,
+            traffic_stop_time_s,
+            rtt_sample_interval_s,
+            route_plot_times,
+        )
         print("    step 1: %s" % format_command(step1))
         print(
             "    step 2: %s"
@@ -778,7 +1186,7 @@ def main():
 
     existing = [
         row["run_folder"]
-        for row in manifest_rows
+        for row in planned_rows
         if os.path.isdir(os.path.join(SCRIPT_DIR, row["run_folder"]))
     ]
     if existing and not args.force:
@@ -794,17 +1202,35 @@ def main():
         for path in existing:
             print("  %s" % path)
 
-    os.makedirs(REPORT_DIR, exist_ok=True)
+    os.makedirs(paths["report_dir"], exist_ok=True)
     os.makedirs(RUNS_DIR, exist_ok=True)
-    write_csv(MANIFEST_PATH, manifest_rows, MANIFEST_FIELDS)
+    write_csv(paths["manifest_path"], manifest_rows, MANIFEST_FIELDS)
 
     any_failure = False
     for scenario in scenarios:
         scenario_id = scenario["scenario_id"]
         row = by_scenario[scenario_id]
-        run_dir = os.path.join(RUNS_DIR, run_name_for_scenario(scenario))
-        step1, step2, step3 = planned_commands(scenario, args.force)
-        log_dir = os.path.join(REPORT_DIR, "logs", scenario_id.replace("+", "plus"))
+        run_dir = os.path.join(
+            RUNS_DIR,
+            run_name_for_scenario(
+                scenario,
+                simulation_end_time_s,
+                traffic_stop_time_s,
+            ),
+        )
+        step1, step2, step3 = planned_commands(
+            scenario,
+            args.force,
+            simulation_end_time_s,
+            traffic_stop_time_s,
+            rtt_sample_interval_s,
+            route_plot_times,
+        )
+        log_dir = os.path.join(
+            paths["report_dir"],
+            "logs",
+            scenario_id.replace("+", "plus"),
+        )
 
         rc = run_command(step1, os.path.join(log_dir, "step1.log"))
         row["step1_status"] = "ok" if rc == 0 else "failed"
@@ -814,15 +1240,24 @@ def main():
             row["step2_status"] = "not_run"
             row["step3_status"] = "not_run"
             any_failure = True
-            write_csv(MANIFEST_PATH, manifest_rows, MANIFEST_FIELDS)
+            write_csv(paths["manifest_path"], manifest_rows, MANIFEST_FIELDS)
             continue
-        augment_run_metadata(scenario, run_dir)
+        report_scenarios = scenarios_from_manifest_rows(manifest_rows)
+        augment_run_metadata(
+            scenario,
+            run_dir,
+            simulation_end_time_s,
+            traffic_stop_time_s,
+            report_scenarios,
+            rtt_sample_interval_s,
+            route_plot_times,
+        )
 
         if args.generation_only:
             row["status"] = "generated"
             row["step2_status"] = "not_requested"
             row["step3_status"] = "not_requested"
-            write_csv(MANIFEST_PATH, manifest_rows, MANIFEST_FIELDS)
+            write_csv(paths["manifest_path"], manifest_rows, MANIFEST_FIELDS)
             continue
 
         if args.skip_step2:
@@ -842,7 +1277,7 @@ def main():
                 row["notes"] = "step 2 failed"
                 row["step3_status"] = "not_run"
                 any_failure = True
-                write_csv(MANIFEST_PATH, manifest_rows, MANIFEST_FIELDS)
+                write_csv(paths["manifest_path"], manifest_rows, MANIFEST_FIELDS)
                 continue
 
         if args.skip_step3:
@@ -855,9 +1290,18 @@ def main():
             if rc != 0:
                 row["notes"] = "step 3 failed"
                 any_failure = True
-        write_csv(MANIFEST_PATH, manifest_rows, MANIFEST_FIELDS)
+        write_csv(paths["manifest_path"], manifest_rows, MANIFEST_FIELDS)
 
-    summary_rows = build_summary(scenarios)
+    report_scenarios = scenarios_from_manifest_rows(manifest_rows)
+    selected_set = scenario_set_text(report_scenarios)
+    for row in manifest_rows:
+        row["scenario_set"] = selected_set
+    summary_rows = build_summary(
+        report_scenarios,
+        simulation_end_time_s,
+        traffic_stop_time_s,
+        route_plot_times,
+    )
     warnings_by_scenario = {}
     for summary_row in summary_rows:
         if summary_row["notes"]:
@@ -874,12 +1318,20 @@ def main():
             row["status"] = "incomplete_warning"
         if row["status"] not in {"generated", "failed"}:
             row["notes"] = " | ".join(warnings)
-    write_csv(MANIFEST_PATH, manifest_rows, MANIFEST_FIELDS)
-    write_csv(SUMMARY_PATH, summary_rows, SUMMARY_FIELDS)
-    write_status(manifest_rows, summary_rows)
-    print("\nManifest: %s" % MANIFEST_PATH)
-    print("Summary: %s" % SUMMARY_PATH)
-    print("Status: %s" % STATUS_PATH)
+    write_csv(paths["manifest_path"], manifest_rows, MANIFEST_FIELDS)
+    write_csv(paths["summary_path"], summary_rows, SUMMARY_FIELDS)
+    write_status(
+        manifest_rows,
+        summary_rows,
+        paths["status_path"],
+        simulation_end_time_s,
+        traffic_stop_time_s,
+        rtt_sample_interval_s,
+        route_plot_times,
+    )
+    print("\nManifest: %s" % paths["manifest_path"])
+    print("Summary: %s" % paths["summary_path"])
+    print("Status: %s" % paths["status_path"])
     return 1 if any_failure else 0
 
 
