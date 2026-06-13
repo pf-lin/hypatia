@@ -1,0 +1,30 @@
+filename,output_type,tier,recommended_usage
+analysis_report_zh.md,report,A,Primary Traditional Chinese interpretation and recommendation.
+hotspot_5level_cross_level_summary.csv,table,A,Canonical 20-row cross-level dataset.
+hotspot_5level_algorithm_rankings.csv,table,B,Per-level PDR and RTT rankings with an explicitly defined composite.
+tables/aggregate_pdr_across_hotspot_levels.csv,table,A,Data table for the primary aggregate-PDR figure.
+tables/focus_pdr_across_hotspot_levels.csv,table,A,Focus-pair delivery comparison.
+tables/background_pdr_across_hotspot_levels.csv,table,B,Background-flow delivery support.
+tables/mean_rtt_across_hotspot_levels.csv,table,A,Data table for the primary mean-RTT figure.
+tables/p95_rtt_across_hotspot_levels.csv,table,B,Tail-latency support.
+tables/pdr_algorithm_gaps_by_level.csv,table,A,Direct LHTR-LoHi and Queue-aware-LHTR PDR gaps.
+tables/lhtr_diagnostics_across_hotspot_levels.csv,table,B,"SBR, yellow/red, fallback, and decision-reason support."
+tables/flow_tail_pdr_across_hotspot_levels.csv,table,B,Minimum and fifth-percentile flow PDR support.
+tables/rtt_components_across_hotspot_levels.csv,table,B,Propagation and estimated queueing components.
+tables/lost_packets_across_hotspot_levels.csv,table,B,Absolute lost-packet counts.
+tables/isl_at_capacity_samples_across_hotspot_levels.csv,table,C,Sample-dependent internal queue-pressure diagnostic.
+tables/loss_attribution_proportions.csv,table,C,Association breakdown; not physical drop proof.
+hotspot_5level_plot_manifest.csv,manifest,C,Machine-readable figure inventory.
+hotspot_5level_output_catalog.csv,manifest,C,Machine-readable tier classification for all final outputs.
+figures/aggregate_pdr_across_hotspot_levels.png,figure,A,Primary thesis result: end-to-end delivery degradation and algorithm separation.
+figures/focus_pdr_across_hotspot_levels.png,figure,A,Shows protection of the Johannesburg-Fukuoka focus pair.
+figures/background_pdr_across_hotspot_levels.png,figure,B,Checks whether focus-flow gains are accompanied by background degradation.
+figures/mean_rtt_across_hotspot_levels.png,figure,A,Primary latency comparison and PDR/RTT tradeoff.
+figures/p95_rtt_across_hotspot_levels.png,figure,B,Tail-latency support for the mean RTT result.
+figures/lost_packets_across_hotspot_levels.png,figure,B,Absolute loss magnitude on a logarithmic scale.
+figures/lhtr_sbr_ratio_across_hotspot_levels.png,figure,A,Connects LHTR behavior to increasing congestion.
+figures/lhtr_yellow_red_across_hotspot_levels.png,figure,B,Supports the SBR activation interpretation; logarithmic count axis.
+figures/flow_tail_pdr_across_hotspot_levels.png,figure,B,Appendix fairness and worst-flow evidence.
+figures/rtt_components_across_hotspot_levels.png,figure,B,Separates path propagation from estimated queueing.
+figures/isl_at_capacity_samples_across_hotspot_levels.png,figure,C,Internal congestion diagnostic; counts depend on sampled interfaces and routing paths.
+figures/loss_attribution_proportions_across_hotspot_levels.png,figure,C,"Diagnostic association, not physical drop proof."

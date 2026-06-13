@@ -1,0 +1,13 @@
+plot_filename,title,metric,tier,recommended_usage
+figures/aggregate_pdr_across_hotspot_levels.png,Aggregate PDR across hotspot levels,aggregate_pdr,A,Primary thesis result: end-to-end delivery degradation and algorithm separation.
+figures/focus_pdr_across_hotspot_levels.png,Focus-flow PDR across hotspot levels,focus_pdr,A,Shows protection of the Johannesburg-Fukuoka focus pair.
+figures/background_pdr_across_hotspot_levels.png,Background-flow PDR across hotspot levels,background_pdr,B,Checks whether focus-flow gains are accompanied by background degradation.
+figures/mean_rtt_across_hotspot_levels.png,Mean estimated RTT across hotspot levels,mean_rtt_ms,A,Primary latency comparison and PDR/RTT tradeoff.
+figures/p95_rtt_across_hotspot_levels.png,P95 estimated RTT across hotspot levels,p95_rtt_ms,B,Tail-latency support for the mean RTT result.
+figures/lost_packets_across_hotspot_levels.png,Lost packets across hotspot levels,lost_packets,B,Absolute loss magnitude on a logarithmic scale.
+figures/lhtr_sbr_ratio_across_hotspot_levels.png,LHTR SBR usage across hotspot levels,lhtr_sbr_selection_ratio,A,Connects LHTR behavior to increasing congestion.
+figures/lhtr_yellow_red_across_hotspot_levels.png,LHTR yellow/red observations across hotspot levels,lhtr_yellow_count;lhtr_red_count,B,Supports the SBR activation interpretation; logarithmic count axis.
+figures/flow_tail_pdr_across_hotspot_levels.png,Flow-tail PDR across hotspot levels,min_pdr;p5_pdr,B,Appendix fairness and worst-flow evidence.
+figures/rtt_components_across_hotspot_levels.png,RTT components across hotspot levels,mean_propagation_rtt_ms;mean_queueing_delay_ms,B,Separates path propagation from estimated queueing.
+figures/isl_at_capacity_samples_across_hotspot_levels.png,ISL at-capacity samples across hotspot levels,isl_at_capacity_sample_count,C,Internal congestion diagnostic; counts depend on sampled interfaces and routing paths.
+figures/loss_attribution_proportions_across_hotspot_levels.png,Loss-attribution proportions across hotspot levels,loss_attribution_proportions,C,"Diagnostic association, not physical drop proof."

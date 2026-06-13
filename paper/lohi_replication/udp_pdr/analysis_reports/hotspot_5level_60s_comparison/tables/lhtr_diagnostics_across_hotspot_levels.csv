@@ -1,0 +1,6 @@
+scenario,lhtr_br_selected_count,lhtr_sbr_selected_count,lhtr_sbr_selection_ratio,lhtr_fallback_count,lhtr_yellow_count,lhtr_red_count,lhtr_top_decision_reasons
+H40,79098770,525,6.637227297664284e-06,0,748,5,br_green:57483015;no_alternative_candidate:20773166;sbr_stretch_too_high:842589;sbr_due_to_yellow:520;sbr_due_to_red:5
+H60,79250536,9301,0.00011734821003984653,0,15172,3641,br_green:57743025;no_alternative_candidate:20280591;sbr_stretch_too_high:1226905;sbr_due_to_yellow:7346;sbr_due_to_red:1955
+H80,79369810,92289,0.0011614216231564686,0,161229,33077,br_green:57935447;no_alternative_candidate:19693750;sbr_stretch_too_high:1738556;sbr_due_to_yellow:77589;sbr_due_to_red:14670
+H90,78914245,797732,0.010007680527105732,0,1241457,257424,br_green:57559079;no_alternative_candidate:18849013;sbr_stretch_too_high:2461182;sbr_due_to_yellow:666056;sbr_due_to_red:127604
+H100+,78570749,1219609,0.015285167663992684,0,1857141,384444,br_green:57023047;no_alternative_candidate:18676200;sbr_stretch_too_high:2783384;sbr_due_to_yellow:1025809;sbr_due_to_red:185462

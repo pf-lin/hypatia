@@ -1356,6 +1356,21 @@ partial retry. Packet-delivery analysis scans large queue-history CSVs in
 chunks and retains only saturation rows needed by the formal diagnostics, so
 the H100+ analysis does not require loading multi-gigabyte histories at once.
 
+Run the read-only cross-level analysis after all five formal scenarios are
+complete:
+
+```bash
+python analyze_hotspot_5level_60s_formal.py
+```
+
+It reads only the formal manifest and compact `comparison_packet_delivery`
+CSVs. Figures, comparison tables, rankings, the tier catalog, and the
+Traditional Chinese report are written under:
+
+```text
+analysis_reports/hotspot_5level_60s_comparison/
+```
+
 ## Current Limitations
 
 PDR remains the primary end-to-end metric. The synthetic loss value
