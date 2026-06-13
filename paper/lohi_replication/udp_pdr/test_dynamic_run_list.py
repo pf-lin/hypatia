@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -15,6 +16,22 @@ from dynamic_run_list import (
 
 
 class DynamicRunListFocusPairTest(unittest.TestCase):
+    def _write_timing_metadata(self, runs_root, run_name, run):
+        algorithm_dir = os.path.join(
+            runs_root,
+            run_name,
+            "algorithm_free_one_only_over_isls",
+        )
+        os.makedirs(algorithm_dir)
+        with open(os.path.join(algorithm_dir, "run_metadata.json"), "w") as f_out:
+            json.dump(
+                {
+                    "simulation_end_time_s": run["simulation_end_time_s"],
+                    "traffic_stop_time_s": run["traffic_stop_time_s"],
+                },
+                f_out,
+            )
+
     def test_custom_focus_pair_is_part_of_run_identity_and_metadata(self):
         runs = get_udp_pdr_run_list(
             selected_mode="core_isl_hotspot_specific",
@@ -35,6 +52,7 @@ class DynamicRunListFocusPairTest(unittest.TestCase):
         self.assertEqual(run["focus_flow_direction_count"], 2)
         self.assertEqual(run["lohi_management_mode"], "legacy")
         self.assertIn("lohi_mgmt_legacy", run["name"])
+        self.assertIn("sim60s_stop60s", run["name"])
 
     def test_focus_pair_validation_rejects_same_or_non_ground_station_nodes(self):
         with self.assertRaisesRegex(ValueError, "must differ"):
@@ -53,7 +71,11 @@ class DynamicRunListFocusPairTest(unittest.TestCase):
         run = runs[0]
         self.assertIn("src738_dst793", run["name"])
         with tempfile.TemporaryDirectory() as runs_root:
-            os.makedirs(os.path.join(runs_root, run["legacy_name"]))
+            self._write_timing_metadata(
+                runs_root,
+                run["legacy_name"],
+                run,
+            )
             resolved = resolve_existing_run(run, runs_root)
         self.assertEqual(resolved["name"], run["legacy_name"])
         self.assertTrue(resolved["using_legacy_run_name"])
@@ -124,7 +146,11 @@ class DynamicRunListFocusPairTest(unittest.TestCase):
             lohi_management_mode_override="legacy",
         )[0]
         with tempfile.TemporaryDirectory() as runs_root:
-            os.makedirs(os.path.join(runs_root, run["pre_management_name"]))
+            self._write_timing_metadata(
+                runs_root,
+                run["pre_management_name"],
+                run,
+            )
             resolved = resolve_existing_run(run, runs_root)
         self.assertEqual(resolved["name"], run["pre_management_name"])
         self.assertTrue(resolved["using_pre_management_run_name"])
@@ -152,6 +178,59 @@ class DynamicRunListFocusPairTest(unittest.TestCase):
         self.assertEqual(resolved["name"], run["name"])
         self.assertNotIn("using_legacy_run_name", resolved)
         self.assertNotIn("using_pre_management_run_name", resolved)
+
+    def test_timing_identity_prevents_10s_and_60s_collisions(self):
+        short = get_udp_pdr_run_list(
+            selected_mode="core_isl_hotspot_specific",
+            load_levels=[1.0],
+            algorithms=["algorithm_lohi"],
+            simulation_end_time_s_override=10,
+            traffic_stop_time_s_override=8,
+            background_flow_count_override=[24],
+            src_node_id_override=754,
+            dst_node_id_override=785,
+            lohi_management_mode_override="control_plane_only",
+            isl_data_rate_megabit_per_s_override=10,
+            gsl_data_rate_megabit_per_s_override=100,
+        )[0]
+        formal = get_udp_pdr_run_list(
+            selected_mode="core_isl_hotspot_specific",
+            load_levels=[1.0],
+            algorithms=["algorithm_lohi"],
+            simulation_end_time_s_override=60,
+            traffic_stop_time_s_override=58,
+            background_flow_count_override=[24],
+            src_node_id_override=754,
+            dst_node_id_override=785,
+            lohi_management_mode_override="control_plane_only",
+            isl_data_rate_megabit_per_s_override=10,
+            gsl_data_rate_megabit_per_s_override=100,
+        )[0]
+        self.assertNotEqual(short["name"], formal["name"])
+        self.assertIn("sim10s_stop8s", short["name"])
+        self.assertIn("sim60s_stop58s", formal["name"])
+
+    def test_pre_timing_folder_requires_matching_metadata(self):
+        formal = get_udp_pdr_run_list(
+            selected_mode="focus_only",
+            load_levels=[1.0],
+            algorithms=["algorithm_lohi"],
+            simulation_end_time_s_override=60,
+            traffic_stop_time_s_override=58,
+            lohi_management_mode_override="control_plane_only",
+        )[0]
+        short = dict(formal)
+        short["simulation_end_time_s"] = 10.0
+        short["traffic_stop_time_s"] = 8.0
+        with tempfile.TemporaryDirectory() as runs_root:
+            self._write_timing_metadata(
+                runs_root,
+                formal["pre_timing_name"],
+                short,
+            )
+            resolved = resolve_existing_run(formal, runs_root)
+        self.assertEqual(resolved["name"], formal["name"])
+        self.assertNotIn("using_pre_timing_run_name", resolved)
 
 
 if __name__ == "__main__":

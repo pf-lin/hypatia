@@ -1293,6 +1293,69 @@ Do not start with a 200-second strict run. Implement and validate NS-3 waypoint
 phase support first, then run 10-second and 60-second loop/no-route and manager
 compliance checks.
 
+## Hotspot 5-Level 60s Formal Workflow
+
+The fixed Johannesburg-Fukuoka formal workflow uses the five
+hotspot-reference candidates selected by
+`analysis_reports/hotspot_reference_load_mapping/hotspot_formal_candidate_table.csv`.
+It does not use PDR to reselect scenarios:
+
+```text
+H40   load=1.0 bg=24 hotspot=47.359%  Hotspot-Light
+H60   load=1.2 bg=32 hotspot=59.154%  Hotspot-Moderate
+H80   load=1.6 bg=32 hotspot=78.873%  Hotspot-High
+H90   load=2.2 bg=48 hotspot=91.171%  Hotspot-Severe
+H100+ load=2.8 bg=48 hotspot=116.036% Hotspot-Overload
+```
+
+Use the formal runner from this directory:
+
+```bash
+python run_hotspot_5level_60s_formal.py --dry-run
+python run_hotspot_5level_60s_formal.py --generation-only --force
+python run_hotspot_5level_60s_formal.py --scenarios H40 --force
+python run_hotspot_5level_60s_formal.py --force
+python run_hotspot_5level_60s_formal.py --aggregate-only
+```
+
+Every scenario uses simulation end 60 s, traffic stop 58 s, ISL 10 Mbps,
+GSL 100 Mbps, LoHi `control_plane_only`, and
+`LHTR_ENABLE_DIAGNOSTICS=1`. Step 3 enables 100 ms estimated RTT samples and
+route plots at 0, 30, and 58 s.
+
+New run names include timing, capacity, and LoHi management identity:
+
+```text
+run_core_isl_hotspot_specific_src754_dst785_load_1x_bg_flow_count_24_
+sim60s_stop58s_isl10mbps_gsl100mbps_lohi_mgmt_control_plane_only_
+oneweb_isls_moving_udp_pdr
+```
+
+This isolates formal runs from 10 s calibration, legacy LoHi, and different
+capacity runs. A pre-timing legacy folder is read only when its metadata
+matches the requested simulation end and traffic stop times.
+
+The runner writes:
+
+```text
+runs/hotspot_5level_60s_formal_manifest.csv
+analysis_reports/hotspot_5level_60s_formal/
+  hotspot_5level_60s_formal_summary.csv
+  hotspot_5level_60s_formal_status.md
+  logs/<scenario>/step{1,2,3}.log
+```
+
+Each generated run also has `formal_scenario.json`, and each algorithm's
+`run_metadata.json` records the scenario ID, hotspot/global/corridor load
+values, calibration condition, formal timing, LoHi mode, and enabled
+diagnostics.
+
+`--aggregate-only` is read-only with respect to run data. It rebuilds the
+five-scenario manifest, summary, and status files from existing outputs after a
+partial retry. Packet-delivery analysis scans large queue-history CSVs in
+chunks and retains only saturation rows needed by the formal diagnostics, so
+the H100+ analysis does not require loading multi-gigabyte histories at once.
+
 ## Current Limitations
 
 PDR remains the primary end-to-end metric. The synthetic loss value

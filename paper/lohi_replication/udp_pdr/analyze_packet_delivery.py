@@ -3,6 +3,7 @@ import json
 import math
 import os
 import sys
+from collections import defaultdict
 from itertools import combinations
 
 import pandas as pd
@@ -250,6 +251,7 @@ QUEUE_SATURATION_TIMELINE_COLUMNS = [
 ]
 
 TOP_LOSS_FLOW_COUNT = 20
+QUEUE_CSV_CHUNK_ROWS = 250000
 SYNTHETIC_LOSS_REASON = "udp_sent_minus_received"
 MAX_QUEUE_SCOPE = "sampled/event-derived ISL net-device queue; GSL queue summarized separately when available"
 PHYSICAL_DROP_TRACE_COVERAGE = (
@@ -964,13 +966,31 @@ def _read_queue_interval_csv(path, value_name):
     columns = ["from", "to", "interval_start_ns", "interval_end_ns", value_name]
     if not os.path.exists(path):
         return pd.DataFrame(columns=columns)
-    try:
-        df = pd.read_csv(path, header=None, names=columns)
-    except pd.errors.EmptyDataError:
+    chunks = list(_iter_queue_interval_chunks(path, value_name))
+    if not chunks:
         return pd.DataFrame(columns=columns)
-    for col in columns:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df.dropna(subset=["from", "to", "interval_start_ns", "interval_end_ns", value_name])
+    return pd.concat(chunks, ignore_index=True)
+
+
+def _iter_queue_interval_chunks(path, value_name):
+    columns = ["from", "to", "interval_start_ns", "interval_end_ns", value_name]
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return
+    try:
+        reader = pd.read_csv(
+            path,
+            header=None,
+            names=columns,
+            chunksize=QUEUE_CSV_CHUNK_ROWS,
+        )
+        for df in reader:
+            for col in columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            df = df.dropna(subset=columns)
+            if len(df):
+                yield df
+    except pd.errors.EmptyDataError:
+        return
 
 
 def _queue_interval_path(logs_dir, link_type, value_kind):
@@ -987,8 +1007,23 @@ def _queue_interval_path(logs_dir, link_type, value_kind):
 def collect_gsl_queue_summary(algorithm_run_dir, algorithm):
     logs_dir = os.path.join(algorithm_run_dir, "logs_ns3")
     pkt_path = _queue_interval_path(logs_dir, "GSL", "pkt")
-    df = _read_queue_interval_csv(pkt_path, "queue_pkt")
-    if len(df) == 0:
+    sample_count = 0
+    queue_sum = 0.0
+    queue_max = 0.0
+    nonzero_count = 0
+    max_by_link = {}
+    for df in _iter_queue_interval_chunks(pkt_path, "queue_pkt"):
+        queue_values = df["queue_pkt"].astype("float64")
+        sample_count += int(len(df))
+        queue_sum += float(queue_values.sum())
+        queue_max = max(queue_max, float(queue_values.max()))
+        nonzero_count += int((queue_values > 0).sum())
+        link_maxima = df.groupby(["from", "to"])["queue_pkt"].max()
+        for (from_node, to_node), packet_max in link_maxima.items():
+            key = (int(from_node), int(to_node))
+            max_by_link[key] = max(max_by_link.get(key, 0.0), float(packet_max))
+
+    if sample_count == 0:
         return {
             "algorithm": algorithm,
             "max_gsl_queue_pkt": 0,
@@ -997,26 +1032,21 @@ def collect_gsl_queue_summary(algorithm_run_dir, algorithm):
             "top_gsl_queue_links": "",
         }
 
-    df["from"] = df["from"].astype("int64")
-    df["to"] = df["to"].astype("int64")
-    df["queue_pkt"] = df["queue_pkt"].astype("float64")
-    max_by_link = (
-        df.groupby(["from", "to"])["queue_pkt"]
-        .max()
-        .reset_index(name="packet_max")
-        .sort_values(["packet_max", "from", "to"], ascending=[False, True, True])
-    )
     top_links = []
-    for _, row in max_by_link.head(8).iterrows():
+    ordered_links = sorted(
+        max_by_link.items(),
+        key=lambda item: (-item[1], item[0][0], item[0][1]),
+    )
+    for (from_node, to_node), packet_max in ordered_links[:8]:
         top_links.append(
             "%d->%d:%d"
-            % (int(row["from"]), int(row["to"]), int(row["packet_max"]))
+            % (from_node, to_node, int(packet_max))
         )
     return {
         "algorithm": algorithm,
-        "max_gsl_queue_pkt": int(df["queue_pkt"].max()),
-        "mean_gsl_queue_pkt": float(df["queue_pkt"].mean()),
-        "nonzero_gsl_queue_samples": int((df["queue_pkt"] > 0).sum()),
+        "max_gsl_queue_pkt": int(queue_max),
+        "mean_gsl_queue_pkt": queue_sum / float(sample_count),
+        "nonzero_gsl_queue_samples": nonzero_count,
         "top_gsl_queue_links": ";".join(top_links),
     }
 
@@ -1158,7 +1188,6 @@ def build_queue_saturation_outputs(
     write_full_timeline=False,
 ):
     interface_to_flows, _flow_to_isl, _flow_to_gsl = load_interface_flow_maps(run, flows)
-    timeline = read_queue_timeline_inputs(algorithm_run_dir, run, algorithm, flows)
     num_satellites = infer_num_satellites_from_flows(flows)
     flows_by_id = {
         int(row["flow_id"]): row
@@ -1166,8 +1195,135 @@ def build_queue_saturation_outputs(
     }
     flow_isl_saturated_interfaces = {}
     flow_gsl_saturated_interfaces = {}
+    capacities = {
+        "ISL": read_queue_capacity_pkt(algorithm_run_dir, run, "ISL"),
+        "GSL": read_queue_capacity_pkt(algorithm_run_dir, run, "GSL"),
+    }
+    logs_dir = os.path.join(algorithm_run_dir, "logs_ns3")
+    interface_stats = defaultdict(
+        lambda: {
+            "sample_count": 0,
+            "queue_sum": 0.0,
+            "max_queue_pkt": 0.0,
+            "samples_at_capacity": 0,
+            "first_saturation_time_ns": None,
+            "last_saturation_time_ns": None,
+        }
+    )
+    timeline_rows = []
+    saw_samples = False
 
-    if len(timeline) == 0:
+    for link_type in ["ISL", "GSL"]:
+        path = _queue_interval_path(logs_dir, link_type, "pkt")
+        capacity = capacities.get(link_type)
+        for chunk in _iter_queue_interval_chunks(path, "queue_pkt"):
+            saw_samples = True
+            chunk["from"] = chunk["from"].astype("int64")
+            chunk["to"] = chunk["to"].astype("int64")
+            chunk["queue_pkt"] = chunk["queue_pkt"].astype("float64")
+
+            grouped = chunk.groupby(["from", "to"])["queue_pkt"].agg(
+                ["count", "sum", "max"]
+            )
+            for (from_node, to_node), values in grouped.iterrows():
+                key = (link_type, int(from_node), int(to_node))
+                stats = interface_stats[key]
+                stats["sample_count"] += int(values["count"])
+                stats["queue_sum"] += float(values["sum"])
+                stats["max_queue_pkt"] = max(
+                    stats["max_queue_pkt"],
+                    float(values["max"]),
+                )
+
+            if capacity is None:
+                saturated = chunk.iloc[0:0]
+            else:
+                saturated = chunk[chunk["queue_pkt"] >= capacity]
+            if len(saturated):
+                saturated_groups = saturated.groupby(["from", "to"]).agg(
+                    samples_at_capacity=("queue_pkt", "size"),
+                    first_saturation_time_ns=("interval_start_ns", "min"),
+                    last_saturation_time_ns=("interval_start_ns", "max"),
+                )
+                for (from_node, to_node), values in saturated_groups.iterrows():
+                    key = (link_type, int(from_node), int(to_node))
+                    stats = interface_stats[key]
+                    stats["samples_at_capacity"] += int(
+                        values["samples_at_capacity"]
+                    )
+                    first_time = int(values["first_saturation_time_ns"])
+                    last_time = int(values["last_saturation_time_ns"])
+                    current_first = stats["first_saturation_time_ns"]
+                    current_last = stats["last_saturation_time_ns"]
+                    stats["first_saturation_time_ns"] = (
+                        first_time
+                        if current_first is None
+                        else min(current_first, first_time)
+                    )
+                    stats["last_saturation_time_ns"] = (
+                        last_time
+                        if current_last is None
+                        else max(current_last, last_time)
+                    )
+
+            selected = chunk if write_full_timeline else saturated
+            for row in selected.itertuples(index=False):
+                from_node = int(row[0])
+                to_node = int(row[1])
+                interval_start_ns = int(row[2])
+                queue_pkt = float(row[4])
+                interface_key = build_interface_key(
+                    link_type,
+                    from_node,
+                    to_node,
+                )
+                is_at_capacity = bool(
+                    capacity is not None and queue_pkt >= capacity
+                )
+                flow_ids = sorted(interface_to_flows.get(interface_key, set()))
+                active = []
+                active_lost = []
+                for flow_id in flow_ids:
+                    flow = flows_by_id.get(flow_id)
+                    if flow is None:
+                        continue
+                    if (
+                        int(flow["start_time_ns"])
+                        <= interval_start_ns
+                        <= int(flow["end_time_ns"])
+                    ):
+                        active.append(flow_id)
+                        if int(flow["lost_packets"]) > 0:
+                            active_lost.append(flow_id)
+                if is_at_capacity:
+                    target = (
+                        flow_isl_saturated_interfaces
+                        if link_type == "ISL"
+                        else flow_gsl_saturated_interfaces
+                    )
+                    for flow_id in flow_ids:
+                        flow = flows_by_id.get(flow_id)
+                        if flow is not None and int(flow["lost_packets"]) > 0:
+                            target.setdefault(flow_id, set()).add(interface_key)
+                timeline_rows.append(
+                    {
+                        "algorithm": algorithm,
+                        "time_ns": interval_start_ns,
+                        "link_type": link_type,
+                        "interface_key": interface_key,
+                        "from_node": from_node,
+                        "to_node": to_node,
+                        "queue_pkt": queue_pkt,
+                        "queue_capacity_pkt": (
+                            capacity if capacity is not None else math.nan
+                        ),
+                        "is_at_capacity": is_at_capacity,
+                        "estimated_active_flow_count": len(active),
+                        "estimated_active_lost_flow_count": len(active_lost),
+                    }
+                )
+
+    if not saw_samples:
         empty_timeline = pd.DataFrame(columns=QUEUE_SATURATION_TIMELINE_COLUMNS)
         empty_congested = pd.DataFrame(columns=CONGESTED_INTERFACE_COLUMNS)
         return (
@@ -1177,54 +1333,22 @@ def build_queue_saturation_outputs(
             flow_gsl_saturated_interfaces,
         )
 
-    active_counts = []
-    active_lost_counts = []
-    for _, row in timeline.iterrows():
-        flow_ids = sorted(interface_to_flows.get(row["interface_key"], set()))
-        active = []
-        active_lost = []
-        for flow_id in flow_ids:
-            flow = flows_by_id.get(flow_id)
-            if flow is None:
-                continue
-            if int(flow["start_time_ns"]) <= int(row["time_ns"]) <= int(flow["end_time_ns"]):
-                active.append(flow_id)
-                if int(flow["lost_packets"]) > 0:
-                    active_lost.append(flow_id)
-        active_counts.append(len(active))
-        active_lost_counts.append(len(active_lost))
-        if bool(row["is_at_capacity"]):
-            for flow_id in flow_ids:
-                flow = flows_by_id.get(flow_id)
-                if flow is None or int(flow["lost_packets"]) <= 0:
-                    continue
-                if row["link_type"] == "ISL":
-                    flow_isl_saturated_interfaces.setdefault(flow_id, set()).add(row["interface_key"])
-                elif row["link_type"] == "GSL":
-                    flow_gsl_saturated_interfaces.setdefault(flow_id, set()).add(row["interface_key"])
-
-    timeline["estimated_active_flow_count"] = active_counts
-    timeline["estimated_active_lost_flow_count"] = active_lost_counts
-    timeline_out = timeline[QUEUE_SATURATION_TIMELINE_COLUMNS].copy()
-    if not write_full_timeline:
-        timeline_out = timeline_out[
-            timeline_out["is_at_capacity"] == True
-        ].reset_index(drop=True)
+    timeline_out = pd.DataFrame(
+        timeline_rows,
+        columns=QUEUE_SATURATION_TIMELINE_COLUMNS,
+    )
 
     congested_rows = []
-    saturated = timeline[timeline["is_at_capacity"] == True]
-    for interface_key, group in timeline.groupby("interface_key"):
-        saturated_group = group[group["is_at_capacity"] == True]
-        if len(saturated_group) == 0:
+    for (link_type, from_node, to_node), stats in interface_stats.items():
+        if stats["samples_at_capacity"] == 0:
             continue
-        first = group.iloc[0]
+        interface_key = build_interface_key(link_type, from_node, to_node)
         flow_ids = sorted(interface_to_flows.get(interface_key, set()))
         affected_lost = 0
         for flow_id in flow_ids:
             flow = flows_by_id.get(flow_id)
             if flow is not None:
                 affected_lost += int(flow["lost_packets"])
-        from_node = int(first["from_node"])
         satellite_id = from_node if num_satellites and from_node < num_satellites else ""
         ground_station_id = (
             from_node - num_satellites
@@ -1233,17 +1357,19 @@ def build_queue_saturation_outputs(
         )
         congested_rows.append({
             "algorithm": algorithm,
-            "link_type": first["link_type"],
+            "link_type": link_type,
             "interface_key": interface_key,
             "from_node": from_node,
-            "to_node": int(first["to_node"]),
+            "to_node": to_node,
             "satellite_id": satellite_id,
             "ground_station_id": ground_station_id,
-            "max_queue_pkt": int(group["queue_pkt"].max()),
-            "mean_queue_pkt": float(group["queue_pkt"].mean()),
-            "samples_at_capacity": int(len(saturated_group)),
-            "first_saturation_time_ns": int(saturated_group["time_ns"].min()),
-            "last_saturation_time_ns": int(saturated_group["time_ns"].max()),
+            "max_queue_pkt": int(stats["max_queue_pkt"]),
+            "mean_queue_pkt": (
+                stats["queue_sum"] / float(stats["sample_count"])
+            ),
+            "samples_at_capacity": stats["samples_at_capacity"],
+            "first_saturation_time_ns": stats["first_saturation_time_ns"],
+            "last_saturation_time_ns": stats["last_saturation_time_ns"],
             "estimated_affected_flow_count": int(len(flow_ids)),
             "estimated_affected_lost_packets": int(affected_lost),
             "flow_ids_passing_interface_if_available": ";".join(str(flow_id) for flow_id in flow_ids),

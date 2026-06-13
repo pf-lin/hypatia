@@ -137,21 +137,34 @@ def _read_queue_history(logs_dir, link_type, capacity):
     columns = ["from", "to", "interval_start_ns", "interval_end_ns", "queue_pkt"]
     if not os.path.exists(path) or os.path.getsize(path) == 0:
         return pd.DataFrame(columns=columns + ["interface_key", "link_type", "is_at_capacity"])
+    saturated_chunks = []
     try:
-        df = pd.read_csv(path, header=None, names=columns)
+        reader = pd.read_csv(
+            path,
+            header=None,
+            names=columns,
+            chunksize=250000,
+        )
+        for df in reader:
+            for column in columns:
+                df[column] = pd.to_numeric(df[column], errors="coerce")
+            df = df.dropna(subset=columns)
+            df = df[df["queue_pkt"] >= int(capacity)].copy()
+            if not len(df):
+                continue
+            df["from"] = df["from"].astype(int)
+            df["to"] = df["to"].astype(int)
+            df["interface_key"] = (
+                link_type + ":" + df["from"].astype(str) + "->" + df["to"].astype(str)
+            )
+            df["link_type"] = link_type
+            df["is_at_capacity"] = True
+            saturated_chunks.append(df)
     except pd.errors.EmptyDataError:
         return pd.DataFrame(columns=columns + ["interface_key", "link_type", "is_at_capacity"])
-    for column in columns:
-        df[column] = pd.to_numeric(df[column], errors="coerce")
-    df = df.dropna(subset=columns).copy()
-    df["from"] = df["from"].astype(int)
-    df["to"] = df["to"].astype(int)
-    df["interface_key"] = (
-        link_type + ":" + df["from"].astype(str) + "->" + df["to"].astype(str)
-    )
-    df["link_type"] = link_type
-    df["is_at_capacity"] = df["queue_pkt"] >= int(capacity)
-    return df
+    if not saturated_chunks:
+        return pd.DataFrame(columns=columns + ["interface_key", "link_type", "is_at_capacity"])
+    return pd.concat(saturated_chunks, ignore_index=True)
 
 
 def _bool_series(df, column):

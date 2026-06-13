@@ -139,6 +139,11 @@ def main():
         args.gsl_data_rate_megabit_per_s,
     ):
         run = resolve_existing_run(run)
+        if run.get("using_pre_timing_run_name"):
+            print(
+                "Using metadata-validated pre-timing run folder: %s"
+                % run["name"]
+            )
         if run.get("using_pre_management_run_name"):
             print(
                 "Using pre-management-mode legacy run folder: %s"

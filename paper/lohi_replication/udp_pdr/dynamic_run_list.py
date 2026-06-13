@@ -1,5 +1,6 @@
 import argparse
 import csv
+import json
 import os
 
 
@@ -188,6 +189,17 @@ def capacity_identity_tag(isl_capacity_mbps, gsl_capacity_mbps):
     return "isl%smbps_gsl%smbps" % (
         capacity_to_tag(isl_capacity_mbps),
         capacity_to_tag(gsl_capacity_mbps),
+    )
+
+
+def seconds_to_tag(seconds):
+    return ("%.9g" % float(seconds)).replace(".", "p")
+
+
+def timing_identity_tag(simulation_end_s, traffic_stop_s):
+    return "sim%ss_stop%ss" % (
+        seconds_to_tag(simulation_end_s),
+        seconds_to_tag(traffic_stop_s),
     )
 
 
@@ -654,6 +666,8 @@ def run_name_for(
     lohi_management_mode=None,
     isl_data_rate_megabit_per_s=default_isl_data_rate_megabit_per_s,
     gsl_data_rate_megabit_per_s=default_gsl_data_rate_megabit_per_s,
+    simulation_end_s=None,
+    traffic_stop_s=None,
 ):
     bg_tag = ""
     if background_flow_count is not None:
@@ -661,6 +675,12 @@ def run_name_for(
     management_tag = ""
     if lohi_management_mode is not None:
         management_tag = "_%s" % lohi_management_mode_tag(lohi_management_mode)
+    timing_tag = ""
+    if simulation_end_s is not None and traffic_stop_s is not None:
+        timing_tag = "_%s" % timing_identity_tag(
+            simulation_end_s,
+            traffic_stop_s,
+        )
     capacity_tag = ""
     if (
         float(isl_data_rate_megabit_per_s)
@@ -672,23 +692,68 @@ def run_name_for(
             isl_data_rate_megabit_per_s,
             gsl_data_rate_megabit_per_s,
         )
-    return "run_%s_%s_load_%s%s%s%s_oneweb_isls_moving_udp_pdr" % (
+    return "run_%s_%s_load_%s%s%s%s%s_oneweb_isls_moving_udp_pdr" % (
         traffic_mode,
         focus_pair_tag_for(src_node_id, dst_node_id),
         load_level_to_tag(load_level),
         bg_tag,
+        timing_tag,
         capacity_tag,
         management_tag,
     )
 
 
+def _existing_run_timing_matches(run_dir, run):
+    expected = (
+        float(run["simulation_end_time_s"]),
+        float(run["traffic_stop_time_s"]),
+    )
+    try:
+        algorithm_names = os.listdir(run_dir)
+    except OSError:
+        return False
+    for algorithm_name in algorithm_names:
+        metadata_path = os.path.join(
+            run_dir,
+            algorithm_name,
+            "run_metadata.json",
+        )
+        if not os.path.isfile(metadata_path):
+            continue
+        try:
+            with open(metadata_path) as f_in:
+                metadata = json.load(f_in)
+            actual = (
+                float(metadata["simulation_end_time_s"]),
+                float(metadata["traffic_stop_time_s"]),
+            )
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            continue
+        return all(abs(a - b) < 1e-9 for a, b in zip(actual, expected))
+    return False
+
+
 def resolve_existing_run(run, runs_root="runs"):
     if os.path.isdir(os.path.join(runs_root, run["name"])):
         return run
+    pre_timing_dir = os.path.join(runs_root, run["pre_timing_name"])
+    if (
+        os.path.isdir(pre_timing_dir)
+        and _existing_run_timing_matches(pre_timing_dir, run)
+    ):
+        resolved = dict(run)
+        resolved["requested_name"] = run["name"]
+        resolved["name"] = run["pre_timing_name"]
+        resolved["using_pre_timing_run_name"] = True
+        return resolved
     if (
         run.get("lohi_management_mode") == "legacy"
         and uses_default_capacities(run)
         and os.path.isdir(os.path.join(runs_root, run["pre_management_name"]))
+        and _existing_run_timing_matches(
+            os.path.join(runs_root, run["pre_management_name"]),
+            run,
+        )
     ):
         resolved = dict(run)
         resolved["requested_name"] = run["name"]
@@ -702,6 +767,10 @@ def resolve_existing_run(run, runs_root="runs"):
         run["src_node_id"] == focus_src_node_id
         and run["dst_node_id"] == focus_dst_node_id
         and os.path.isdir(os.path.join(runs_root, run["legacy_name"]))
+        and _existing_run_timing_matches(
+            os.path.join(runs_root, run["legacy_name"]),
+            run,
+        )
     ):
         resolved = dict(run)
         resolved["requested_name"] = run["name"]
@@ -922,6 +991,16 @@ def get_udp_pdr_run_list(
                         isl_data_rate_mbps,
                         gsl_data_rate_mbps,
                     )
+                    pre_timing_name = run_name_for(
+                        traffic_mode,
+                        load_level,
+                        name_background_flow_count,
+                        src_node_id,
+                        dst_node_id,
+                        lohi_management_mode,
+                        isl_data_rate_mbps,
+                        gsl_data_rate_mbps,
+                    )
                     run_list.append({
                         "name": run_name_for(
                             traffic_mode,
@@ -932,9 +1011,12 @@ def get_udp_pdr_run_list(
                             lohi_management_mode,
                             isl_data_rate_mbps,
                             gsl_data_rate_mbps,
+                            sim_end_s,
+                            traffic_stop_s,
                         ),
                         "legacy_name": legacy_name,
                         "pre_management_name": pre_management_name,
+                        "pre_timing_name": pre_timing_name,
                         "lohi_management_mode": lohi_management_mode,
                         "traffic_mode": traffic_mode,
                         "movement": "moving",
