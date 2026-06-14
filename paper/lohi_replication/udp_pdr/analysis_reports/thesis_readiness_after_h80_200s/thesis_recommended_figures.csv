@@ -1,0 +1,15 @@
+figure,tier,reason,use_in_thesis_or_backup
+Aggregate PDR across H40-H100+,main,Primary degradation curve and algorithm separation; H60-H100+ preserves Baseline < LoHi < LHTR < Queue-aware.,thesis main text
+Mean estimated RTT across H40-H100+,main,Shows the latency cost of congestion and that LHTR remains below LoHi while Queue-aware is the ideal reference.,thesis main text
+LHTR minus LoHi aggregate-PDR gain,main,"Directly quantifies the proposed method contribution, peaking at H80.",thesis main text
+Queue-aware minus LHTR aggregate-PDR gap,main,Frames Queue-aware as an upper bound and quantifies remaining headroom.,thesis main text
+H80 60s vs 200s PDR stability,main,Demonstrates that the H80 ordering and LHTR-LoHi gain are not a 60s-only artifact.,thesis main text
+H80 60s vs 200s estimated RTT,supporting,Confirms the same RTT ranking over the longer observation window.,thesis main text or appendix
+Focus PDR across levels,supporting,Shows protection of the Johannesburg-Fukuoka focus pair.,appendix/supporting
+Background PDR across levels,supporting,Checks that focus-flow gains are not obtained by hiding background collapse.,appendix/supporting
+LHTR SBR ratio vs congestion level,supporting,Connects rising scenario severity to LHTR activation; include the H80 200s marker.,thesis supporting
+LHTR yellow/red counts across levels,supporting,Supports the traffic-light reaction explanation.,appendix/supporting
+Loss attribution proportions,supporting,Shows losses are ISL-saturation-associated while GSL remains secondary; association is not physical-drop proof.,appendix
+H80 graphical route examples,supporting,Illustrates path-length and route-choice differences among algorithms.,presentation or appendix
+BR/SBR decision-reason breakdown,diagnostics,Explains low SBR usage through no_alternative_candidate and stretch rejection.,backup only
+fstate consistency and queue-at-capacity samples,diagnostics,"Implementation and internal-pressure validation, not a headline result.",backup only
