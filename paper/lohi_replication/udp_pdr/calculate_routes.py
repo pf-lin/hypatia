@@ -61,6 +61,19 @@ def read_lohi_diagnostic_pairs(run_dir):
     return [(src, dst), (dst, src)]
 
 
+def read_backpressure_settings(run_dir):
+    props = read_properties(os.path.join(run_dir, "config_ns3.properties"))
+    diagnostics = props.get("backpressure_diagnostics", "true").strip().lower()
+    return {
+        "queue_source": props.get("backpressure_queue_source", "auto"),
+        "fallback": props.get("backpressure_fallback", "shortest_path"),
+        "diagnostics_enabled": diagnostics not in ("0", "false", "no"),
+        "diagnostics_sample_limit": int(
+            props.get("backpressure_diagnostics_sample_limit", "2000")
+        ),
+    }
+
+
 def process_queue_statistics(logs_dir, output_file):
     isl_queue_pkt_file = os.path.join(logs_dir, "isl_queue_pkt.csv")
     isl_queue_byte_file = os.path.join(logs_dir, "isl_queue_byte.csv")
@@ -191,6 +204,10 @@ def generate_single_fstate(
     isl_link_capacity_bps=None,
     lohi_management_mode=None,
     lohi_diagnostic_pairs=None,
+    backpressure_queue_source="auto",
+    backpressure_fallback="shortest_path",
+    backpressure_diagnostics_enabled=True,
+    backpressure_diagnostics_sample_limit=2000,
 ):
     run_dir = os.path.dirname(os.path.abspath(dynamic_state_dir))
     if lohi_management_mode is None:
@@ -237,6 +254,10 @@ def generate_single_fstate(
         isl_link_capacity_bps,
         lohi_management_mode,
         lohi_diagnostic_pairs,
+        backpressure_queue_source,
+        backpressure_fallback,
+        backpressure_diagnostics_enabled,
+        backpressure_diagnostics_sample_limit,
     )
 
 
@@ -262,6 +283,7 @@ def main():
     isl_link_capacity_bps = read_isl_link_capacity_bps(run_dir)
     lohi_management_mode = read_lohi_management_mode(run_dir)
     lohi_diagnostic_pairs = read_lohi_diagnostic_pairs(run_dir)
+    backpressure_settings = read_backpressure_settings(run_dir)
     prev_time_ns = current_time_ns - time_step_ns
 
     dynamic_state_dir = os.path.join(run_dir, "dynamic_state")
@@ -296,6 +318,10 @@ def main():
         isl_link_capacity_bps,
         lohi_management_mode,
         lohi_diagnostic_pairs,
+        backpressure_settings["queue_source"],
+        backpressure_settings["fallback"],
+        backpressure_settings["diagnostics_enabled"],
+        backpressure_settings["diagnostics_sample_limit"],
     )
 
     print("Step 4: Saving current output for next iteration...")

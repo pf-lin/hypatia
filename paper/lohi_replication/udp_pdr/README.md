@@ -17,6 +17,175 @@ TCP progress and goodput are useful, but they do not expose strict packet
 delivery counts. This experiment uses the existing NS-3 `UdpBurstScheduler`,
 which records sent and received UDP packets for every burst.
 
+## Simple Backpressure Baseline
+
+`algorithm_backpressure_over_isls` implements a simple original
+Backpressure-inspired routing baseline for UDP/PDR comparisons. It is intended
+as a queue-driven theoretical comparator, following the basic max-weight idea
+from Tassiulas and Ephremides (1992) and Neely, Modiano, and Rohrs (2005):
+
+```text
+W_ij^c(t) = max(Q_i^c(t) - Q_j^c(t), 0) * C_ij(t)
+```
+
+For each routing snapshot, the algorithm considers only currently active ISL
+neighbors as intermediate next-hop candidates. It selects the neighbor with the
+largest positive queue differential weight. The final GSL hop to the
+destination ground station is still allowed as delivery, and source ground
+stations still attach through an in-range satellite; GSLs are not used as relay
+candidates.
+
+The current UDP/PDR simulator pipeline does not expose per-destination or
+per-commodity internal queues (`Q_i^c`). It exposes directed ISL/interface
+queue occupancy through `isl_queue_pkt.csv` and `isl_queue_byte.csv`, which
+`calculate_routes.py` aggregates into per-directed-link queue maxima for the
+next routing update. Therefore this implementation is not a full
+multi-commodity Backpressure scheduler. It is a routing-level Backpressure
+approximation using available queue occupancy feedback:
+
+```text
+queue_source = node_total_queue_bytes when byte queue data is available
+queue_source = node_total_queue_packets when only packet queue data is available
+commodity_mode = destination_proxy
+backpressure_is_full_multi_commodity = false
+```
+
+`--backpressure-queue-source auto` chooses the best available proxy. Explicit
+options are also accepted:
+
+```text
+auto
+per_destination_bytes
+per_destination_packets
+node_total_bytes
+node_total_packets
+interface_bytes
+interface_packets
+```
+
+The `per_destination_*` options are accepted for experiment identity, but the
+current pipeline still records `per_destination_queue_available=false` and
+falls back to the available proxy rather than pretending to provide true
+multi-commodity queues.
+
+Because Hypatia's dynamic state pipeline must write a forwarding state, the
+default fallback is:
+
+```text
+--backpressure-fallback shortest_path
+```
+
+When no positive queue differential exists, the algorithm uses shortest-path
+fallback and records the reason in diagnostics. Strict no-route mode is
+available for diagnostics:
+
+```text
+--backpressure-fallback no_route
+```
+
+The baseline intentionally does not add distance, hop-count, delay,
+traffic-light, cluster, or ML corrections to the Backpressure weight. This is
+the point of the comparator: Queue-aware routing is the idealized
+queue/delay-aware upper-bound style baseline, Backpressure is the original
+queue-differential baseline, and LHTR is the proposed practical
+traffic-light/hierarchical method.
+
+Backpressure runs write diagnostics under:
+
+```text
+runs/<run_name>/algorithm_backpressure_over_isls/backpressure_diagnostics/
+```
+
+Expected files:
+
+```text
+backpressure_decision_log.csv
+backpressure_summary.csv
+backpressure_queue_source_summary.csv
+backpressure_fallback_summary.csv
+backpressure_path_stretch_summary.csv
+backpressure_loop_check.csv
+```
+
+Run the 10 s H80 smoke test with:
+
+```bash
+cd paper/lohi_replication/udp_pdr
+
+python step_1_generate_runs.py \
+  --traffic-mode core_isl_hotspot_specific \
+  --src-node-id 754 \
+  --dst-node-id 785 \
+  --load-level 1.6 \
+  --simulation-end-time-s 10 \
+  --traffic-stop-time-s 8 \
+  --background-flow-count 32 \
+  --per-flow-rate-reference-background-flow-count 4 \
+  --isl-data-rate-megabit-per-s 10 \
+  --gsl-data-rate-megabit-per-s 100 \
+  --algorithms algorithm_backpressure_over_isls \
+  --backpressure-queue-source auto \
+  --backpressure-fallback shortest_path \
+  --force
+
+python step_2_run.py \
+  --traffic-mode core_isl_hotspot_specific \
+  --src-node-id 754 \
+  --dst-node-id 785 \
+  --load-level 1.6 \
+  --simulation-end-time-s 10 \
+  --traffic-stop-time-s 8 \
+  --background-flow-count 32 \
+  --per-flow-rate-reference-background-flow-count 4 \
+  --isl-data-rate-megabit-per-s 10 \
+  --gsl-data-rate-megabit-per-s 100 \
+  --algorithms algorithm_backpressure_over_isls \
+  --backpressure-queue-source auto \
+  --backpressure-fallback shortest_path
+
+python step_3_generate_plots.py \
+  --traffic-mode core_isl_hotspot_specific \
+  --src-node-id 754 \
+  --dst-node-id 785 \
+  --load-level 1.6 \
+  --simulation-end-time-s 10 \
+  --traffic-stop-time-s 8 \
+  --background-flow-count 32 \
+  --per-flow-rate-reference-background-flow-count 4 \
+  --isl-data-rate-megabit-per-s 10 \
+  --gsl-data-rate-megabit-per-s 100 \
+  --algorithms algorithm_backpressure_over_isls \
+  --backpressure-queue-source auto \
+  --backpressure-fallback shortest_path \
+  --enable-rtt-analysis \
+  --enable-route-visualization \
+  --rtt-sample-interval-s 5 \
+  --route-plot-times 0,5,8
+```
+
+To include Backpressure in formal H80 comparisons without changing the
+four-algorithm default, pass it explicitly:
+
+```bash
+python run_hotspot_5level_formal.py \
+  --scenarios H80 \
+  --simulation-end-time-s 60 \
+  --traffic-stop-time-s 58 \
+  --algorithms algorithm_free_one_only_over_isls algorithm_queue_aware_over_isls algorithm_lohi algorithm_lhtr algorithm_backpressure_over_isls \
+  --backpressure-queue-source auto \
+  --backpressure-fallback shortest_path \
+  --force
+
+python run_hotspot_5level_formal.py \
+  --scenarios H80 \
+  --simulation-end-time-s 200 \
+  --traffic-stop-time-s 198 \
+  --algorithms algorithm_free_one_only_over_isls algorithm_queue_aware_over_isls algorithm_lohi algorithm_lhtr algorithm_backpressure_over_isls \
+  --backpressure-queue-source auto \
+  --backpressure-fallback shortest_path \
+  --force
+```
+
 ## Folder Structure
 
 ```text
@@ -43,6 +212,7 @@ runs/<run_name>/<algorithm>/
   run_metadata.json
   dynamic_state/
   lhtr_diagnostics/  # algorithm_lhtr only, when explicitly enabled
+  backpressure_diagnostics/  # algorithm_backpressure_over_isls only
   logs_ns3/
   queue_stats/
   prev_output_cache/

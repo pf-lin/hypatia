@@ -76,6 +76,12 @@ def generate_initial_fstate(run, run_dir):
             (run["src_node_id"], run["dst_node_id"]),
             (run["dst_node_id"], run["src_node_id"]),
         ],
+        backpressure_queue_source=run["backpressure_queue_source"],
+        backpressure_fallback=run["backpressure_fallback"],
+        backpressure_diagnostics_enabled=run["backpressure_diagnostics"],
+        backpressure_diagnostics_sample_limit=run[
+            "backpressure_diagnostics_sample_limit"
+        ],
     )
 
     if prev_output:
@@ -137,6 +143,10 @@ def main():
         args.lohi_management_mode,
         args.isl_data_rate_megabit_per_s,
         args.gsl_data_rate_megabit_per_s,
+        args.backpressure_queue_source,
+        args.backpressure_fallback,
+        args.backpressure_diagnostics,
+        args.backpressure_diagnostics_sample_limit,
     ):
         run = resolve_existing_run(run)
         if run.get("using_pre_timing_run_name"):

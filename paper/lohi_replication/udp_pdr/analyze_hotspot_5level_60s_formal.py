@@ -30,24 +30,28 @@ ALGORITHM_ORDER = [
     "algorithm_queue_aware_over_isls",
     "algorithm_lohi",
     "algorithm_lhtr",
+    "algorithm_backpressure_over_isls",
 ]
 ALGORITHM_LABELS = {
     "algorithm_free_one_only_over_isls": "Baseline",
     "algorithm_queue_aware_over_isls": "Queue-aware",
     "algorithm_lohi": "LoHi",
     "algorithm_lhtr": "LHTR",
+    "algorithm_backpressure_over_isls": "Backpressure",
 }
 ALGORITHM_COLORS = {
     "algorithm_free_one_only_over_isls": "#4D4D4D",
     "algorithm_queue_aware_over_isls": "#0072B2",
     "algorithm_lohi": "#D55E00",
     "algorithm_lhtr": "#009E73",
+    "algorithm_backpressure_over_isls": "#CC79A7",
 }
 ALGORITHM_MARKERS = {
     "algorithm_free_one_only_over_isls": "o",
     "algorithm_queue_aware_over_isls": "s",
     "algorithm_lohi": "^",
     "algorithm_lhtr": "D",
+    "algorithm_backpressure_over_isls": "v",
 }
 
 SUMMARY_FIELDS = [
@@ -160,6 +164,11 @@ def scenario_order(summary):
     return [scenario for scenario in SCENARIO_ORDER if scenario in present]
 
 
+def algorithm_order(summary):
+    present = set(summary["algorithm"].astype(str))
+    return [algorithm for algorithm in ALGORITHM_ORDER if algorithm in present]
+
+
 def require_csv(path):
     path = Path(path)
     if not path.is_file():
@@ -191,6 +200,15 @@ def first_matching(frame, **matches):
     if len(selected) == 0:
         raise RuntimeError("No row matched %s" % matches)
     return selected.iloc[0]
+
+
+def has_matching(frame, **matches):
+    selected = frame
+    for column, value in matches.items():
+        if column not in selected.columns:
+            return False
+        selected = selected[selected[column] == value]
+    return len(selected) > 0
 
 
 def sum_column(frame, column):
@@ -329,6 +347,12 @@ def load_cross_level_summary(
         )
 
         for algorithm in ALGORITHM_ORDER:
+            if not (
+                has_matching(algorithm_summary, algorithm=algorithm)
+                and has_matching(formal_summary, scenario_id=scenario_id, algorithm=algorithm)
+                and has_matching(rtt, algorithm=algorithm, direction="754_to_785")
+            ):
+                continue
             core_row = first_matching(algorithm_summary, algorithm=algorithm)
             formal_row = first_matching(
                 formal_summary,
@@ -485,15 +509,19 @@ def plot_lines(
     title,
     ylabel,
     output_path,
-    algorithms=ALGORITHM_ORDER,
+    algorithms=None,
     ylim=None,
     log_scale=False,
 ):
     fig, ax = plt.subplots(figsize=(8.2, 5.0))
     levels = scenario_order(summary)
+    if algorithms is None:
+        algorithms = algorithm_order(summary)
     x_values = np.arange(len(levels))
     for algorithm in algorithms:
         data = summary[summary["algorithm"] == algorithm].set_index("scenario")
+        if len(data) == 0:
+            continue
         values = [float(data.loc[level, metric]) for level in levels]
         ax.plot(
             x_values,
@@ -520,6 +548,8 @@ def plot_lines(
 
 
 def plot_lhtr_sbr_ratio(summary, output_path):
+    if "algorithm_lhtr" not in set(summary["algorithm"].astype(str)):
+        return
     levels = scenario_order(summary)
     data = summary[summary["algorithm"] == "algorithm_lhtr"].set_index("scenario")
     values = [
@@ -544,6 +574,8 @@ def plot_lhtr_sbr_ratio(summary, output_path):
 
 
 def plot_lhtr_colors(summary, output_path):
+    if "algorithm_lhtr" not in set(summary["algorithm"].astype(str)):
+        return
     levels = scenario_order(summary)
     data = summary[summary["algorithm"] == "algorithm_lhtr"].set_index("scenario")
     yellow = [int(data.loc[level, "lhtr_yellow_count"]) for level in levels]
@@ -578,12 +610,13 @@ def plot_lhtr_colors(summary, output_path):
 
 def plot_flow_tail(summary, output_path):
     levels = scenario_order(summary)
+    algorithms = algorithm_order(summary)
     fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.5), sharey=True)
     for axis, metric, title in [
         (axes[0], "min_pdr", "Minimum flow PDR"),
         (axes[1], "p5_pdr", "5th-percentile flow PDR"),
     ]:
-        for algorithm in ALGORITHM_ORDER:
+        for algorithm in algorithms:
             data = summary[summary["algorithm"] == algorithm].set_index("scenario")
             axis.plot(
                 levels,
@@ -607,8 +640,9 @@ def plot_flow_tail(summary, output_path):
 
 def plot_rtt_components(summary, output_path):
     levels = scenario_order(summary)
+    algorithms = algorithm_order(summary)
     fig, axes = plt.subplots(1, 2, figsize=(11.5, 4.5))
-    for algorithm in ALGORITHM_ORDER:
+    for algorithm in algorithms:
         data = summary[summary["algorithm"] == algorithm].set_index("scenario")
         kwargs = {
             "label": ALGORITHM_LABELS[algorithm],
@@ -918,13 +952,14 @@ def build_output_catalog(
 
 def write_metric_table(summary, metric, path):
     levels = scenario_order(summary)
+    algorithms = algorithm_order(summary)
     table = summary.pivot(
         index="scenario",
         columns="algorithm_label",
         values=metric,
     ).reindex(levels)
     table = table.reindex(
-        columns=[ALGORITHM_LABELS[item] for item in ALGORITHM_ORDER]
+        columns=[ALGORITHM_LABELS[item] for item in algorithms]
     )
     table.index.name = "scenario"
     write_csv(table.reset_index(), path)
@@ -940,18 +975,19 @@ def pdr_gap_table(summary):
     rows = []
     ideal_order = ["Baseline", "LoHi", "LHTR", "Queue-aware"]
     for scenario, row in pivot.iterrows():
-        ordered = list(row.sort_values().index)
+        core_row = row[ideal_order]
+        ordered = list(core_row.sort_values().index)
         rows.append(
             {
                 "scenario": scenario,
-                "baseline_pdr": row["Baseline"],
-                "lohi_pdr": row["LoHi"],
-                "lhtr_pdr": row["LHTR"],
-                "queue_aware_pdr": row["Queue-aware"],
+                "baseline_pdr": core_row["Baseline"],
+                "lohi_pdr": core_row["LoHi"],
+                "lhtr_pdr": core_row["LHTR"],
+                "queue_aware_pdr": core_row["Queue-aware"],
                 "lhtr_minus_lohi_percentage_points": 100.0
-                * (row["LHTR"] - row["LoHi"]),
+                * (core_row["LHTR"] - core_row["LoHi"]),
                 "queue_aware_minus_lhtr_percentage_points": 100.0
-                * (row["Queue-aware"] - row["LHTR"]),
+                * (core_row["Queue-aware"] - core_row["LHTR"]),
                 "observed_ascending_order": " < ".join(ordered),
                 "matches_ideal_order": ordered == ideal_order,
             }

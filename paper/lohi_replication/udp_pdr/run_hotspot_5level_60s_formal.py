@@ -8,7 +8,16 @@ import subprocess
 import sys
 from collections import Counter
 
-from dynamic_run_list import get_udp_pdr_run_list, seconds_to_tag
+from dynamic_run_list import (
+    backpressure_fallback_policies,
+    backpressure_queue_sources,
+    default_backpressure_diagnostics,
+    default_backpressure_diagnostics_sample_limit,
+    default_backpressure_fallback,
+    default_backpressure_queue_source,
+    get_udp_pdr_run_list,
+    seconds_to_tag,
+)
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -25,6 +34,10 @@ ALGORITHMS = [
     "algorithm_lohi",
     "algorithm_lhtr",
 ]
+BACKPRESSURE_QUEUE_SOURCE = default_backpressure_queue_source
+BACKPRESSURE_FALLBACK = default_backpressure_fallback
+BACKPRESSURE_DIAGNOSTICS = default_backpressure_diagnostics
+BACKPRESSURE_DIAGNOSTICS_SAMPLE_LIMIT = default_backpressure_diagnostics_sample_limit
 
 SCENARIOS = [
     {
@@ -144,6 +157,15 @@ LHTR_REQUIRED_FILES = [
     "lhtr_fstate_decision_consistency.csv",
 ]
 
+BACKPRESSURE_REQUIRED_FILES = [
+    "backpressure_decision_log.csv",
+    "backpressure_summary.csv",
+    "backpressure_queue_source_summary.csv",
+    "backpressure_fallback_summary.csv",
+    "backpressure_path_stretch_summary.csv",
+    "backpressure_loop_check.csv",
+]
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -212,6 +234,44 @@ def parse_args():
         help="Scenario IDs to run. Default: H40 H60 H80 H90 H100+.",
     )
     parser.add_argument(
+        "--algorithms",
+        nargs="+",
+        default=list(ALGORITHMS),
+        help="Routing algorithms to run. Default: %s" % " ".join(ALGORITHMS),
+    )
+    parser.add_argument(
+        "--backpressure-queue-source",
+        choices=backpressure_queue_sources,
+        default=default_backpressure_queue_source,
+        help="Queue source for algorithm_backpressure_over_isls.",
+    )
+    parser.add_argument(
+        "--backpressure-fallback",
+        choices=backpressure_fallback_policies,
+        default=default_backpressure_fallback,
+        help="Fallback policy for algorithm_backpressure_over_isls.",
+    )
+    diagnostics_group = parser.add_mutually_exclusive_group()
+    diagnostics_group.add_argument(
+        "--backpressure-diagnostics",
+        dest="backpressure_diagnostics",
+        action="store_true",
+        help="Write Backpressure diagnostics.",
+    )
+    diagnostics_group.add_argument(
+        "--no-backpressure-diagnostics",
+        dest="backpressure_diagnostics",
+        action="store_false",
+        help="Skip Backpressure diagnostics.",
+    )
+    parser.set_defaults(backpressure_diagnostics=default_backpressure_diagnostics)
+    parser.add_argument(
+        "--backpressure-diagnostics-sample-limit",
+        type=int,
+        default=default_backpressure_diagnostics_sample_limit,
+        help="Maximum Backpressure decision-log rows per routing snapshot.",
+    )
+    parser.add_argument(
         "--aggregate-only",
         action="store_true",
         help="Read existing outputs and rebuild the manifest/summary/status only.",
@@ -230,6 +290,10 @@ def parse_args():
         )
     if args.rtt_sample_interval_s is not None and args.rtt_sample_interval_s <= 0:
         parser.error("--rtt-sample-interval-s must be positive")
+    if not args.algorithms:
+        parser.error("--algorithms must contain at least one algorithm")
+    if args.backpressure_diagnostics_sample_limit < 0:
+        parser.error("--backpressure-diagnostics-sample-limit must be non-negative")
     if args.route_plot_times is not None:
         try:
             parse_route_plot_times(
@@ -369,7 +433,7 @@ def common_args(
     simulation_end_time_s=DEFAULT_SIMULATION_END_TIME_S,
     traffic_stop_time_s=DEFAULT_TRAFFIC_STOP_TIME_S,
 ):
-    return [
+    args = [
         "--traffic-mode",
         "core_isl_hotspot_specific",
         "--src-node-id",
@@ -394,6 +458,22 @@ def common_args(
         "control_plane_only",
         "--algorithms",
     ] + ALGORITHMS
+    args.extend(
+        [
+            "--backpressure-queue-source",
+            BACKPRESSURE_QUEUE_SOURCE,
+            "--backpressure-fallback",
+            BACKPRESSURE_FALLBACK,
+            "--backpressure-diagnostics-sample-limit",
+            str(BACKPRESSURE_DIAGNOSTICS_SAMPLE_LIMIT),
+        ]
+    )
+    args.append(
+        "--backpressure-diagnostics"
+        if BACKPRESSURE_DIAGNOSTICS
+        else "--no-backpressure-diagnostics"
+    )
+    return args
 
 
 def run_name_for_scenario(
@@ -414,6 +494,12 @@ def run_name_for_scenario(
         lohi_management_mode_override="control_plane_only",
         isl_data_rate_megabit_per_s_override=10,
         gsl_data_rate_megabit_per_s_override=100,
+        backpressure_queue_source_override=BACKPRESSURE_QUEUE_SOURCE,
+        backpressure_fallback_override=BACKPRESSURE_FALLBACK,
+        backpressure_diagnostics_override=BACKPRESSURE_DIAGNOSTICS,
+        backpressure_diagnostics_sample_limit_override=(
+            BACKPRESSURE_DIAGNOSTICS_SAMPLE_LIMIT
+        ),
     )
     return runs[0]["name"]
 
@@ -805,6 +891,21 @@ def build_summary(
                 )
                 if not os.path.isdir(lohi_dir):
                     notes.append("missing LoHi manager diagnostics")
+            if algorithm == "algorithm_backpressure_over_isls":
+                source_dir = os.path.join(
+                    algorithm_dir,
+                    "backpressure_diagnostics",
+                )
+                missing = [
+                    filename
+                    for filename in BACKPRESSURE_REQUIRED_FILES
+                    if not os.path.exists(os.path.join(source_dir, filename))
+                ]
+                if missing:
+                    notes.append(
+                        "incomplete Backpressure diagnostics: "
+                        + ",".join(missing)
+                    )
             background_value = background_pdr(per_flow_rows, algorithm)
 
             rows.append(
@@ -1062,6 +1163,18 @@ def merge_manifest_rows(
 
 def main():
     args = parse_args()
+    global ALGORITHMS
+    global BACKPRESSURE_QUEUE_SOURCE
+    global BACKPRESSURE_FALLBACK
+    global BACKPRESSURE_DIAGNOSTICS
+    global BACKPRESSURE_DIAGNOSTICS_SAMPLE_LIMIT
+    ALGORITHMS = list(args.algorithms)
+    BACKPRESSURE_QUEUE_SOURCE = args.backpressure_queue_source
+    BACKPRESSURE_FALLBACK = args.backpressure_fallback
+    BACKPRESSURE_DIAGNOSTICS = args.backpressure_diagnostics
+    BACKPRESSURE_DIAGNOSTICS_SAMPLE_LIMIT = (
+        args.backpressure_diagnostics_sample_limit
+    )
     simulation_end_time_s = args.simulation_end_time_s
     traffic_stop_time_s = args.traffic_stop_time_s
     paths = output_paths(simulation_end_time_s, traffic_stop_time_s)

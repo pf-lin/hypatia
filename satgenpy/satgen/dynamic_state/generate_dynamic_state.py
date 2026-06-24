@@ -34,6 +34,7 @@ from .algorithm_lohi import algorithm_lohi, init as lohi_init
 from .algorithm_queue_aware_over_isls import algorithm_queue_aware_over_isls
 from .algorithm_tlr import algorithm_tlr
 from .algorithm_lhtr import algorithm_lhtr, init as lhtr_init
+from .algorithm_backpressure_over_isls import algorithm_backpressure_over_isls
 
 
 def generate_dynamic_state(
@@ -57,6 +58,7 @@ def generate_dynamic_state(
                                   # "algorithm_tlr"
                                   # "algorithm_lohi"
                                   # "algorithm_lhtr"
+                                  # "algorithm_backpressure_over_isls"
         enable_verbose_logs,
         num_orbits=None,
         num_sats_per_orbit=None
@@ -113,6 +115,10 @@ def generate_dynamic_state_at(
         isl_link_capacity_bps=None,
         lohi_management_mode=None,
         lohi_diagnostic_pairs=None,
+        backpressure_queue_source="auto",
+        backpressure_fallback="shortest_path",
+        backpressure_diagnostics_enabled=True,
+        backpressure_diagnostics_sample_limit=2000,
 ):
     if enable_verbose_logs:
         print("FORWARDING STATE AT T = " + (str(time_since_epoch_ns))
@@ -454,6 +460,29 @@ def generate_dynamic_state_at(
             queue_stats_file,
             time_step_ns=time_step_ns,
             isl_link_capacity_bps=isl_link_capacity_bps,
+        )
+
+    elif dynamic_state_algorithm == "algorithm_backpressure_over_isls":
+
+        return algorithm_backpressure_over_isls(
+            output_dynamic_state_dir,
+            time_since_epoch_ns,
+            satellites,
+            ground_stations,
+            sat_net_graph_only_satellites_with_isls,
+            ground_station_satellites_in_range,
+            num_isls_per_sat,
+            sat_neighbor_to_if,
+            list_gsl_interfaces_info,
+            prev_output,
+            enable_verbose_logs,
+            queue_stats_file,
+            isl_link_capacity_bps,
+            backpressure_queue_source,
+            backpressure_fallback,
+            backpressure_diagnostics_enabled,
+            backpressure_diagnostics_sample_limit,
+            lohi_diagnostic_pairs,
         )
 
     else:

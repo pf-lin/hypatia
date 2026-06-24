@@ -79,6 +79,25 @@ lohi_management_modes = [
 ]
 default_lohi_management_mode = "legacy"
 
+backpressure_algorithm = "algorithm_backpressure_over_isls"
+backpressure_queue_sources = [
+    "auto",
+    "per_destination_bytes",
+    "per_destination_packets",
+    "node_total_bytes",
+    "node_total_packets",
+    "interface_bytes",
+    "interface_packets",
+]
+backpressure_fallback_policies = [
+    "shortest_path",
+    "no_route",
+]
+default_backpressure_queue_source = "auto"
+default_backpressure_fallback = "shortest_path"
+default_backpressure_diagnostics = True
+default_backpressure_diagnostics_sample_limit = 2000
+
 
 def repo_root():
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
@@ -190,6 +209,58 @@ def capacity_identity_tag(isl_capacity_mbps, gsl_capacity_mbps):
         capacity_to_tag(isl_capacity_mbps),
         capacity_to_tag(gsl_capacity_mbps),
     )
+
+
+def normalize_backpressure_queue_source(value=None):
+    source = str(value or default_backpressure_queue_source).strip().lower()
+    if source not in backpressure_queue_sources:
+        raise ValueError(
+            "Invalid Backpressure queue source '%s'. Expected one of: %s"
+            % (value, ", ".join(backpressure_queue_sources))
+        )
+    return source
+
+
+def normalize_backpressure_fallback(value=None):
+    fallback = str(value or default_backpressure_fallback).strip().lower()
+    if fallback not in backpressure_fallback_policies:
+        raise ValueError(
+            "Invalid Backpressure fallback '%s'. Expected one of: %s"
+            % (value, ", ".join(backpressure_fallback_policies))
+        )
+    return fallback
+
+
+def backpressure_queue_source_tag(value):
+    aliases = {
+        "auto": "qauto",
+        "per_destination_bytes": "qpdbytes",
+        "per_destination_packets": "qpdpkts",
+        "node_total_bytes": "qnodebytes",
+        "node_total_packets": "qnodepkts",
+        "interface_bytes": "qifbytes",
+        "interface_packets": "qifpkts",
+    }
+    return aliases[normalize_backpressure_queue_source(value)]
+
+
+def backpressure_fallback_tag(value):
+    aliases = {
+        "shortest_path": "fbsp",
+        "no_route": "fbnone",
+    }
+    return aliases[normalize_backpressure_fallback(value)]
+
+
+def backpressure_identity_tag(queue_source, fallback):
+    return "bp_%s_%s" % (
+        backpressure_queue_source_tag(queue_source),
+        backpressure_fallback_tag(fallback),
+    )
+
+
+def algorithms_include_backpressure(algorithms):
+    return backpressure_algorithm in normalize_algorithms(algorithms)
 
 
 def seconds_to_tag(seconds):
@@ -536,12 +607,58 @@ def add_runtime_override_arguments(parser):
     )
 
 
+def add_backpressure_arguments(parser):
+    parser.add_argument(
+        "--backpressure-queue-source",
+        choices=backpressure_queue_sources,
+        default=default_backpressure_queue_source,
+        help=(
+            "Queue source for algorithm_backpressure_over_isls. The current "
+            "UDP/PDR pipeline exposes link/interface queues, so auto resolves "
+            "to a node-total proxy when available. Default: %s"
+        ) % default_backpressure_queue_source,
+    )
+    parser.add_argument(
+        "--backpressure-fallback",
+        choices=backpressure_fallback_policies,
+        default=default_backpressure_fallback,
+        help=(
+            "Fallback when no positive queue differential is available. "
+            "Default: %s"
+        ) % default_backpressure_fallback,
+    )
+    diagnostics_group = parser.add_mutually_exclusive_group()
+    diagnostics_group.add_argument(
+        "--backpressure-diagnostics",
+        dest="backpressure_diagnostics",
+        action="store_true",
+        help="Write Backpressure decision, fallback, queue-source, path-stretch, and loop diagnostics.",
+    )
+    diagnostics_group.add_argument(
+        "--no-backpressure-diagnostics",
+        dest="backpressure_diagnostics",
+        action="store_false",
+        help="Skip Backpressure diagnostics.",
+    )
+    parser.set_defaults(backpressure_diagnostics=default_backpressure_diagnostics)
+    parser.add_argument(
+        "--backpressure-diagnostics-sample-limit",
+        type=int,
+        default=default_backpressure_diagnostics_sample_limit,
+        help=(
+            "Maximum selected-decision rows to append per routing snapshot. "
+            "Diagnostic focus-path decisions are prioritized. Default: %d"
+        ) % default_backpressure_diagnostics_sample_limit,
+    )
+
+
 def add_common_run_arguments(parser):
     add_traffic_mode_argument(parser)
     add_load_level_argument(parser)
     add_algorithms_argument(parser)
     add_focus_pair_arguments(parser)
     add_runtime_override_arguments(parser)
+    add_backpressure_arguments(parser)
     parser.add_argument(
         "--lohi-management-mode",
         choices=lohi_management_modes,
@@ -668,6 +785,7 @@ def run_name_for(
     gsl_data_rate_megabit_per_s=default_gsl_data_rate_megabit_per_s,
     simulation_end_s=None,
     traffic_stop_s=None,
+    extra_identity_tag=None,
 ):
     bg_tag = ""
     if background_flow_count is not None:
@@ -692,7 +810,10 @@ def run_name_for(
             isl_data_rate_megabit_per_s,
             gsl_data_rate_megabit_per_s,
         )
-    return "run_%s_%s_load_%s%s%s%s%s_oneweb_isls_moving_udp_pdr" % (
+    identity_tag = ""
+    if extra_identity_tag:
+        identity_tag = "_%s" % str(extra_identity_tag)
+    return "run_%s_%s_load_%s%s%s%s%s%s_oneweb_isls_moving_udp_pdr" % (
         traffic_mode,
         focus_pair_tag_for(src_node_id, dst_node_id),
         load_level_to_tag(load_level),
@@ -700,6 +821,7 @@ def run_name_for(
         timing_tag,
         capacity_tag,
         management_tag,
+        identity_tag,
     )
 
 
@@ -735,6 +857,8 @@ def _existing_run_timing_matches(run_dir, run):
 
 def resolve_existing_run(run, runs_root="runs"):
     if os.path.isdir(os.path.join(runs_root, run["name"])):
+        return run
+    if run.get("backpressure_run_identity_tag"):
         return run
     pre_timing_dir = os.path.join(runs_root, run["pre_timing_name"])
     if (
@@ -805,9 +929,32 @@ def get_udp_pdr_run_list(
     lohi_management_mode_override=default_lohi_management_mode,
     isl_data_rate_megabit_per_s_override=None,
     gsl_data_rate_megabit_per_s_override=None,
+    backpressure_queue_source_override=default_backpressure_queue_source,
+    backpressure_fallback_override=default_backpressure_fallback,
+    backpressure_diagnostics_override=default_backpressure_diagnostics,
+    backpressure_diagnostics_sample_limit_override=(
+        default_backpressure_diagnostics_sample_limit
+    ),
 ):
     load_levels = parse_load_levels(load_levels)
     algorithms = normalize_algorithms(algorithms)
+    backpressure_queue_source = normalize_backpressure_queue_source(
+        backpressure_queue_source_override
+    )
+    backpressure_fallback = normalize_backpressure_fallback(
+        backpressure_fallback_override
+    )
+    backpressure_diagnostics = bool(backpressure_diagnostics_override)
+    backpressure_diagnostics_sample_limit = int(
+        backpressure_diagnostics_sample_limit_override
+    )
+    if backpressure_diagnostics_sample_limit < 0:
+        raise ValueError("backpressure_diagnostics_sample_limit must be non-negative")
+    bp_identity_tag = (
+        backpressure_identity_tag(backpressure_queue_source, backpressure_fallback)
+        if algorithms_include_backpressure(algorithms)
+        else None
+    )
     sim_end_s = (
         simulation_end_time_s
         if simulation_end_time_s_override is None
@@ -990,6 +1137,9 @@ def get_udp_pdr_run_list(
                         None,
                         isl_data_rate_mbps,
                         gsl_data_rate_mbps,
+                        None,
+                        None,
+                        bp_identity_tag,
                     )
                     pre_timing_name = run_name_for(
                         traffic_mode,
@@ -1000,6 +1150,9 @@ def get_udp_pdr_run_list(
                         lohi_management_mode,
                         isl_data_rate_mbps,
                         gsl_data_rate_mbps,
+                        None,
+                        None,
+                        bp_identity_tag,
                     )
                     run_list.append({
                         "name": run_name_for(
@@ -1013,6 +1166,7 @@ def get_udp_pdr_run_list(
                             gsl_data_rate_mbps,
                             sim_end_s,
                             traffic_stop_s,
+                            bp_identity_tag,
                         ),
                         "legacy_name": legacy_name,
                         "pre_management_name": pre_management_name,
@@ -1058,6 +1212,16 @@ def get_udp_pdr_run_list(
                         "isl_utilization_tracking_interval_ns": isl_utilization_tracking_interval_ns,
                         "enable_link_queue_tracking": enable_link_queue_tracking,
                         "enable_physical_link_drop_tracking": enable_physical_link_drop_tracking,
+                        "backpressure_queue_source": backpressure_queue_source,
+                        "backpressure_fallback": backpressure_fallback,
+                        "backpressure_diagnostics": backpressure_diagnostics,
+                        "backpressure_diagnostics_sample_limit": (
+                            backpressure_diagnostics_sample_limit
+                        ),
+                        "backpressure_commodity_mode": "destination_proxy",
+                        "backpressure_capacity_multiplier_enabled": True,
+                        "backpressure_is_full_multi_commodity": False,
+                        "backpressure_run_identity_tag": bp_identity_tag or "",
                         "src_node_id": src_node_id,
                         "dst_node_id": dst_node_id,
                         **focus_metadata,

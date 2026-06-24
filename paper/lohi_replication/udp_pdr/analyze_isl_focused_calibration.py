@@ -1145,6 +1145,10 @@ def main():
         args.lohi_management_mode,
         args.isl_data_rate_megabit_per_s,
         args.gsl_data_rate_megabit_per_s,
+        args.backpressure_queue_source,
+        args.backpressure_fallback,
+        args.backpressure_diagnostics,
+        args.backpressure_diagnostics_sample_limit,
     )
 
     rows = []

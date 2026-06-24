@@ -86,6 +86,14 @@ def _render_config(run, udp_logging_ids):
                 "dynamic_state_update_interval_ns"
             ],
             "[LOHI-MANAGEMENT-MODE]": run["lohi_management_mode"],
+            "[BACKPRESSURE-QUEUE-SOURCE]": run["backpressure_queue_source"],
+            "[BACKPRESSURE-FALLBACK]": run["backpressure_fallback"],
+            "[BACKPRESSURE-DIAGNOSTICS]": (
+                "true" if run["backpressure_diagnostics"] else "false"
+            ),
+            "[BACKPRESSURE-DIAGNOSTICS-SAMPLE-LIMIT]": run[
+                "backpressure_diagnostics_sample_limit"
+            ],
             "[ISL-DATA-RATE-MEGABIT-PER-S]": run[
                 "isl_data_rate_megabit_per_s"
             ],
@@ -1934,6 +1942,26 @@ def write_run_metadata(run_dir, run, pairs, per_flow_rate):
         "flow_selection_hash": flow_selection_hash,
         "selection_input_hash": selection_input_hash,
         "selection_sampled_timestamps": selection_sampled_timestamps,
+        "algorithm_backpressure_over_isls": (
+            run["dynamic_state_algorithm"] == "algorithm_backpressure_over_isls"
+        ),
+        "backpressure_queue_source": run["backpressure_queue_source"],
+        "backpressure_fallback": run["backpressure_fallback"],
+        "backpressure_commodity_mode": run["backpressure_commodity_mode"],
+        "backpressure_capacity_multiplier_enabled": run[
+            "backpressure_capacity_multiplier_enabled"
+        ],
+        "backpressure_is_full_multi_commodity": run[
+            "backpressure_is_full_multi_commodity"
+        ],
+        "backpressure_diagnostics": run["backpressure_diagnostics"],
+        "backpressure_diagnostics_sample_limit": run[
+            "backpressure_diagnostics_sample_limit"
+        ],
+        "backpressure_run_identity_tag": run.get(
+            "backpressure_run_identity_tag",
+            "",
+        ),
         "flow_selection_settings": {
             "endpoint_load_cap_ratio": run.get("endpoint_load_cap_ratio"),
             "satellite_interface_load_cap_ratio": run.get(
@@ -2371,6 +2399,10 @@ def main():
         args.lohi_management_mode,
         args.isl_data_rate_megabit_per_s,
         args.gsl_data_rate_megabit_per_s,
+        args.backpressure_queue_source,
+        args.backpressure_fallback,
+        args.backpressure_diagnostics,
+        args.backpressure_diagnostics_sample_limit,
     )
 
     generated_pairs_by_run_name = {}
