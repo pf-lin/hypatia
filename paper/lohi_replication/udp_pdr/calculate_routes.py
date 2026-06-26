@@ -67,6 +67,7 @@ def read_backpressure_settings(run_dir):
     return {
         "queue_source": props.get("backpressure_queue_source", "auto"),
         "fallback": props.get("backpressure_fallback", "shortest_path"),
+        "loop_guard": props.get("backpressure_loop_guard", "none"),
         "diagnostics_enabled": diagnostics not in ("0", "false", "no"),
         "diagnostics_sample_limit": int(
             props.get("backpressure_diagnostics_sample_limit", "2000")
@@ -206,6 +207,7 @@ def generate_single_fstate(
     lohi_diagnostic_pairs=None,
     backpressure_queue_source="auto",
     backpressure_fallback="shortest_path",
+    backpressure_loop_guard="none",
     backpressure_diagnostics_enabled=True,
     backpressure_diagnostics_sample_limit=2000,
 ):
@@ -256,6 +258,7 @@ def generate_single_fstate(
         lohi_diagnostic_pairs,
         backpressure_queue_source,
         backpressure_fallback,
+        backpressure_loop_guard,
         backpressure_diagnostics_enabled,
         backpressure_diagnostics_sample_limit,
     )
@@ -320,6 +323,7 @@ def main():
         lohi_diagnostic_pairs,
         backpressure_settings["queue_source"],
         backpressure_settings["fallback"],
+        backpressure_settings["loop_guard"],
         backpressure_settings["diagnostics_enabled"],
         backpressure_settings["diagnostics_sample_limit"],
     )

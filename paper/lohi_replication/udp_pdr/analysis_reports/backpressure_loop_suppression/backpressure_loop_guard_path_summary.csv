@@ -1,0 +1,5 @@
+scenario_label,queue_source,loop_guard_mode,path_sample_count,loop_detected_count,loop_detected_ratio,reached_destination_count,reached_destination_ratio,avg_path_stretch,p95_path_stretch,positive_path_count,positive_path_loop_rate,fallback_only_path_count,fallback_only_path_loop_rate,top_loop_patterns
+node_total / no guard,node_total_queue_bytes,none,200,187,0.935,13,0.065,0.3472222222222222,1.0,192,0.9739583333333334,8,0.0,216->176->216 (17); 517->518->517 (12); 558->559->558 (11); 217->177->217 (10); 557->558->557 (9)
+interface_avg / no guard,interface_nonreturn_avg_bytes,none,200,198,0.99,2,0.01,0.505,0.6111111111111112,198,1.0,2,0.0,603->643->603 (99); 56->16->56 (99)
+node_total / forward_progress_hop,node_total_queue_bytes,forward_progress_hop,200,0,0.0,200,1.0,1.0,1.0,184,0.0,16,0.0,
+interface_avg / forward_progress_hop,interface_nonreturn_avg_bytes,forward_progress_hop,200,0,0.0,200,1.0,1.0,1.0,170,0.0,30,0.0,

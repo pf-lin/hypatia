@@ -68,6 +68,51 @@ current pipeline still records `per_destination_queue_available=false` and
 falls back to the available proxy rather than pretending to provide true
 multi-commodity queues.
 
+### Restricted-route / loop-suppressed Backpressure variant
+
+`algorithm_backpressure_over_isls` also supports a restricted-route /
+loop-suppressed queue-proxy Backpressure variant:
+
+```text
+--backpressure-loop-guard none
+--backpressure-loop-guard immediate_reverse
+--backpressure-loop-guard forward_progress_hop
+--backpressure-loop-guard forward_progress_distance
+```
+
+The default is `none`, preserving the legacy no-guard Backpressure baseline.
+The practical smoke/formal candidate is:
+
+```text
+--backpressure-loop-guard forward_progress_hop
+```
+
+This mode filters candidate ISL neighbors before applying the same
+queue-differential weight. For current satellite `i`, candidate neighbor `j`,
+and destination `d`, the candidate is legal only when:
+
+```text
+dist_hop(j, d) < dist_hop(i, d)
+```
+
+The weight remains:
+
+```text
+weight(i, j) = max(Q_i - Q_j, 0) * C_ij
+```
+
+This is a restricted-route / loop-suppressed queue-proxy Backpressure variant.
+It is inspired by desirable-route restrictions discussed in Backpressure
+literature, but it is not a full multi-commodity Backpressure scheduler. It is
+also not distance-based or hop-based Backpressure, because hop/distance is not
+added to the weight; it is only a legal-candidate filter.
+
+`immediate_reverse` is accepted as an explicit mode for diagnostics and
+experiment identity, but the current Hypatia forwarding-state pipeline writes
+`current_node + destination -> next_hop`. It cannot express a
+previous-hop-dependent rule such as `A -> B -> A`, so this mode is not a true
+forwarding guard without changing the routing-state interface.
+
 Because Hypatia's dynamic state pipeline must write a forwarding state, the
 default fallback is:
 

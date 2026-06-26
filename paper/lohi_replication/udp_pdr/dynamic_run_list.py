@@ -95,8 +95,15 @@ backpressure_fallback_policies = [
     "shortest_path",
     "no_route",
 ]
+backpressure_loop_guard_modes = [
+    "none",
+    "immediate_reverse",
+    "forward_progress_hop",
+    "forward_progress_distance",
+]
 default_backpressure_queue_source = "auto"
 default_backpressure_fallback = "shortest_path"
+default_backpressure_loop_guard = "none"
 default_backpressure_diagnostics = True
 default_backpressure_diagnostics_sample_limit = 2000
 
@@ -233,6 +240,16 @@ def normalize_backpressure_fallback(value=None):
     return fallback
 
 
+def normalize_backpressure_loop_guard(value=None):
+    mode = str(value or default_backpressure_loop_guard).strip().lower()
+    if mode not in backpressure_loop_guard_modes:
+        raise ValueError(
+            "Invalid Backpressure loop guard '%s'. Expected one of: %s"
+            % (value, ", ".join(backpressure_loop_guard_modes))
+        )
+    return mode
+
+
 def backpressure_queue_source_tag(value):
     aliases = {
         "auto": "qauto",
@@ -256,10 +273,21 @@ def backpressure_fallback_tag(value):
     return aliases[normalize_backpressure_fallback(value)]
 
 
-def backpressure_identity_tag(queue_source, fallback):
-    return "bp_%s_%s" % (
+def backpressure_loop_guard_tag(value):
+    aliases = {
+        "none": "lgnone",
+        "immediate_reverse": "lgimrev",
+        "forward_progress_hop": "lgfwphop",
+        "forward_progress_distance": "lgfpdist",
+    }
+    return aliases[normalize_backpressure_loop_guard(value)]
+
+
+def backpressure_identity_tag(queue_source, fallback, loop_guard=default_backpressure_loop_guard):
+    return "bp_%s_%s_%s" % (
         backpressure_queue_source_tag(queue_source),
         backpressure_fallback_tag(fallback),
+        backpressure_loop_guard_tag(loop_guard),
     )
 
 
@@ -631,6 +659,17 @@ def add_backpressure_arguments(parser):
             "Default: %s"
         ) % default_backpressure_fallback,
     )
+    parser.add_argument(
+        "--backpressure-loop-guard",
+        choices=backpressure_loop_guard_modes,
+        default=default_backpressure_loop_guard,
+        help=(
+            "Restricted-route / loop-suppression mode for "
+            "algorithm_backpressure_over_isls. This filters legal candidates "
+            "without adding hop or distance to the queue differential weight. "
+            "Default: %s"
+        ) % default_backpressure_loop_guard,
+    )
     diagnostics_group = parser.add_mutually_exclusive_group()
     diagnostics_group.add_argument(
         "--backpressure-diagnostics",
@@ -935,6 +974,7 @@ def get_udp_pdr_run_list(
     gsl_data_rate_megabit_per_s_override=None,
     backpressure_queue_source_override=default_backpressure_queue_source,
     backpressure_fallback_override=default_backpressure_fallback,
+    backpressure_loop_guard_override=default_backpressure_loop_guard,
     backpressure_diagnostics_override=default_backpressure_diagnostics,
     backpressure_diagnostics_sample_limit_override=(
         default_backpressure_diagnostics_sample_limit
@@ -948,6 +988,9 @@ def get_udp_pdr_run_list(
     backpressure_fallback = normalize_backpressure_fallback(
         backpressure_fallback_override
     )
+    backpressure_loop_guard = normalize_backpressure_loop_guard(
+        backpressure_loop_guard_override
+    )
     backpressure_diagnostics = bool(backpressure_diagnostics_override)
     backpressure_diagnostics_sample_limit = int(
         backpressure_diagnostics_sample_limit_override
@@ -955,7 +998,11 @@ def get_udp_pdr_run_list(
     if backpressure_diagnostics_sample_limit < 0:
         raise ValueError("backpressure_diagnostics_sample_limit must be non-negative")
     bp_identity_tag = (
-        backpressure_identity_tag(backpressure_queue_source, backpressure_fallback)
+        backpressure_identity_tag(
+            backpressure_queue_source,
+            backpressure_fallback,
+            backpressure_loop_guard,
+        )
         if algorithms_include_backpressure(algorithms)
         else None
     )
@@ -1218,6 +1265,16 @@ def get_udp_pdr_run_list(
                         "enable_physical_link_drop_tracking": enable_physical_link_drop_tracking,
                         "backpressure_queue_source": backpressure_queue_source,
                         "backpressure_fallback": backpressure_fallback,
+                        "backpressure_loop_guard": backpressure_loop_guard,
+                        "backpressure_forward_progress_metric": (
+                            "hop"
+                            if backpressure_loop_guard == "forward_progress_hop"
+                            else (
+                                "distance"
+                                if backpressure_loop_guard == "forward_progress_distance"
+                                else "none"
+                            )
+                        ),
                         "backpressure_diagnostics": backpressure_diagnostics,
                         "backpressure_diagnostics_sample_limit": (
                             backpressure_diagnostics_sample_limit
@@ -1225,6 +1282,9 @@ def get_udp_pdr_run_list(
                         "backpressure_commodity_mode": "destination_proxy",
                         "backpressure_capacity_multiplier_enabled": True,
                         "backpressure_is_full_multi_commodity": False,
+                        "backpressure_is_restricted_route": (
+                            backpressure_loop_guard != "none"
+                        ),
                         "backpressure_run_identity_tag": bp_identity_tag or "",
                         "src_node_id": src_node_id,
                         "dst_node_id": dst_node_id,

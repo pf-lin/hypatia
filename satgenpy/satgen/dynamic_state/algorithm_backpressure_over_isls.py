@@ -15,6 +15,7 @@ ALGORITHM_NAME = "algorithm_backpressure_over_isls"
 COMMODITY_MODE = "destination_proxy"
 DEFAULT_QUEUE_SOURCE = "auto"
 DEFAULT_FALLBACK = "shortest_path"
+DEFAULT_LOOP_GUARD = "none"
 DEFAULT_DIAGNOSTIC_SAMPLE_LIMIT = 2000
 
 QUEUE_SOURCE_ALIASES = {
@@ -30,6 +31,12 @@ QUEUE_SOURCE_ALIASES = {
 }
 
 FALLBACK_POLICIES = {"shortest_path", "no_route"}
+LOOP_GUARD_MODES = {
+    "none",
+    "immediate_reverse",
+    "forward_progress_hop",
+    "forward_progress_distance",
+}
 
 
 def normalize_backpressure_queue_source(value):
@@ -50,6 +57,16 @@ def normalize_backpressure_fallback(value):
             % (sorted(FALLBACK_POLICIES), value)
         )
     return fallback
+
+
+def normalize_backpressure_loop_guard(value):
+    mode = str(value or DEFAULT_LOOP_GUARD).strip().lower()
+    if mode not in LOOP_GUARD_MODES:
+        raise ValueError(
+            "backpressure loop guard must be one of %s, got %r"
+            % (sorted(LOOP_GUARD_MODES), value)
+        )
+    return mode
 
 
 def _bool_text(value):
@@ -209,6 +226,20 @@ def _empty_candidate_metrics(current, neighbor):
         "nonreturn_interface_count": 0,
         "no_forward_interface": False,
         "interface_mapping_missing": False,
+        "loop_guard_mode": DEFAULT_LOOP_GUARD,
+        "forward_progress_metric": "none",
+        "current_distance_to_destination": "",
+        "candidate_distance_to_destination": "",
+        "current_hop_distance_to_destination": "",
+        "candidate_hop_distance_to_destination": "",
+        "candidate_is_forward_progress": True,
+        "candidate_filtered_by_loop_guard": False,
+        "legal_candidate_count": 0,
+        "illegal_candidate_count": 0,
+        "total_candidates_before_guard": 0,
+        "total_candidates_after_guard": 0,
+        "selected_after_loop_guard": True,
+        "forward_progress_distance_missing": False,
     }
 
 
@@ -296,6 +327,32 @@ def _shortest_distance_to_ground_station(dist_sat_net_without_gs, dst_gid, dst_c
     return possibilities
 
 
+def _distance_to_ground_station(metric_matrix, current_sat, dst_candidates):
+    best = float("inf")
+    for _, dst_sat in dst_candidates:
+        try:
+            distance = float(metric_matrix[(current_sat, dst_sat)])
+        except (IndexError, KeyError, TypeError):
+            continue
+        if not math.isinf(distance):
+            best = min(best, distance)
+    return best
+
+
+def _format_distance(value):
+    if value is None or math.isinf(float(value)):
+        return ""
+    return float(value)
+
+
+def _forward_progress_metric(loop_guard_mode):
+    if loop_guard_mode == "forward_progress_hop":
+        return "hop"
+    if loop_guard_mode == "forward_progress_distance":
+        return "distance"
+    return "none"
+
+
 def _shortest_path_fallback_decision(
     current,
     dst_gid,
@@ -352,13 +409,25 @@ def _select_backpressure_next_hop(
     dst_gid,
     sat_graph,
     dist_sat_net_without_gs,
+    forward_progress_matrix,
     ground_station_satellites_in_range,
     sat_neighbor_to_if,
     queue_state,
     fallback_policy,
     link_capacity_bps,
+    loop_guard_mode=DEFAULT_LOOP_GUARD,
 ):
     candidates = []
+    legal_candidates = []
+    dst_candidates = ground_station_satellites_in_range[dst_gid]
+    progress_metric = _forward_progress_metric(loop_guard_mode)
+    current_progress_distance = None
+    if loop_guard_mode in ("forward_progress_hop", "forward_progress_distance"):
+        current_progress_distance = _distance_to_ground_station(
+            forward_progress_matrix,
+            current,
+            dst_candidates,
+        )
     for neighbor in sat_graph.neighbors(current):
         if neighbor == current:
             continue
@@ -376,7 +445,57 @@ def _select_backpressure_next_hop(
             weight = 0.0
         candidate["queue_diff"] = queue_diff
         candidate["weight"] = weight
+        candidate["loop_guard_mode"] = loop_guard_mode
+        candidate["forward_progress_metric"] = progress_metric
+        candidate["current_distance_to_destination"] = ""
+        candidate["candidate_distance_to_destination"] = ""
+        candidate["current_hop_distance_to_destination"] = ""
+        candidate["candidate_hop_distance_to_destination"] = ""
+        candidate["candidate_is_forward_progress"] = True
+        candidate["candidate_filtered_by_loop_guard"] = False
+        candidate["forward_progress_distance_missing"] = False
+        legal = True
+        if loop_guard_mode in ("forward_progress_hop", "forward_progress_distance"):
+            candidate_progress_distance = _distance_to_ground_station(
+                forward_progress_matrix,
+                neighbor,
+                dst_candidates,
+            )
+            missing_distance = (
+                math.isinf(current_progress_distance)
+                or math.isinf(candidate_progress_distance)
+            )
+            is_forward_progress = (
+                not missing_distance
+                and candidate_progress_distance < current_progress_distance
+            )
+            legal = is_forward_progress
+            candidate["candidate_is_forward_progress"] = is_forward_progress
+            candidate["candidate_filtered_by_loop_guard"] = not legal
+            candidate["forward_progress_distance_missing"] = missing_distance
+            candidate["current_distance_to_destination"] = _format_distance(
+                current_progress_distance
+            )
+            candidate["candidate_distance_to_destination"] = _format_distance(
+                candidate_progress_distance
+            )
+            if loop_guard_mode == "forward_progress_hop":
+                candidate["current_hop_distance_to_destination"] = _format_distance(
+                    current_progress_distance
+                )
+                candidate["candidate_hop_distance_to_destination"] = _format_distance(
+                    candidate_progress_distance
+                )
+        elif loop_guard_mode == "immediate_reverse":
+            # The installed fstate is keyed by current node and destination only;
+            # it cannot express previous-hop-dependent forwarding. Keep this mode
+            # observable in diagnostics, but do not filter candidates here.
+            legal = True
+        if not legal:
+            candidate["weight"] = 0.0
         candidates.append(candidate)
+        if legal:
+            legal_candidates.append(candidate)
 
     if not candidates:
         return {
@@ -387,7 +506,57 @@ def _select_backpressure_next_hop(
             "fallback_reason": "no_candidate",
         }
 
-    positive = [item for item in candidates if item["weight"] > 0.0]
+    for item in candidates:
+        item["legal_candidate_count"] = len(legal_candidates)
+        item["illegal_candidate_count"] = len(candidates) - len(legal_candidates)
+        item["total_candidates_before_guard"] = len(candidates)
+        item["total_candidates_after_guard"] = len(legal_candidates)
+        item["selected_after_loop_guard"] = item in legal_candidates
+
+    if not legal_candidates:
+        if any(item["forward_progress_distance_missing"] for item in candidates):
+            fallback_reason = "missing_forward_progress_distance"
+        else:
+            fallback_reason = "no_legal_forward_progress_candidate"
+        if fallback_policy == "no_route":
+            return {
+                "decision": (-1, -1, -1),
+                "selected_candidate": max(
+                    candidates,
+                    key=lambda item: (item["queue_diff"], -item["neighbor"]),
+                ),
+                "selected_positive_pressure": False,
+                "fallback_used": False,
+                "fallback_reason": fallback_reason,
+            }
+        decision = _shortest_path_fallback_decision(
+            current,
+            dst_gid,
+            sat_graph,
+            dist_sat_net_without_gs,
+            ground_station_satellites_in_range,
+            sat_neighbor_to_if,
+        )
+        selected_neighbor = decision[0]
+        selected_candidate = None
+        for item in candidates:
+            if item["neighbor"] == selected_neighbor:
+                selected_candidate = item
+                break
+        if selected_candidate is None:
+            selected_candidate = max(
+                candidates,
+                key=lambda item: (item["queue_diff"], -item["neighbor"]),
+            )
+        return {
+            "decision": decision,
+            "selected_candidate": selected_candidate,
+            "selected_positive_pressure": False,
+            "fallback_used": True,
+            "fallback_reason": fallback_reason if selected_neighbor != -1 else "no_candidate",
+        }
+
+    positive = [item for item in legal_candidates if item["weight"] > 0.0]
     if positive:
         selected = min(
             positive,
@@ -406,7 +575,9 @@ def _select_backpressure_next_hop(
             "fallback_reason": "",
         }
 
-    if any(item["no_forward_interface"] for item in candidates):
+    if loop_guard_mode in ("forward_progress_hop", "forward_progress_distance"):
+        fallback_reason = "no_positive_pressure_after_forward_progress_filter"
+    elif any(item["no_forward_interface"] for item in candidates):
         fallback_reason = "no_forward_interface"
     else:
         fallback_reason = "missing_queue" if not queue_state["queue_file_exists"] else "no_positive_pressure"
@@ -414,7 +585,7 @@ def _select_backpressure_next_hop(
         return {
             "decision": (-1, -1, -1),
             "selected_candidate": max(
-                candidates,
+                legal_candidates,
                 key=lambda item: (item["weight"], -item["neighbor"]),
             ),
             "selected_positive_pressure": False,
@@ -438,7 +609,7 @@ def _select_backpressure_next_hop(
             break
     if selected_candidate is None:
         selected_candidate = max(
-            candidates,
+            legal_candidates,
             key=lambda item: (item["weight"], -item["neighbor"]),
         )
     return {
@@ -505,6 +676,7 @@ def _write_diagnostics(
     decision_infos,
     queue_state,
     fallback_policy,
+    loop_guard_mode,
     diagnostics_sample_limit,
     diagnostic_pairs,
     sat_graph,
@@ -525,11 +697,14 @@ def _write_diagnostics(
     path_rows = []
     diagnostic_keys = set()
     loop_detected_paths = 0
+    reached_paths = 0
     stretches = []
     for src, dst in _diagnostic_pairs_or_focus(diagnostic_pairs):
         path, reached, loop_detected = _trace_fstate_path(src, dst, fstate)
         if loop_detected:
             loop_detected_paths += 1
+        if reached:
+            reached_paths += 1
         hop_count = max(0, len(path) - 1)
         try:
             shortest_hops = nx.shortest_path_length(full_graph, src, dst)
@@ -554,6 +729,7 @@ def _write_diagnostics(
             {
                 "time": time_since_epoch_ns / 1e9,
                 "time_ns": time_since_epoch_ns,
+                "loop_guard_mode": loop_guard_mode,
                 "src": src,
                 "dst": dst,
                 "path": _format_path(path),
@@ -570,6 +746,7 @@ def _write_diagnostics(
     path_fields = [
         "time",
         "time_ns",
+        "loop_guard_mode",
         "src",
         "dst",
         "path",
@@ -630,6 +807,23 @@ def _write_diagnostics(
                 "selected_positive_pressure": _bool_text(info["selected_positive_pressure"]),
                 "fallback_used": _bool_text(info["fallback_used"]),
                 "fallback_reason": info["fallback_reason"],
+                "loop_guard_mode": info.get("loop_guard_mode", loop_guard_mode),
+                "forward_progress_metric": info.get("forward_progress_metric", "none"),
+                "current_distance_to_destination": info.get("current_distance_to_destination", ""),
+                "candidate_distance_to_destination": info.get("candidate_distance_to_destination", ""),
+                "current_hop_distance_to_destination": info.get("current_hop_distance_to_destination", ""),
+                "candidate_hop_distance_to_destination": info.get("candidate_hop_distance_to_destination", ""),
+                "candidate_is_forward_progress": _bool_text(
+                    info.get("candidate_is_forward_progress", True)
+                ),
+                "candidate_filtered_by_loop_guard": _bool_text(
+                    info.get("candidate_filtered_by_loop_guard", False)
+                ),
+                "legal_candidate_count": info.get("legal_candidate_count", 0),
+                "illegal_candidate_count": info.get("illegal_candidate_count", 0),
+                "selected_after_loop_guard": _bool_text(
+                    info.get("selected_after_loop_guard", True)
+                ),
                 "two_hop_ping_pong": _bool_text(info.get("two_hop_ping_pong", False)),
                 "current_out_interface": info.get("current_out_interface", ""),
                 "neighbor_return_interface": info.get("neighbor_return_interface", ""),
@@ -662,6 +856,17 @@ def _write_diagnostics(
         "selected_positive_pressure",
         "fallback_used",
         "fallback_reason",
+        "loop_guard_mode",
+        "forward_progress_metric",
+        "current_distance_to_destination",
+        "candidate_distance_to_destination",
+        "current_hop_distance_to_destination",
+        "candidate_hop_distance_to_destination",
+        "candidate_is_forward_progress",
+        "candidate_filtered_by_loop_guard",
+        "legal_candidate_count",
+        "illegal_candidate_count",
+        "selected_after_loop_guard",
         "two_hop_ping_pong",
         "current_out_interface",
         "neighbor_return_interface",
@@ -699,16 +904,38 @@ def _write_diagnostics(
         1 for info in decision_infos.values()
         if info.get("interface_mapping_missing", False)
     )
+    total_candidates_before_guard = sum(
+        int(info.get("total_candidates_before_guard", 0))
+        for info in decision_infos.values()
+    )
+    total_candidates_after_guard = sum(
+        int(info.get("total_candidates_after_guard", 0))
+        for info in decision_infos.values()
+    )
+    total_candidates_filtered = max(
+        0,
+        total_candidates_before_guard - total_candidates_after_guard,
+    )
+    path_count = len(path_rows)
     summary_row = {
         "time_ns": time_since_epoch_ns,
         "scenario_id": scenario_id,
         "algorithm": ALGORITHM_NAME,
+        "loop_guard_mode": loop_guard_mode,
         "total_decisions": total_decisions,
         "positive_pressure_decisions": positive_count,
         "fallback_decisions": fallback_count,
         "no_positive_pressure_count": reasons.get("no_positive_pressure", 0),
         "missing_queue_count": reasons.get("missing_queue", 0),
         "no_candidate_count": reasons.get("no_candidate", 0),
+        "fallback_no_legal_forward_progress_count": (
+            reasons.get("no_legal_forward_progress_candidate", 0)
+            + reasons.get("missing_forward_progress_distance", 0)
+        ),
+        "fallback_no_positive_pressure_after_guard_count": reasons.get(
+            "no_positive_pressure_after_forward_progress_filter",
+            0,
+        ),
         "no_forward_interface_count": no_forward_interface_count,
         "interface_mapping_missing_count": interface_mapping_missing_count,
         "interface_source_success_ratio": (
@@ -716,11 +943,29 @@ def _write_diagnostics(
             if total_decisions
             else 0.0
         ),
+        "total_candidates_before_guard": total_candidates_before_guard,
+        "total_candidates_after_guard": total_candidates_after_guard,
+        "candidate_filter_ratio": (
+            total_candidates_filtered / float(total_candidates_before_guard)
+            if total_candidates_before_guard
+            else 0.0
+        ),
+        "forward_progress_success_ratio": (
+            total_candidates_after_guard / float(total_candidates_before_guard)
+            if total_candidates_before_guard
+            else 0.0
+        ),
         "avg_selected_weight": _mean(selected_weights),
         "p95_selected_weight": _p95(selected_weights),
         "avg_queue_diff": _mean(queue_diffs),
         "p95_queue_diff": _p95(queue_diffs),
         "loop_detected_paths": loop_detected_paths,
+        "loop_detected_ratio": (
+            loop_detected_paths / float(path_count) if path_count else 0.0
+        ),
+        "reached_destination_ratio": (
+            reached_paths / float(path_count) if path_count else 0.0
+        ),
         "two_hop_ping_pong_decisions": ping_pong_count,
         "avg_path_stretch": _mean(stretches),
         "p95_path_stretch": _p95(stretches),
@@ -731,20 +976,29 @@ def _write_diagnostics(
         "time_ns",
         "scenario_id",
         "algorithm",
+        "loop_guard_mode",
         "total_decisions",
         "positive_pressure_decisions",
         "fallback_decisions",
         "no_positive_pressure_count",
         "missing_queue_count",
         "no_candidate_count",
+        "fallback_no_legal_forward_progress_count",
+        "fallback_no_positive_pressure_after_guard_count",
         "no_forward_interface_count",
         "interface_mapping_missing_count",
         "interface_source_success_ratio",
+        "total_candidates_before_guard",
+        "total_candidates_after_guard",
+        "candidate_filter_ratio",
+        "forward_progress_success_ratio",
         "avg_selected_weight",
         "p95_selected_weight",
         "avg_queue_diff",
         "p95_queue_diff",
         "loop_detected_paths",
+        "loop_detected_ratio",
+        "reached_destination_ratio",
         "two_hop_ping_pong_decisions",
         "avg_path_stretch",
         "p95_path_stretch",
@@ -762,7 +1016,10 @@ def _write_diagnostics(
         "requested_queue_source": queue_state["requested_source"],
         "effective_queue_source": queue_state["effective_source"],
         "queue_source": queue_state["effective_source"],
+        "loop_guard_mode": loop_guard_mode,
+        "backpressure_forward_progress_metric": _forward_progress_metric(loop_guard_mode),
         "commodity_mode": COMMODITY_MODE,
+        "is_restricted_route_backpressure": _bool_text(loop_guard_mode != "none"),
         "is_full_multi_commodity": "false",
         "per_destination_queue_available": _bool_text(queue_state["per_destination_available"]),
         "queue_file_exists": _bool_text(queue_state["queue_file_exists"]),
@@ -775,7 +1032,10 @@ def _write_diagnostics(
         "requested_queue_source",
         "effective_queue_source",
         "queue_source",
+        "loop_guard_mode",
+        "backpressure_forward_progress_metric",
         "commodity_mode",
+        "is_restricted_route_backpressure",
         "is_full_multi_commodity",
         "per_destination_queue_available",
         "queue_file_exists",
@@ -792,12 +1052,25 @@ def _write_diagnostics(
     fallback_row = {
         "time_ns": time_since_epoch_ns,
         "fallback_policy": fallback_policy,
+        "loop_guard_mode": loop_guard_mode,
         "total_decisions": total_decisions,
         "fallback_decisions": fallback_count,
         "fallback_ratio": fallback_count / float(total_decisions) if total_decisions else 0.0,
         "positive_pressure_decisions": positive_count,
         "positive_pressure_ratio": positive_count / float(total_decisions) if total_decisions else 0.0,
         "no_positive_pressure_count": reasons.get("no_positive_pressure", 0),
+        "no_positive_pressure_after_guard_count": reasons.get(
+            "no_positive_pressure_after_forward_progress_filter",
+            0,
+        ),
+        "no_legal_forward_progress_count": reasons.get(
+            "no_legal_forward_progress_candidate",
+            0,
+        ),
+        "missing_forward_progress_distance_count": reasons.get(
+            "missing_forward_progress_distance",
+            0,
+        ),
         "missing_queue_count": reasons.get("missing_queue", 0),
         "no_candidate_count": reasons.get("no_candidate", 0),
         "no_forward_interface_count": reasons.get("no_forward_interface", 0),
@@ -805,12 +1078,16 @@ def _write_diagnostics(
     fallback_fields = [
         "time_ns",
         "fallback_policy",
+        "loop_guard_mode",
         "total_decisions",
         "fallback_decisions",
         "fallback_ratio",
         "positive_pressure_decisions",
         "positive_pressure_ratio",
         "no_positive_pressure_count",
+        "no_positive_pressure_after_guard_count",
+        "no_legal_forward_progress_count",
+        "missing_forward_progress_distance_count",
         "missing_queue_count",
         "no_candidate_count",
         "no_forward_interface_count",
@@ -838,6 +1115,7 @@ def algorithm_backpressure_over_isls(
         isl_link_capacity_bps=None,
         backpressure_queue_source=DEFAULT_QUEUE_SOURCE,
         backpressure_fallback=DEFAULT_FALLBACK,
+        backpressure_loop_guard=DEFAULT_LOOP_GUARD,
         backpressure_diagnostics_enabled=True,
         backpressure_diagnostics_sample_limit=DEFAULT_DIAGNOSTIC_SAMPLE_LIMIT,
         diagnostic_pairs=None,
@@ -846,6 +1124,7 @@ def algorithm_backpressure_over_isls(
         print("\nALGORITHM: SIMPLE BACKPRESSURE OVER ISLS")
 
     fallback_policy = normalize_backpressure_fallback(backpressure_fallback)
+    loop_guard_mode = normalize_backpressure_loop_guard(backpressure_loop_guard)
     queue_state = _load_proxy_queue_state(
         queue_stats_file,
         len(satellites),
@@ -862,6 +1141,8 @@ def algorithm_backpressure_over_isls(
         print("  > Queue source effective: %s" % queue_state["effective_source"])
         print("  > Commodity mode: %s" % COMMODITY_MODE)
         print("  > Fallback policy: %s" % fallback_policy)
+        print("  > Loop guard mode: %s" % loop_guard_mode)
+        print("  > Forward-progress metric: %s" % _forward_progress_metric(loop_guard_mode))
 
     _write_gsl_if_bandwidth(
         output_dynamic_state_dir,
@@ -878,6 +1159,12 @@ def algorithm_backpressure_over_isls(
     dist_sat_net_without_gs = nx.floyd_warshall_numpy(
         sat_net_graph_only_satellites_with_isls
     )
+    forward_progress_matrix = dist_sat_net_without_gs
+    if loop_guard_mode == "forward_progress_hop":
+        forward_progress_matrix = nx.floyd_warshall_numpy(
+            sat_net_graph_only_satellites_with_isls,
+            weight="hop_weight",
+        )
 
     num_satellites = len(satellites)
     num_ground_stations = len(ground_stations)
@@ -914,11 +1201,13 @@ def algorithm_backpressure_over_isls(
                         dst_gid,
                         sat_net_graph_only_satellites_with_isls,
                         dist_sat_net_without_gs,
+                        forward_progress_matrix,
                         ground_station_satellites_in_range,
                         sat_neighbor_to_if,
                         queue_state,
                         fallback_policy,
                         link_capacity_bps,
+                        loop_guard_mode,
                     )
                     next_hop_decision = selection["decision"]
                     selected_candidate = selection["selected_candidate"]
@@ -941,6 +1230,10 @@ def algorithm_backpressure_over_isls(
                 fstate[fstate_key] = next_hop_decision
                 if selected_candidate is None:
                     selected_candidate = _empty_candidate_metrics(curr, -1)
+                selected_candidate["loop_guard_mode"] = loop_guard_mode
+                selected_candidate["forward_progress_metric"] = _forward_progress_metric(
+                    loop_guard_mode
+                )
                 decision_infos[fstate_key] = {
                     "current_node": curr,
                     "destination": dst_gs_node_id,
@@ -959,6 +1252,40 @@ def algorithm_backpressure_over_isls(
                     "nonreturn_interface_count": selected_candidate["nonreturn_interface_count"],
                     "no_forward_interface": selected_candidate["no_forward_interface"],
                     "interface_mapping_missing": selected_candidate["interface_mapping_missing"],
+                    "loop_guard_mode": selected_candidate["loop_guard_mode"],
+                    "forward_progress_metric": selected_candidate["forward_progress_metric"],
+                    "current_distance_to_destination": selected_candidate[
+                        "current_distance_to_destination"
+                    ],
+                    "candidate_distance_to_destination": selected_candidate[
+                        "candidate_distance_to_destination"
+                    ],
+                    "current_hop_distance_to_destination": selected_candidate[
+                        "current_hop_distance_to_destination"
+                    ],
+                    "candidate_hop_distance_to_destination": selected_candidate[
+                        "candidate_hop_distance_to_destination"
+                    ],
+                    "candidate_is_forward_progress": selected_candidate[
+                        "candidate_is_forward_progress"
+                    ],
+                    "candidate_filtered_by_loop_guard": selected_candidate[
+                        "candidate_filtered_by_loop_guard"
+                    ],
+                    "legal_candidate_count": selected_candidate["legal_candidate_count"],
+                    "illegal_candidate_count": selected_candidate["illegal_candidate_count"],
+                    "total_candidates_before_guard": selected_candidate[
+                        "total_candidates_before_guard"
+                    ],
+                    "total_candidates_after_guard": selected_candidate[
+                        "total_candidates_after_guard"
+                    ],
+                    "selected_after_loop_guard": selected_candidate[
+                        "selected_after_loop_guard"
+                    ],
+                    "forward_progress_distance_missing": selected_candidate[
+                        "forward_progress_distance_missing"
+                    ],
                     "link_capacity_bps": link_capacity_bps,
                     "selected_positive_pressure": selected_positive,
                     "fallback_used": fallback_used,
@@ -1026,6 +1353,7 @@ def algorithm_backpressure_over_isls(
             decision_infos,
             queue_state,
             fallback_policy,
+            loop_guard_mode,
             int(backpressure_diagnostics_sample_limit),
             diagnostic_pairs,
             sat_net_graph_only_satellites_with_isls,
@@ -1041,6 +1369,9 @@ def algorithm_backpressure_over_isls(
         "backpressure_requested_queue_source": queue_state["requested_source"],
         "backpressure_commodity_mode": COMMODITY_MODE,
         "backpressure_fallback": fallback_policy,
+        "backpressure_loop_guard": loop_guard_mode,
+        "backpressure_forward_progress_metric": _forward_progress_metric(loop_guard_mode),
+        "backpressure_is_restricted_route": loop_guard_mode != "none",
         "backpressure_is_full_multi_commodity": False,
         "backpressure_capacity_multiplier_enabled": True,
     }

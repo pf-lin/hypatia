@@ -88,6 +88,10 @@ def _render_config(run, udp_logging_ids):
             "[LOHI-MANAGEMENT-MODE]": run["lohi_management_mode"],
             "[BACKPRESSURE-QUEUE-SOURCE]": run["backpressure_queue_source"],
             "[BACKPRESSURE-FALLBACK]": run["backpressure_fallback"],
+            "[BACKPRESSURE-LOOP-GUARD]": run["backpressure_loop_guard"],
+            "[BACKPRESSURE-FORWARD-PROGRESS-METRIC]": run[
+                "backpressure_forward_progress_metric"
+            ],
             "[BACKPRESSURE-DIAGNOSTICS]": (
                 "true" if run["backpressure_diagnostics"] else "false"
             ),
@@ -1947,6 +1951,13 @@ def write_run_metadata(run_dir, run, pairs, per_flow_rate):
         ),
         "backpressure_queue_source": run["backpressure_queue_source"],
         "backpressure_fallback": run["backpressure_fallback"],
+        "backpressure_loop_guard": run["backpressure_loop_guard"],
+        "backpressure_forward_progress_metric": run[
+            "backpressure_forward_progress_metric"
+        ],
+        "backpressure_is_restricted_route": run[
+            "backpressure_is_restricted_route"
+        ],
         "backpressure_commodity_mode": run["backpressure_commodity_mode"],
         "backpressure_capacity_multiplier_enabled": run[
             "backpressure_capacity_multiplier_enabled"
@@ -2401,6 +2412,7 @@ def main():
         args.gsl_data_rate_megabit_per_s,
         args.backpressure_queue_source,
         args.backpressure_fallback,
+        args.backpressure_loop_guard,
         args.backpressure_diagnostics,
         args.backpressure_diagnostics_sample_limit,
     )

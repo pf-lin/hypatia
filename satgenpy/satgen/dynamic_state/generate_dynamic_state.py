@@ -117,6 +117,7 @@ def generate_dynamic_state_at(
         lohi_diagnostic_pairs=None,
         backpressure_queue_source="auto",
         backpressure_fallback="shortest_path",
+        backpressure_loop_guard="none",
         backpressure_diagnostics_enabled=True,
         backpressure_diagnostics_sample_limit=2000,
 ):
@@ -480,6 +481,7 @@ def generate_dynamic_state_at(
             isl_link_capacity_bps,
             backpressure_queue_source,
             backpressure_fallback,
+            backpressure_loop_guard,
             backpressure_diagnostics_enabled,
             backpressure_diagnostics_sample_limit,
             lohi_diagnostic_pairs,

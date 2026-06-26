@@ -78,6 +78,7 @@ def generate_initial_fstate(run, run_dir):
         ],
         backpressure_queue_source=run["backpressure_queue_source"],
         backpressure_fallback=run["backpressure_fallback"],
+        backpressure_loop_guard=run["backpressure_loop_guard"],
         backpressure_diagnostics_enabled=run["backpressure_diagnostics"],
         backpressure_diagnostics_sample_limit=run[
             "backpressure_diagnostics_sample_limit"
@@ -145,6 +146,7 @@ def main():
         args.gsl_data_rate_megabit_per_s,
         args.backpressure_queue_source,
         args.backpressure_fallback,
+        args.backpressure_loop_guard,
         args.backpressure_diagnostics,
         args.backpressure_diagnostics_sample_limit,
     ):

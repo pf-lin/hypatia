@@ -10,10 +10,12 @@ from collections import Counter
 
 from dynamic_run_list import (
     backpressure_fallback_policies,
+    backpressure_loop_guard_modes,
     backpressure_queue_sources,
     default_backpressure_diagnostics,
     default_backpressure_diagnostics_sample_limit,
     default_backpressure_fallback,
+    default_backpressure_loop_guard,
     default_backpressure_queue_source,
     get_udp_pdr_run_list,
     seconds_to_tag,
@@ -36,6 +38,7 @@ ALGORITHMS = [
 ]
 BACKPRESSURE_QUEUE_SOURCE = default_backpressure_queue_source
 BACKPRESSURE_FALLBACK = default_backpressure_fallback
+BACKPRESSURE_LOOP_GUARD = default_backpressure_loop_guard
 BACKPRESSURE_DIAGNOSTICS = default_backpressure_diagnostics
 BACKPRESSURE_DIAGNOSTICS_SAMPLE_LIMIT = default_backpressure_diagnostics_sample_limit
 
@@ -251,6 +254,12 @@ def parse_args():
         default=default_backpressure_fallback,
         help="Fallback policy for algorithm_backpressure_over_isls.",
     )
+    parser.add_argument(
+        "--backpressure-loop-guard",
+        choices=backpressure_loop_guard_modes,
+        default=default_backpressure_loop_guard,
+        help="Restricted-route / loop-suppression mode for algorithm_backpressure_over_isls.",
+    )
     diagnostics_group = parser.add_mutually_exclusive_group()
     diagnostics_group.add_argument(
         "--backpressure-diagnostics",
@@ -464,6 +473,8 @@ def common_args(
             BACKPRESSURE_QUEUE_SOURCE,
             "--backpressure-fallback",
             BACKPRESSURE_FALLBACK,
+            "--backpressure-loop-guard",
+            BACKPRESSURE_LOOP_GUARD,
             "--backpressure-diagnostics-sample-limit",
             str(BACKPRESSURE_DIAGNOSTICS_SAMPLE_LIMIT),
         ]
@@ -496,6 +507,7 @@ def run_name_for_scenario(
         gsl_data_rate_megabit_per_s_override=100,
         backpressure_queue_source_override=BACKPRESSURE_QUEUE_SOURCE,
         backpressure_fallback_override=BACKPRESSURE_FALLBACK,
+        backpressure_loop_guard_override=BACKPRESSURE_LOOP_GUARD,
         backpressure_diagnostics_override=BACKPRESSURE_DIAGNOSTICS,
         backpressure_diagnostics_sample_limit_override=(
             BACKPRESSURE_DIAGNOSTICS_SAMPLE_LIMIT
@@ -1166,11 +1178,13 @@ def main():
     global ALGORITHMS
     global BACKPRESSURE_QUEUE_SOURCE
     global BACKPRESSURE_FALLBACK
+    global BACKPRESSURE_LOOP_GUARD
     global BACKPRESSURE_DIAGNOSTICS
     global BACKPRESSURE_DIAGNOSTICS_SAMPLE_LIMIT
     ALGORITHMS = list(args.algorithms)
     BACKPRESSURE_QUEUE_SOURCE = args.backpressure_queue_source
     BACKPRESSURE_FALLBACK = args.backpressure_fallback
+    BACKPRESSURE_LOOP_GUARD = args.backpressure_loop_guard
     BACKPRESSURE_DIAGNOSTICS = args.backpressure_diagnostics
     BACKPRESSURE_DIAGNOSTICS_SAMPLE_LIMIT = (
         args.backpressure_diagnostics_sample_limit
