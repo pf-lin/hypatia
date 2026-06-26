@@ -88,6 +88,8 @@ backpressure_queue_sources = [
     "node_total_packets",
     "interface_bytes",
     "interface_packets",
+    "interface_nonreturn_avg_bytes",
+    "interface_nonreturn_min_bytes",
 ]
 backpressure_fallback_policies = [
     "shortest_path",
@@ -240,6 +242,8 @@ def backpressure_queue_source_tag(value):
         "node_total_packets": "qnodepkts",
         "interface_bytes": "qifbytes",
         "interface_packets": "qifpkts",
+        "interface_nonreturn_avg_bytes": "qifnavgbytes",
+        "interface_nonreturn_min_bytes": "qifnminbytes",
     }
     return aliases[normalize_backpressure_queue_source(value)]
 

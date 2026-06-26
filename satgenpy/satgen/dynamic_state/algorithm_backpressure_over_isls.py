@@ -25,6 +25,8 @@ QUEUE_SOURCE_ALIASES = {
     "node_total_packets": "node_total_packets",
     "interface_bytes": "interface_bytes",
     "interface_packets": "interface_packets",
+    "interface_nonreturn_avg_bytes": "interface_nonreturn_avg_bytes",
+    "interface_nonreturn_min_bytes": "interface_nonreturn_min_bytes",
 }
 
 FALLBACK_POLICIES = {"shortest_path", "no_route"}
@@ -159,6 +161,16 @@ def _load_proxy_queue_state(queue_stats_file, num_satellites, requested_source):
         unit = "packets"
         effective_source = "interface_queue_packets"
         link_values = stats.queue_packets
+    elif requested_source == "interface_nonreturn_avg_bytes":
+        mode = "interface_nonreturn_avg"
+        unit = "bytes"
+        effective_source = "interface_nonreturn_avg_bytes"
+        link_values = stats.queue_bytes
+    elif requested_source == "interface_nonreturn_min_bytes":
+        mode = "interface_nonreturn_min"
+        unit = "bytes"
+        effective_source = "interface_nonreturn_min_bytes"
+        link_values = stats.queue_bytes
     else:
         raise ValueError("Unsupported queue source: %s" % requested_source)
 
@@ -178,15 +190,99 @@ def _load_proxy_queue_state(queue_stats_file, num_satellites, requested_source):
     }
 
 
-def _queue_pair_for_candidate(queue_state, current, neighbor):
+def _empty_candidate_metrics(current, neighbor):
+    current_out_interface = "%d->%d" % (current, neighbor) if neighbor != -1 else ""
+    neighbor_return_interface = "%d->%d" % (neighbor, current) if neighbor != -1 else ""
+    return {
+        "neighbor": neighbor,
+        "queue_current": 0.0,
+        "queue_neighbor": 0.0,
+        "queue_diff": 0.0,
+        "weight": 0.0,
+        "current_out_interface": current_out_interface,
+        "neighbor_return_interface": neighbor_return_interface,
+        "neighbor_forward_interfaces": "",
+        "queue_current_out_interface": 0.0,
+        "queue_neighbor_forward_avg": 0.0,
+        "queue_neighbor_forward_min": 0.0,
+        "interface_queue_source_available": False,
+        "nonreturn_interface_count": 0,
+        "no_forward_interface": False,
+        "interface_mapping_missing": False,
+    }
+
+
+def _queue_pair_for_candidate(queue_state, current, neighbor, sat_graph=None):
+    metrics = _empty_candidate_metrics(current, neighbor)
     if queue_state["mode"] == "interface":
         values = queue_state["link_values"]
-        return (
-            float(values.get((current, neighbor), 0.0)),
-            float(values.get((neighbor, current), 0.0)),
+        queue_current = float(values.get((current, neighbor), 0.0))
+        queue_neighbor = float(values.get((neighbor, current), 0.0))
+        metrics.update(
+            {
+                "queue_current": queue_current,
+                "queue_neighbor": queue_neighbor,
+                "queue_current_out_interface": queue_current,
+                "queue_neighbor_forward_avg": queue_neighbor,
+                "queue_neighbor_forward_min": queue_neighbor,
+                "interface_queue_source_available": queue_state["queue_file_exists"],
+                "nonreturn_interface_count": 1,
+            }
         )
+        return metrics
+
+    if queue_state["mode"] in ("interface_nonreturn_avg", "interface_nonreturn_min"):
+        values = queue_state["link_values"]
+        queue_current = float(values.get((current, neighbor), 0.0))
+        forward_neighbors = []
+        if sat_graph is not None and neighbor in sat_graph:
+            forward_neighbors = [
+                int(candidate)
+                for candidate in sat_graph.neighbors(neighbor)
+                if int(candidate) != int(current)
+            ]
+        forward_values = [
+            float(values.get((neighbor, candidate), 0.0))
+            for candidate in forward_neighbors
+        ]
+        no_forward_interface = len(forward_neighbors) == 0
+        forward_avg = _mean(forward_values)
+        forward_min = min(forward_values) if forward_values else 0.0
+        queue_neighbor = (
+            forward_avg
+            if queue_state["mode"] == "interface_nonreturn_avg"
+            else forward_min
+        )
+        metrics.update(
+            {
+                "queue_current": queue_current,
+                "queue_neighbor": queue_neighbor,
+                "queue_current_out_interface": queue_current,
+                "queue_neighbor_forward_avg": forward_avg,
+                "queue_neighbor_forward_min": forward_min,
+                "neighbor_forward_interfaces": ";".join(
+                    "%d->%d" % (neighbor, candidate)
+                    for candidate in sorted(forward_neighbors)
+                ),
+                "interface_queue_source_available": (
+                    queue_state["queue_file_exists"] and not no_forward_interface
+                ),
+                "nonreturn_interface_count": len(forward_neighbors),
+                "no_forward_interface": no_forward_interface,
+            }
+        )
+        return metrics
+
     totals = queue_state["node_totals"]
-    return (float(totals.get(current, 0.0)), float(totals.get(neighbor, 0.0)))
+    queue_current = float(totals.get(current, 0.0))
+    queue_neighbor = float(totals.get(neighbor, 0.0))
+    metrics.update(
+        {
+            "queue_current": queue_current,
+            "queue_neighbor": queue_neighbor,
+        }
+    )
+    return metrics
 
 
 def _shortest_distance_to_ground_station(dist_sat_net_without_gs, dst_gid, dst_candidates):
@@ -266,22 +362,21 @@ def _select_backpressure_next_hop(
     for neighbor in sat_graph.neighbors(current):
         if neighbor == current:
             continue
-        queue_current, queue_neighbor = _queue_pair_for_candidate(
+        candidate = _queue_pair_for_candidate(
             queue_state,
             current,
             neighbor,
+            sat_graph,
         )
+        queue_current = candidate["queue_current"]
+        queue_neighbor = candidate["queue_neighbor"]
         queue_diff = max(queue_current - queue_neighbor, 0.0)
         weight = queue_diff * float(link_capacity_bps)
-        candidates.append(
-            {
-                "neighbor": neighbor,
-                "queue_current": queue_current,
-                "queue_neighbor": queue_neighbor,
-                "queue_diff": queue_diff,
-                "weight": weight,
-            }
-        )
+        if candidate["no_forward_interface"]:
+            weight = 0.0
+        candidate["queue_diff"] = queue_diff
+        candidate["weight"] = weight
+        candidates.append(candidate)
 
     if not candidates:
         return {
@@ -311,7 +406,10 @@ def _select_backpressure_next_hop(
             "fallback_reason": "",
         }
 
-    fallback_reason = "missing_queue" if not queue_state["queue_file_exists"] else "no_positive_pressure"
+    if any(item["no_forward_interface"] for item in candidates):
+        fallback_reason = "no_forward_interface"
+    else:
+        fallback_reason = "missing_queue" if not queue_state["queue_file_exists"] else "no_positive_pressure"
     if fallback_policy == "no_route":
         return {
             "decision": (-1, -1, -1),
@@ -533,6 +631,16 @@ def _write_diagnostics(
                 "fallback_used": _bool_text(info["fallback_used"]),
                 "fallback_reason": info["fallback_reason"],
                 "two_hop_ping_pong": _bool_text(info.get("two_hop_ping_pong", False)),
+                "current_out_interface": info.get("current_out_interface", ""),
+                "neighbor_return_interface": info.get("neighbor_return_interface", ""),
+                "neighbor_forward_interfaces": info.get("neighbor_forward_interfaces", ""),
+                "queue_current_out_interface": info.get("queue_current_out_interface", 0.0),
+                "queue_neighbor_forward_avg": info.get("queue_neighbor_forward_avg", 0.0),
+                "queue_neighbor_forward_min": info.get("queue_neighbor_forward_min", 0.0),
+                "interface_queue_source_available": _bool_text(
+                    info.get("interface_queue_source_available", False)
+                ),
+                "nonreturn_interface_count": info.get("nonreturn_interface_count", 0),
                 "queue_source": queue_state["effective_source"],
                 "commodity_mode": COMMODITY_MODE,
             }
@@ -555,6 +663,14 @@ def _write_diagnostics(
         "fallback_used",
         "fallback_reason",
         "two_hop_ping_pong",
+        "current_out_interface",
+        "neighbor_return_interface",
+        "neighbor_forward_interfaces",
+        "queue_current_out_interface",
+        "queue_neighbor_forward_avg",
+        "queue_neighbor_forward_min",
+        "interface_queue_source_available",
+        "nonreturn_interface_count",
         "queue_source",
         "commodity_mode",
     ]
@@ -571,6 +687,18 @@ def _write_diagnostics(
     positive_count = sum(1 for info in decision_infos.values() if info["selected_positive_pressure"])
     fallback_count = sum(1 for info in decision_infos.values() if info["fallback_used"])
     ping_pong_count = sum(1 for info in decision_infos.values() if info.get("two_hop_ping_pong", False))
+    interface_success_count = sum(
+        1 for info in decision_infos.values()
+        if info.get("interface_queue_source_available", False)
+    )
+    no_forward_interface_count = sum(
+        1 for info in decision_infos.values()
+        if info.get("no_forward_interface", False)
+    )
+    interface_mapping_missing_count = sum(
+        1 for info in decision_infos.values()
+        if info.get("interface_mapping_missing", False)
+    )
     summary_row = {
         "time_ns": time_since_epoch_ns,
         "scenario_id": scenario_id,
@@ -581,6 +709,13 @@ def _write_diagnostics(
         "no_positive_pressure_count": reasons.get("no_positive_pressure", 0),
         "missing_queue_count": reasons.get("missing_queue", 0),
         "no_candidate_count": reasons.get("no_candidate", 0),
+        "no_forward_interface_count": no_forward_interface_count,
+        "interface_mapping_missing_count": interface_mapping_missing_count,
+        "interface_source_success_ratio": (
+            interface_success_count / float(total_decisions)
+            if total_decisions
+            else 0.0
+        ),
         "avg_selected_weight": _mean(selected_weights),
         "p95_selected_weight": _p95(selected_weights),
         "avg_queue_diff": _mean(queue_diffs),
@@ -602,6 +737,9 @@ def _write_diagnostics(
         "no_positive_pressure_count",
         "missing_queue_count",
         "no_candidate_count",
+        "no_forward_interface_count",
+        "interface_mapping_missing_count",
+        "interface_source_success_ratio",
         "avg_selected_weight",
         "p95_selected_weight",
         "avg_queue_diff",
@@ -662,6 +800,7 @@ def _write_diagnostics(
         "no_positive_pressure_count": reasons.get("no_positive_pressure", 0),
         "missing_queue_count": reasons.get("missing_queue", 0),
         "no_candidate_count": reasons.get("no_candidate", 0),
+        "no_forward_interface_count": reasons.get("no_forward_interface", 0),
     }
     fallback_fields = [
         "time_ns",
@@ -674,6 +813,7 @@ def _write_diagnostics(
         "no_positive_pressure_count",
         "missing_queue_count",
         "no_candidate_count",
+        "no_forward_interface_count",
     ]
     _append_csv(
         os.path.join(diagnostics_dir, "backpressure_fallback_summary.csv"),
@@ -764,13 +904,7 @@ def algorithm_backpressure_over_isls(
                 )
                 if direct_decision is not None:
                     next_hop_decision = direct_decision
-                    selected_candidate = {
-                        "neighbor": dst_gs_node_id,
-                        "queue_current": 0.0,
-                        "queue_neighbor": 0.0,
-                        "queue_diff": 0.0,
-                        "weight": 0.0,
-                    }
+                    selected_candidate = _empty_candidate_metrics(curr, dst_gs_node_id)
                     selected_positive = False
                     fallback_used = False
                     fallback_reason = "direct_gsl_delivery"
@@ -806,13 +940,7 @@ def algorithm_backpressure_over_isls(
                     )
                 fstate[fstate_key] = next_hop_decision
                 if selected_candidate is None:
-                    selected_candidate = {
-                        "neighbor": -1,
-                        "queue_current": 0.0,
-                        "queue_neighbor": 0.0,
-                        "queue_diff": 0.0,
-                        "weight": 0.0,
-                    }
+                    selected_candidate = _empty_candidate_metrics(curr, -1)
                 decision_infos[fstate_key] = {
                     "current_node": curr,
                     "destination": dst_gs_node_id,
@@ -821,6 +949,16 @@ def algorithm_backpressure_over_isls(
                     "queue_neighbor": selected_candidate["queue_neighbor"],
                     "queue_diff": selected_candidate["queue_diff"],
                     "weight": selected_candidate["weight"],
+                    "current_out_interface": selected_candidate["current_out_interface"],
+                    "neighbor_return_interface": selected_candidate["neighbor_return_interface"],
+                    "neighbor_forward_interfaces": selected_candidate["neighbor_forward_interfaces"],
+                    "queue_current_out_interface": selected_candidate["queue_current_out_interface"],
+                    "queue_neighbor_forward_avg": selected_candidate["queue_neighbor_forward_avg"],
+                    "queue_neighbor_forward_min": selected_candidate["queue_neighbor_forward_min"],
+                    "interface_queue_source_available": selected_candidate["interface_queue_source_available"],
+                    "nonreturn_interface_count": selected_candidate["nonreturn_interface_count"],
+                    "no_forward_interface": selected_candidate["no_forward_interface"],
+                    "interface_mapping_missing": selected_candidate["interface_mapping_missing"],
                     "link_capacity_bps": link_capacity_bps,
                     "selected_positive_pressure": selected_positive,
                     "fallback_used": fallback_used,

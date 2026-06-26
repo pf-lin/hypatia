@@ -1,0 +1,9 @@
+cause,evidence,severity,recommendation
+path loop / ping-pong in forwarding state,"node-total loop ratio 0.9350 (187/200), path replay success 0.0195, t=5/t=8 focus paths loop",critical,treat loops as the dominant failure mode; consider loop guard only as a separate stabilized proxy
+node_total_queue_bytes is a weak non-commodity proxy,"fallback ratio 0.6835, positive-pressure ratio 0.3144, but positive paths still loop at 0.9740",high,do not describe it as full multi-commodity Backpressure; keep it as a routing-level approximation
+missing per-destination commodity queues,queue source summary reports per_destination_queue_available=false,high,"true commodity queues are the rigorous fix, but likely too costly for the current thesis schedule"
+forwarding-state pipeline lag,"routing is recomputed from previous queue snapshots every 0.1s, then installed as static forwarding state",medium,"document this as a routing-level proxy, not packet-level dynamic Backpressure"
+ISL saturation around looped paths,node-total saturation-associated loss 19221/56212; exact physical queue/phy/routing losses are zero,medium,"interpret saturation as associated evidence, not exact root attribution"
+in-flight/drain time,"traffic stops at 8.0s, simulation ends at 10.0s, tail_in_flight_possible_loss=0",low,add late_arrivals_after_traffic_stop / estimated_inflight_at_end diagnostics if extending this analysis
+interface_nonreturn_avg_bytes is feasible but not sufficient,PDR 0.0633 vs node-total 0.0701; focus PDR 0.0006 vs 0.1122; loop ratio 0.9900,high,do not promote this interface proxy to formal baseline without explicit stabilization or commodity queues
+interface_nonreturn_min_bytes is feasible but not sufficient,PDR 0.0622 vs node-total 0.0701; focus PDR 0.0006 vs 0.1122; loop ratio 0.9900,high,do not promote this interface proxy to formal baseline without explicit stabilization or commodity queues

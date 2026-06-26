@@ -1,0 +1,4 @@
+queue_source,traffic_stop_time_s,simulation_end_time_s,drain_time_s,total_sent_packets,total_received_packets,total_lost_packets,synthetic_lost_packets,tail_in_flight_possible_loss,exact_physical_queue_loss,exact_physical_phy_loss,exact_routing_loss,exact_udp_send_failure_loss,isl_saturation_associated_loss,unclassified_loss,conclusion
+node_total_queue_bytes,8.0,10.0,2.0,60452,4240,56212,56212,0,0,0,0,0,19221,36991,not primarily in-flight/drain in current attribution; tail_in_flight_possible_loss is zero
+interface_nonreturn_avg_bytes,8.0,10.0,2.0,60452,3827,56625,56625,0,0,0,0,0,17666,38959,not primarily in-flight/drain in current attribution; tail_in_flight_possible_loss is zero
+interface_nonreturn_min_bytes,8.0,10.0,2.0,60452,3762,56690,56690,0,0,0,0,0,17729,38961,not primarily in-flight/drain in current attribution; tail_in_flight_possible_loss is zero
