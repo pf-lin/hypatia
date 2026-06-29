@@ -1,0 +1,14 @@
+metric,old_run_value,new_run_value,delta,tolerance,match_within_tolerance,notes
+aggregate_pdr,0.8868255192526231,0.8868255192526231,0.0,1e-12,true,LHTR packet-delivery summary
+focus_flow_pdr,0.9293195748312515,0.9293195748312515,0.0,1e-12,true,LHTR packet-delivery summary
+total_lost_packets,49596,49596,0.0,1e-12,true,LHTR packet-delivery summary
+min_flow_pdr,0.8123981689813019,0.8123981689813019,0.0,1e-12,true,LHTR packet-delivery summary
+p5_flow_pdr,0.8395104352548685,0.8395104352548685,0.0,1e-12,true,LHTR packet-delivery summary
+jain_fairness,0.9982266010784042,0.9982266010784042,0.0,1e-12,true,LHTR packet-delivery summary
+mean_queue_aware_rtt_ms,234.30902498052654,234.30902498052654,0.0,1e-12,true,LHTR RTT summary direction 754_to_785
+p95_queue_aware_rtt_ms,310.345026489878,310.34502648987797,-5.684341886080802e-14,1e-12,true,LHTR RTT summary direction 754_to_785
+mean_propagation_only_rtt_ms,169.68104838844403,169.68104838844403,0.0,1e-12,true,LHTR RTT summary direction 754_to_785
+synthetic_lost_packets,49596,49596,0.0,0,true,loss attribution summary
+udp_burst_schedule_sha256,4168f5afb2e5ad38a11e88b58db4747a3bd4d095c00e4d3bbb81c206d6b365c7,4168f5afb2e5ad38a11e88b58db4747a3bd4d095c00e4d3bbb81c206d6b365c7,,0,true,exact schedule hash
+flow_selection_hash,a9ec9e0a00088d96,a9ec9e0a00088d96,,0,true,run metadata
+selection_input_hash,dafd5d4e2bbf9755,dafd5d4e2bbf9755,,0,true,run metadata

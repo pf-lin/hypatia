@@ -36,6 +36,8 @@ ALGORITHMS = [
     "algorithm_lohi",
     "algorithm_lhtr",
 ]
+DEFAULT_ALGORITHMS = list(ALGORITHMS)
+BACKPRESSURE_ALGORITHM = "algorithm_backpressure_over_isls"
 BACKPRESSURE_QUEUE_SOURCE = default_backpressure_queue_source
 BACKPRESSURE_FALLBACK = default_backpressure_fallback
 BACKPRESSURE_LOOP_GUARD = default_backpressure_loop_guard
@@ -285,6 +287,14 @@ def parse_args():
         action="store_true",
         help="Read existing outputs and rebuild the manifest/summary/status only.",
     )
+    parser.add_argument(
+        "--update-shared-formal-summary",
+        action="store_true",
+        help=(
+            "Allow subset or experimental algorithm runs to update the shared "
+            "hotspot_5level_*_formal manifest/summary/status."
+        ),
+    )
     args = parser.parse_args()
     if args.traffic_stop_time_s is None:
         args.traffic_stop_time_s = (
@@ -363,6 +373,77 @@ def output_paths(simulation_end_time_s, traffic_stop_time_s):
             prefix + "_formal_status.md",
         ),
     }
+
+
+def scope_tag(value):
+    return (
+        str(value)
+        .lower()
+        .replace("+", "plus")
+        .replace(",", "_")
+        .replace(" ", "_")
+        .replace("-", "_")
+    )
+
+
+def algorithm_scope_tag(algorithms):
+    if BACKPRESSURE_ALGORITHM in algorithms:
+        return scope_tag(
+            "bp_q%s_fb%s_lg%s"
+            % (
+                BACKPRESSURE_QUEUE_SOURCE,
+                BACKPRESSURE_FALLBACK,
+                BACKPRESSURE_LOOP_GUARD,
+            )
+        )
+    if list(algorithms) == DEFAULT_ALGORITHMS:
+        return "default_algorithms"
+    return "custom_algorithms"
+
+
+def scoped_output_paths(
+    scenarios,
+    algorithms,
+    simulation_end_time_s,
+    traffic_stop_time_s,
+):
+    label = duration_label(simulation_end_time_s, traffic_stop_time_s)
+    prefix = "hotspot_5level_%s_%s_%s" % (
+        label,
+        scope_tag(scenario_set_text(scenarios)),
+        algorithm_scope_tag(algorithms),
+    )
+    report_dir = os.path.join(
+        SCRIPT_DIR,
+        "analysis_reports",
+        prefix + "_formal",
+    )
+    return {
+        "duration_label": label,
+        "report_dir": report_dir,
+        "manifest_path": os.path.join(
+            report_dir,
+            prefix + "_formal_manifest.csv",
+        ),
+        "summary_path": os.path.join(
+            report_dir,
+            prefix + "_formal_summary.csv",
+        ),
+        "status_path": os.path.join(
+            report_dir,
+            prefix + "_formal_status.md",
+        ),
+    }
+
+
+def should_update_shared_formal_outputs(args, scenarios):
+    if args.update_shared_formal_summary:
+        return True
+    selected_ids = [scenario["scenario_id"] for scenario in scenarios]
+    default_ids = [scenario["scenario_id"] for scenario in SCENARIOS]
+    if selected_ids != default_ids:
+        return False
+    return list(args.algorithms) == DEFAULT_ALGORITHMS
 
 
 def default_rtt_sample_interval_s(simulation_end_time_s):
@@ -495,7 +576,7 @@ def run_name_for_scenario(
     runs = get_udp_pdr_run_list(
         selected_mode="core_isl_hotspot_specific",
         load_levels=[scenario["load_level"]],
-        algorithms=[ALGORITHMS[0]],
+        algorithms=ALGORITHMS,
         simulation_end_time_s_override=simulation_end_time_s,
         traffic_stop_time_s_override=traffic_stop_time_s,
         background_flow_count_override=[scenario["background_flow_count"]],
@@ -1207,6 +1288,34 @@ def main():
     except ValueError as exc:
         print("Error: %s" % exc, file=sys.stderr)
         return 2
+
+    update_shared_formal_outputs = should_update_shared_formal_outputs(
+        args,
+        scenarios,
+    )
+    if not update_shared_formal_outputs:
+        if args.aggregate_only:
+            print(
+                "Refusing to update the shared hotspot formal summary for a "
+                "subset or experimental algorithm scope. Use "
+                "--update-shared-formal-summary to override.",
+                file=sys.stderr,
+            )
+            return 2
+        paths = scoped_output_paths(
+            scenarios,
+            args.algorithms,
+            simulation_end_time_s,
+            traffic_stop_time_s,
+        )
+        print(
+            "Using isolated formal output directory for subset/experimental "
+            "scope: %s" % paths["report_dir"]
+        )
+        print(
+            "Add --update-shared-formal-summary only when this run should "
+            "replace the shared five-level formal manifest/summary/status."
+        )
 
     if args.aggregate_only:
         existing_rows = read_csv(paths["manifest_path"])
