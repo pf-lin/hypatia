@@ -1,0 +1,83 @@
+digraph lhtr_br_sbr_overall_flow {
+  graph [
+    rankdir=TB,
+    bgcolor="white",
+    pad="0.20",
+    nodesep="0.32",
+    ranksep="0.42",
+    splines=polyline,
+    fontname="Noto Sans CJK TC",
+    fontsize=14,
+    labelloc="t",
+    label="algorithm_lhtr.py 中 BR/SBR 的整體呼叫流程"
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    fillcolor="#F7FAFC",
+    color="#4A5568",
+    penwidth=1.1,
+    fontname="Noto Sans CJK TC",
+    fontsize=10,
+    margin="0.11,0.07"
+  ];
+  edge [
+    color="#4A5568",
+    penwidth=1.0,
+    arrowsize=0.7,
+    fontname="Noto Sans CJK TC",
+    fontsize=9
+  ];
+
+  start [shape=oval, label="每次 routing snapshot", fillcolor="#E6FFFA", color="#2C7A7B"];
+  queue [label="讀取 directional queue statistics\n計算 link QOR 與 next-hop TQOR\nfinal color = link color 與 next-hop node color 的較嚴重者", fillcolor="#EBF8FF", color="#2B6CB0"];
+  weights [label="套用 queue-aware ISL weights\n更新 PID/group graph 與 group-level SPF", fillcolor="#EBF8FF", color="#2B6CB0"];
+  entry [label="逐一建立 SAT→destination forwarding entry"];
+  direct [shape=diamond, label="目前衛星就是\ndestination attachment satellite？", fillcolor="#FFFAF0", color="#B7791F"];
+  gsl [label="直接安裝 GSL forwarding\n此項目不產生 BR/SBR", fillcolor="#EDF2F7", color="#718096"];
+  same [shape=diamond, label="src PID = dst PID？", fillcolor="#FFFAF0", color="#B7791F"];
+
+  same_target [label="決定群內 target（dst_sat；可選 mgmt_sat）\n由 queue-aware shortest-path tree 取得 preferred baseline", fillcolor="#EBF8FF", color="#2B6CB0"];
+  same_candidates [label="建立群內 first-hop candidates\n同 connected component；優先 potential descent\npath_cost = first-edge weight + neighbor→target cost\ncolor = src→neighbor 的 final color"];
+  next_selector [label="執行 next-hop BR/SBR selector\n（詳細規則見局部選擇器流程圖）", fillcolor="#FAF5FF", color="#805AD5", penwidth=1.4];
+
+  next_pid [label="group-level SPF 決定 next_pid\nBR/SBR 不會改變這個 PID 層決策", fillcolor="#EBF8FF", color="#2B6CB0"];
+  border_candidates [label="建立 src_pid→next_pid border-pair candidates\n過濾兩側不可達的 border pair\n以 queue-aware / destination-aware cost 排名\ncolor 僅對應 border ISL"];
+  border_selector [label="執行 border-pair BR/SBR selector\n（詳細規則見局部選擇器流程圖）", fillcolor="#FAF5FF", color="#805AD5", penwidth=1.4];
+  border_found [shape=diamond, label="有 selected border pair？", fillcolor="#FFFAF0", color="#B7791F"];
+  at_border [shape=diamond, label="目前衛星 = selected u_border？", fillcolor="#FFFAF0", color="#B7791F"];
+  border_link [label="安裝 selected u_border→v_border ISL\n若 link 失效，再嘗試 backup border／mgmt／SPF／holdover"];
+  toward [label="將 selected u_border 當作群內 target\n建立群內 first-hop candidates"];
+  second_selector [label="再次執行 next-hop BR/SBR selector", fillcolor="#FAF5FF", color="#805AD5", penwidth=1.4];
+
+  selected [shape=diamond, label="selector 產生 selected next hop\n且實體 ISL 存在？", fillcolor="#FFFAF0", color="#B7791F"];
+  install [label="寫入 fstate forwarding entry", fillcolor="#E6FFFA", color="#2C7A7B"];
+  fallback [label="依情境 fallback：baseline、backup border、global SPF\n若仍失敗，最後填入 explicit drop", fillcolor="#EDF2F7", color="#718096"];
+  more [shape=diamond, label="還有 forwarding entry？", fillcolor="#FFFAF0", color="#B7791F"];
+  clean [label="整張 fstate 完成後清理 2-cycles（A↔B）\n最多 3 輪；改走 potential-descent neighbor 或刪除項目\n注意：這不是 BR/SBR admissibility test", fillcolor="#FFF5F5", color="#C53030"];
+  finish [shape=oval, label="輸出 forwarding state 與 BR/SBR diagnostics", fillcolor="#E6FFFA", color="#2C7A7B"];
+
+  start -> queue -> weights -> entry -> direct;
+  direct -> gsl [label="是"];
+  direct -> same [label="否"];
+  same -> same_target [label="是"];
+  same_target -> same_candidates -> next_selector -> selected;
+
+  same -> next_pid [label="否"];
+  next_pid -> border_candidates -> border_selector -> border_found;
+  border_found -> fallback [label="否"];
+  border_found -> at_border [label="是"];
+  at_border -> border_link [label="是"];
+  border_link -> install;
+  at_border -> toward [label="否"];
+  toward -> second_selector -> selected;
+
+  selected -> install [label="是"];
+  selected -> fallback [label="否"];
+  gsl -> more;
+  install -> more;
+  fallback -> more;
+  more -> entry [label="是"];
+  more -> clean [label="否"];
+  clean -> finish;
+}

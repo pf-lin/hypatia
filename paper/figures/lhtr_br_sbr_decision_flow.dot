@@ -1,0 +1,75 @@
+digraph lhtr_br_sbr_decision_flow {
+  graph [
+    rankdir=TB,
+    bgcolor="white",
+    pad="0.20",
+    nodesep="0.34",
+    ranksep="0.40",
+    splines=polyline,
+    fontname="Noto Sans CJK TC",
+    fontsize=14,
+    labelloc="t",
+    label="LHTR 的 BR/SBR 局部選擇器"
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    fillcolor="#F7FAFC",
+    color="#4A5568",
+    penwidth=1.1,
+    fontname="Noto Sans CJK TC",
+    fontsize=10,
+    margin="0.11,0.07"
+  ];
+  edge [
+    color="#4A5568",
+    penwidth=1.0,
+    arrowsize=0.7,
+    fontname="Noto Sans CJK TC",
+    fontsize=9
+  ];
+
+  start [shape=oval, label="輸入 next-hop 或 border-pair 候選集合\n以及 preferred baseline", fillcolor="#E6FFFA", color="#2C7A7B"];
+  normalize [label="next-hop：依 next_hop 去重並按 path_cost 排序\nborder-pair：使用已排名候選（或按 path_cost 排序）", fillcolor="#EBF8FF", color="#2B6CB0"];
+  has_candidate [shape=diamond, label="有候選？", fillcolor="#FFFAF0", color="#B7791F"];
+  no_br [label="回傳 selected = BR = SBR = None\n由呼叫端執行 fallback", fillcolor="#FED7D7", color="#C53030"];
+  br [label="BR = preferred baseline（若存在）\n否則為排名第一的最低 path_cost 候選", fillcolor="#C6F6D5", color="#2F855A", penwidth=1.4];
+  admissible [label="建立 admissible SBR pool\n候選 identity ≠ BR\n且 path_cost ≤ BR.path_cost × max(1, ALT_PATH_FACTOR)\n預設 ALT_PATH_FACTOR = 1.5", fillcolor="#FEEBC8", color="#C05621"];
+  has_sbr [shape=diamond, label="SBR pool 非空？", fillcolor="#FFFAF0", color="#B7791F"];
+  sbr [label="選出 SBR（不是單純的 cost 次佳路徑）\n依序最小化 color rank、mode cost、path_cost、QOR、ID", fillcolor="#FEEBC8", color="#C05621", penwidth=1.4];
+  enabled [shape=diamond, label="Traffic-Light enabled？", fillcolor="#FFFAF0", color="#B7791F"];
+  br_green [shape=diamond, label="BR = GREEN？", fillcolor="#FFFAF0", color="#B7791F"];
+  br_yellow [shape=diamond, label="BR = YELLOW？", fillcolor="#FFFAF0", color="#B7791F"];
+  sbr_gy_y [shape=diamond, label="SBR = GREEN\n或 YELLOW？", fillcolor="#FFFAF0", color="#B7791F"];
+  sbr_gy_r [shape=diamond, label="SBR = GREEN\n或 YELLOW？", fillcolor="#FFFAF0", color="#B7791F"];
+  lower_qor [shape=diamond, label="BR、SBR 皆 RED\nSBR directional QOR < BR？", fillcolor="#FFFAF0", color="#B7791F"];
+  lower_cost [shape=diamond, label="SBR mode cost < BR？\ncategorical：path_cost\nlegacy_fused：decision_score", fillcolor="#FFFAF0", color="#B7791F"];
+  choose_br [label="選擇 BR", fillcolor="#C6F6D5", color="#2F855A", penwidth=1.5];
+  choose_sbr [label="選擇 SBR", fillcolor="#FEEBC8", color="#C05621", penwidth=1.5];
+  output [shape=oval, label="回傳 selected、BR、SBR", fillcolor="#E6FFFA", color="#2C7A7B"];
+
+  start -> normalize -> has_candidate;
+  has_candidate -> no_br [label="否"];
+  has_candidate -> br [label="是"];
+  br -> admissible -> has_sbr;
+  has_sbr -> choose_br [label="否"];
+  has_sbr -> sbr [label="是"];
+  sbr -> enabled;
+  enabled -> choose_br [label="否"];
+  enabled -> br_green [label="是"];
+  br_green -> choose_br [label="是"];
+  br_green -> br_yellow [label="否"];
+  br_yellow -> sbr_gy_y [label="是"];
+  sbr_gy_y -> choose_sbr [label="是"];
+  sbr_gy_y -> choose_br [label="否：SBR=RED"];
+  br_yellow -> sbr_gy_r [label="否：BR=RED"];
+  sbr_gy_r -> choose_sbr [label="是"];
+  sbr_gy_r -> lower_qor [label="否：SBR=RED"];
+  lower_qor -> choose_sbr [label="是"];
+  lower_qor -> lower_cost [label="否"];
+  lower_cost -> choose_sbr [label="是"];
+  lower_cost -> choose_br [label="否"];
+  choose_br -> output;
+  choose_sbr -> output;
+  no_br -> output;
+}
