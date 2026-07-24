@@ -200,6 +200,10 @@ LEGACY_FILES = {
 
 
 _DUPLICATE_PLOT_RE = re.compile(r"_bg_flow_count_\d+\.png$")
+ROUTE_VISUALIZATION_DIRECTORIES = {
+    "graphical_routes": "Original longitude/latitude focus-flow route visualization.",
+    "graphical_routes_world_map": "World-map focus-flow route visualization.",
+}
 
 
 def ensure_standard_layout(comparison_dir):
@@ -362,7 +366,10 @@ def write_result_guide(comparison_dir):
             "`diagnostics/udp_focus_rtt_timeseries.csv` and "
             "`diagnostics/udp_focus_path_timeseries.csv`. Queue-aware RTT is a "
             "path-replay and queue-occupancy estimate, not packet-level measured RTT. "
-            "Optional route PNGs are written under `graphical_routes/`.\n"
+            "With route visualization enabled, original longitude/latitude PNGs "
+            "are written under `graphical_routes/` and matching world-map PNGs "
+            "under `graphical_routes_world_map/`. Both variants use the same "
+            "selected route times.\n"
         )
     return path
 
@@ -458,16 +465,18 @@ def _manifest_rows(comparison_dir):
                 "recommended_for_paper": "no",
                 "notes": "Preserved during flat-layout migration; no longer generated.",
             })
-    graphical_routes_dir = os.path.join(comparison_dir, "graphical_routes")
-    if os.path.isdir(graphical_routes_dir):
+    for dirname, description in ROUTE_VISUALIZATION_DIRECTORIES.items():
+        graphical_routes_dir = os.path.join(comparison_dir, dirname)
+        if not os.path.isdir(graphical_routes_dir):
+            continue
         for filename in sorted(os.listdir(graphical_routes_dir)):
             if not filename.endswith(".png"):
                 continue
             rows.append({
-                "relative_path": os.path.join("graphical_routes", filename),
+                "relative_path": os.path.join(dirname, filename),
                 "category": "route_visualization",
                 "status": "optional",
-                "description": "Focus-flow route visualization at a selected time.",
+                "description": description,
                 "source_inputs": "Dynamic fstate; satellite and ground-station positions",
                 "recommended_for_paper": "no",
                 "notes": "Generated only with --enable-route-visualization.",

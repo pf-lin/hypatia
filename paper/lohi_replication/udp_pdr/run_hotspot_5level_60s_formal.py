@@ -1,6 +1,5 @@
 import argparse
 import csv
-import glob
 import json
 import math
 import os
@@ -43,6 +42,15 @@ BACKPRESSURE_FALLBACK = default_backpressure_fallback
 BACKPRESSURE_LOOP_GUARD = default_backpressure_loop_guard
 BACKPRESSURE_DIAGNOSTICS = default_backpressure_diagnostics
 BACKPRESSURE_DIAGNOSTICS_SAMPLE_LIMIT = default_backpressure_diagnostics_sample_limit
+ROUTE_PLOT_DIRECTORIES = (
+    "graphical_routes",
+    "graphical_routes_world_map",
+)
+ROUTE_PLOT_VIEWS = (
+    "forward_path",
+    "reverse_path",
+    "round_trip_path",
+)
 
 SCENARIOS = [
     {
@@ -489,6 +497,19 @@ def route_plot_times_text(times):
     return ",".join(format_seconds(value) for value in times)
 
 
+def expected_route_plot_filenames(algorithm, times):
+    return {
+        "%s_focus_%s_t%ss.png"
+        % (
+            algorithm,
+            view,
+            ("%g" % time_s).replace(".", "p"),
+        )
+        for time_s in times
+        for view in ROUTE_PLOT_VIEWS
+    }
+
+
 def scenario_set_text(scenarios):
     selected_ids = {scenario["scenario_id"] for scenario in scenarios}
     return ",".join(
@@ -630,6 +651,8 @@ def planned_commands(
             "--enable-route-visualization",
             "--route-plot-times",
             route_plot_times_text(route_plot_times),
+            "--route-plot-variants",
+            "both",
         ]
     )
     return step1, step2, step3
@@ -728,6 +751,7 @@ def formal_metadata(
         "rtt_sample_interval_s": rtt_sample_interval_s,
         "route_plot_count": len(route_plot_times),
         "route_plot_times_s": route_plot_times,
+        "route_plot_variants": ["original", "world_map"],
         "lohi_management_mode": "control_plane_only",
         "lhtr_diagnostics_enabled": True,
         "rtt_analysis_enabled": True,
@@ -954,20 +978,42 @@ def build_summary(
                 ),
                 {},
             )
-            route_plots = glob.glob(
-                os.path.join(
-                    comparison,
-                    "graphical_routes",
-                    algorithm + "_focus_*.png",
-                )
+            expected_route_plots = expected_route_plot_filenames(
+                algorithm,
+                route_plot_times,
             )
+            missing_route_plots = {}
+            for dirname in ROUTE_PLOT_DIRECTORIES:
+                route_dir = os.path.join(comparison, dirname)
+                existing_route_plots = (
+                    set(os.listdir(route_dir))
+                    if os.path.isdir(route_dir)
+                    else set()
+                )
+                missing_route_plots[dirname] = (
+                    expected_route_plots - existing_route_plots
+                )
             if not summary:
                 notes.append("missing packet-delivery summary")
             if not rtt:
                 notes.append("missing RTT summary")
-            expected_route_plots = len(route_plot_times) * 3
-            if len(route_plots) < expected_route_plots:
-                notes.append("missing route plots")
+            if missing_route_plots["graphical_routes"]:
+                notes.append(
+                    "missing original route plots (%d)"
+                    % len(missing_route_plots["graphical_routes"])
+                )
+            if missing_route_plots["graphical_routes_world_map"]:
+                notes.append(
+                    "missing world-map route plots (%d)"
+                    % len(
+                        missing_route_plots[
+                            "graphical_routes_world_map"
+                        ]
+                    )
+                )
+            route_plots_complete = not any(
+                missing_route_plots.values()
+            )
             if algorithm == "algorithm_lhtr":
                 source_dir = os.path.join(algorithm_dir, "lhtr_diagnostics")
                 missing = [
@@ -1078,7 +1124,7 @@ def build_summary(
                         else ""
                     ),
                     "route_plots_exist": bool_text(
-                        len(route_plots) >= expected_route_plots
+                        route_plots_complete
                     ),
                     "notes": "; ".join(notes),
                 }
@@ -1109,7 +1155,8 @@ def write_status(
             "Fixed configuration: `src754 <-> dst785`, ISL 10 Mbps, "
             "GSL 100 Mbps, simulation %s s, traffic stop %s s, "
             "LoHi `control_plane_only`, LHTR diagnostics enabled, "
-            "RTT interval %s s, route times `%s`.\n\n"
+            "RTT interval %s s, route times `%s`, route variants "
+            "`original,world_map`.\n\n"
             % (
                 format_seconds(simulation_end_time_s),
                 format_seconds(traffic_stop_time_s),

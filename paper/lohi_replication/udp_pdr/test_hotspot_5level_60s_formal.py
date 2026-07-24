@@ -11,6 +11,7 @@ from run_hotspot_5level_60s_formal import (
     default_route_plot_times,
     default_rtt_sample_interval_s,
     duration_label,
+    expected_route_plot_filenames,
     formal_metadata,
     output_paths,
     planned_commands,
@@ -48,10 +49,16 @@ class HotspotFiveLevelFormalRunnerTest(unittest.TestCase):
         self.assertIn("control_plane_only", common)
         self.assertIn("--isl-data-rate-megabit-per-s", common)
         self.assertIn("--gsl-data-rate-megabit-per-s", common)
-        self.assertEqual(common[-4:], ALGORITHMS)
+        algorithm_start = common.index("--algorithms") + 1
+        self.assertEqual(
+            common[algorithm_start:algorithm_start + len(ALGORITHMS)],
+            ALGORITHMS,
+        )
         self.assertIn("--enable-rtt-analysis", step3)
         self.assertIn("--enable-route-visualization", step3)
         self.assertIn("0,30,58", step3)
+        self.assertIn("--route-plot-variants", step3)
+        self.assertIn("both", step3)
         self.assertNotIn("--force", step2)
 
     def test_run_identity_and_metadata_are_formal_specific(self):
@@ -68,6 +75,10 @@ class HotspotFiveLevelFormalRunnerTest(unittest.TestCase):
         self.assertTrue(metadata["lhtr_diagnostics_enabled"])
         self.assertTrue(metadata["rtt_analysis_enabled"])
         self.assertTrue(metadata["route_visualization_enabled"])
+        self.assertEqual(
+            metadata["route_plot_variants"],
+            ["original", "world_map"],
+        )
 
     def test_200s_defaults_use_two_second_drain_and_bounded_visualization(self):
         scenario = SCENARIOS[2]
@@ -85,6 +96,20 @@ class HotspotFiveLevelFormalRunnerTest(unittest.TestCase):
         self.assertEqual(
             default_route_plot_times(198),
             [0.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0, 198.0],
+        )
+        self.assertEqual(
+            expected_route_plot_filenames(
+                "algorithm_lhtr",
+                [0.0, 30.5],
+            ),
+            {
+                "algorithm_lhtr_focus_forward_path_t0s.png",
+                "algorithm_lhtr_focus_reverse_path_t0s.png",
+                "algorithm_lhtr_focus_round_trip_path_t0s.png",
+                "algorithm_lhtr_focus_forward_path_t30p5s.png",
+                "algorithm_lhtr_focus_reverse_path_t30p5s.png",
+                "algorithm_lhtr_focus_round_trip_path_t30p5s.png",
+            },
         )
 
     def test_duration_aware_output_paths_share_normal_200s_scenarios(self):

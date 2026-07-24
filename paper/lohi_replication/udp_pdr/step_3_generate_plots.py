@@ -40,14 +40,23 @@ def main():
                 + common_args
             )
         except subprocess.CalledProcessError as exc:
+            severity = (
+                "Error"
+                if args.enable_route_visualization
+                else "Warning"
+            )
             print(
-                "Warning: RTT analysis failed with exit code %d; existing "
-                "packet-delivery outputs remain available." % exc.returncode,
+                "%s: RTT analysis failed with exit code %d; existing "
+                "packet-delivery outputs remain available."
+                % (severity, exc.returncode),
                 file=sys.stderr,
             )
+            if args.enable_route_visualization:
+                return exc.returncode
 
     print("\nStep 3 complete.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

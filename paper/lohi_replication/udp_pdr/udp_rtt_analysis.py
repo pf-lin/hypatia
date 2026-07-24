@@ -4,6 +4,7 @@ import json
 import math
 import os
 import sys
+import tempfile
 from dataclasses import dataclass
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/hypatia-mpl-cache")
@@ -18,6 +19,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from astropy import units as u
+from matplotlib.lines import Line2D
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "../../.."))
@@ -54,6 +56,11 @@ from satgen.tles import read_tles
 SPEED_OF_LIGHT_M_PER_S = 299792458.0
 DEFAULT_PACKET_SIZE_BYTES = 1500
 LEGACY_FOCUS_PAIR = (738, 793)
+ROUTE_PLOT_VARIANTS = ("original", "world_map")
+ROUTE_PLOT_DIRECTORIES = {
+    "original": "graphical_routes",
+    "world_map": "graphical_routes_world_map",
+}
 
 RTT_TIMESERIES_COLUMNS = [
     "algorithm",
@@ -974,16 +981,24 @@ def plot_connection(ax, from_lon, from_lat, to_lon, to_lat, **kwargs):
         from_lon += 360
     else:
         to_lon += 360
-    longitudes = np.linspace(from_lon, to_lon, 50)
-    latitudes = np.linspace(from_lat, to_lat, 50)
-    normalized = ((longitudes + 180) % 360) - 180
-    split_at = np.where(np.abs(np.diff(normalized)) > 180)[0] + 1
-    for lon_part, lat_part in zip(
-        np.split(normalized, split_at),
-        np.split(latitudes, split_at),
-    ):
-        if len(lon_part) >= 2:
-            ax.plot(lon_part, lat_part, **kwargs)
+    fraction = (180.0 - from_lon) / (to_lon - from_lon)
+    seam_lat = from_lat + fraction * (to_lat - from_lat)
+    normalized_from_lon = from_lon - 360 if from_lon > 180 else from_lon
+    normalized_to_lon = to_lon - 360 if to_lon > 180 else to_lon
+    from_seam_lon = -180 if from_lon > 180 else 180
+    to_seam_lon = -180 if to_lon > 180 else 180
+    ax.plot(
+        [normalized_from_lon, from_seam_lon],
+        [from_lat, seam_lat],
+        **kwargs,
+    )
+    continuation_kwargs = dict(kwargs)
+    continuation_kwargs.pop("label", None)
+    ax.plot(
+        [to_seam_lon, normalized_to_lon],
+        [seam_lat, to_lat],
+        **continuation_kwargs,
+    )
 
 
 def draw_path(ax, network, path, time_ns, color, label, linestyle="-"):
@@ -1019,13 +1034,293 @@ def draw_path(ax, network, path, time_ns, color, label, linestyle="-"):
         ax.text(lon + 1.2, lat + 0.6, str(node), fontsize=6, color=color)
 
 
+def resolve_route_plot_variants(value):
+    if value == "both":
+        return ROUTE_PLOT_VARIANTS
+    if value not in ROUTE_PLOT_VARIANTS:
+        raise ValueError("Unsupported route plot variant: %s" % value)
+    return (value,)
+
+
+def route_plot_directories(comparison_dir, variants):
+    return {
+        variant: os.path.join(
+            comparison_dir,
+            ROUTE_PLOT_DIRECTORIES[variant],
+        )
+        for variant in variants
+    }
+
+
+def ensure_route_plot_directories(route_directories):
+    for directory in route_directories.values():
+        os.makedirs(directory, exist_ok=True)
+
+
+def node_positions_at_time(network, time_ns, position_cache):
+    if time_ns not in position_cache:
+        position_cache[time_ns] = tuple(
+            node_lat_lon(network, node_id, time_ns)
+            for node_id in range(network.num_nodes)
+        )
+    return position_cache[time_ns]
+
+
+def _load_cartopy():
+    try:
+        import cartopy.crs as ccrs
+        import cartopy.feature as cfeature
+    except ImportError as exc:
+        raise RuntimeError(
+            "World-map route plots require Cartopy. Install the project "
+            "plotting dependencies or use --route-plot-variants original."
+        ) from exc
+    return ccrs, cfeature
+
+
+def _create_world_map_axes():
+    ccrs, cfeature = _load_cartopy()
+    coordinate_system = ccrs.PlateCarree()
+    fig = plt.figure(figsize=(11, 5.5))
+    ax = fig.add_subplot(1, 1, 1, projection=coordinate_system)
+    ax.set_global()
+    ax.add_feature(cfeature.OCEAN, zorder=0)
+    ax.add_feature(
+        cfeature.LAND,
+        zorder=0,
+        edgecolor="black",
+        linewidth=0.2,
+    )
+    ax.add_feature(
+        cfeature.BORDERS,
+        zorder=1,
+        edgecolor="gray",
+        linewidth=0.25,
+    )
+    gridlines = ax.gridlines(
+        crs=coordinate_system,
+        draw_labels=True,
+        linewidth=0.35,
+        color="gray",
+        alpha=0.45,
+        linestyle=":",
+    )
+    gridlines.top_labels = False
+    gridlines.right_labels = False
+    gridlines.xlabel_style = {"size": 7}
+    gridlines.ylabel_style = {"size": 7}
+    return fig, ax, coordinate_system
+
+
+def draw_world_map_nodes(ax, network, positions, coordinate_system):
+    satellite_positions = positions[:network.num_satellites]
+    ground_station_positions = positions[network.num_satellites:]
+    ax.scatter(
+        [lon for _, lon in satellite_positions],
+        [lat for lat, _ in satellite_positions],
+        marker="^",
+        s=7,
+        facecolors="none",
+        edgecolors="#e53935",
+        linewidths=0.3,
+        alpha=0.8,
+        transform=coordinate_system,
+        zorder=2,
+    )
+    ax.scatter(
+        [lon for _, lon in ground_station_positions],
+        [lat for lat, _ in ground_station_positions],
+        marker="o",
+        s=13,
+        facecolors="none",
+        edgecolors="black",
+        linewidths=0.45,
+        alpha=0.85,
+        transform=coordinate_system,
+        zorder=2,
+    )
+
+
+def draw_world_map_path_links(
+    ax,
+    path,
+    positions,
+    color,
+    label,
+    linestyle,
+    coordinate_system,
+):
+    for index in range(1, len(path)):
+        from_lat, from_lon = positions[path[index - 1]]
+        to_lat, to_lon = positions[path[index]]
+        plot_connection(
+            ax,
+            from_lon,
+            from_lat,
+            to_lon,
+            to_lat,
+            color=color,
+            linewidth=1.8,
+            linestyle=linestyle,
+            label=label if index == 1 else None,
+            transform=coordinate_system,
+            zorder=3,
+        )
+
+
+def _ground_station_label(network, node_id):
+    ground_station = network.ground_stations[
+        node_id - network.num_satellites
+    ]
+    name = str(ground_station.get("name", "")).strip()
+    return "%d: %s" % (node_id, name) if name else str(node_id)
+
+
+def draw_world_map_used_nodes(
+    ax,
+    network,
+    paths_to_draw,
+    positions,
+    coordinate_system,
+):
+    used_nodes = list(
+        dict.fromkeys(
+            node
+            for path, _, _, _ in paths_to_draw
+            for node in path
+        )
+    )
+    for node in used_nodes:
+        lat, lon = positions[node]
+        is_satellite = node < network.num_satellites
+        ax.scatter(
+            [lon],
+            [lat],
+            marker="^" if is_satellite else "o",
+            s=34 if is_satellite else 48,
+            color="#a61111" if is_satellite else "#3b3b3b",
+            edgecolors="white",
+            linewidths=0.45,
+            transform=coordinate_system,
+            zorder=4,
+        )
+        ax.annotate(
+            str(node) if is_satellite else _ground_station_label(network, node),
+            xy=(lon, lat),
+            xytext=(-4 if lon > 150 else 4, -3 if lat > 75 else 3),
+            textcoords="offset points",
+            fontsize=6,
+            fontweight="bold",
+            color="#202020",
+            horizontalalignment="right" if lon > 150 else "left",
+            verticalalignment="top" if lat > 75 else "bottom",
+            transform=coordinate_system,
+            zorder=5,
+        )
+
+
+def add_world_map_legend(ax):
+    path_handles, path_labels = ax.get_legend_handles_labels()
+    unique_path_handles = {}
+    for handle, label in zip(path_handles, path_labels):
+        unique_path_handles.setdefault(label, handle)
+    handles = list(unique_path_handles.values())
+    handles.extend(
+        [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                label="Ground station (used)",
+                linewidth=0,
+                color="#3b3b3b",
+                markersize=5,
+            ),
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                label="Ground station (unused)",
+                linewidth=0,
+                color="black",
+                markersize=5,
+                fillstyle="none",
+                markeredgewidth=0.5,
+            ),
+            Line2D(
+                [0],
+                [0],
+                marker="^",
+                label="Satellite (used)",
+                linewidth=0,
+                color="#a61111",
+                markersize=5,
+            ),
+            Line2D(
+                [0],
+                [0],
+                marker="^",
+                label="Satellite (unused)",
+                linewidth=0,
+                color="#e53935",
+                markersize=5,
+                fillstyle="none",
+                markeredgewidth=0.5,
+            ),
+        ]
+    )
+    ax.legend(handles=handles, loc="lower left", fontsize=7)
+
+
+def _route_plot_title(algorithm, view_name, time_ns, rtt_row):
+    return (
+        "%s focus %s at t=%.3gs\n"
+        "propagation-only RTT=%.3f ms, queue-aware estimate=%.3f ms, "
+        "hops=%d/%d"
+        % (
+            _algorithm_label(algorithm),
+            view_name.replace("_", " "),
+            time_ns / 1e9,
+            rtt_row["propagation_only_rtt_ms"],
+            rtt_row["queue_aware_rtt_ms"],
+            rtt_row["forward_hop_count"],
+            rtt_row["reverse_hop_count"],
+        )
+    )
+
+
+def _save_route_figure(fig, output_file):
+    output_dir = os.path.dirname(output_file)
+    os.makedirs(output_dir, exist_ok=True)
+    file_descriptor, temporary_file = tempfile.mkstemp(
+        prefix=".%s." % os.path.basename(output_file),
+        suffix=".tmp.png",
+        dir=output_dir,
+    )
+    os.close(file_descriptor)
+    try:
+        _save_figure(fig, temporary_file)
+        os.replace(temporary_file, output_file)
+    except BaseException:
+        plt.close(fig)
+        if os.path.exists(temporary_file):
+            os.remove(temporary_file)
+        raise
+
+
 def generate_route_plots(
     graphical_routes_dir,
     algorithm,
     route_records,
     route_times_ns,
     network,
+    variant="original",
+    position_cache=None,
 ):
+    if variant not in ROUTE_PLOT_VARIANTS:
+        raise ValueError("Unsupported route plot variant: %s" % variant)
+    if position_cache is None:
+        position_cache = {}
     os.makedirs(graphical_routes_dir, exist_ok=True)
     written = []
     for time_ns in route_times_ns:
@@ -1078,37 +1373,63 @@ def generate_route_plots(
             ),
         ]
         for view_name, paths_to_draw in views:
-            fig, ax = plt.subplots(figsize=(11, 5.5))
-            ax.set_xlim(-180, 180)
-            ax.set_ylim(-90, 90)
-            ax.set_xlabel("Longitude (degrees)")
-            ax.set_ylabel("Latitude (degrees)")
-            ax.set_xticks(np.arange(-180, 181, 60))
-            ax.set_yticks(np.arange(-90, 91, 30))
-            ax.grid(True, alpha=0.25)
-            for path, color, label, linestyle in paths_to_draw:
-                draw_path(
+            if variant == "original":
+                fig, ax = plt.subplots(figsize=(11, 5.5))
+                ax.set_xlim(-180, 180)
+                ax.set_ylim(-90, 90)
+                ax.set_xlabel("Longitude (degrees)")
+                ax.set_ylabel("Latitude (degrees)")
+                ax.set_xticks(np.arange(-180, 181, 60))
+                ax.set_yticks(np.arange(-90, 91, 30))
+                ax.grid(True, alpha=0.25)
+                for path, color, label, linestyle in paths_to_draw:
+                    draw_path(
+                        ax,
+                        network,
+                        path,
+                        time_ns,
+                        color,
+                        label,
+                        linestyle=linestyle,
+                    )
+                ax.legend(loc="lower left")
+            else:
+                positions = node_positions_at_time(
+                    network,
+                    time_ns,
+                    position_cache,
+                )
+                fig, ax, coordinate_system = _create_world_map_axes()
+                draw_world_map_nodes(
                     ax,
                     network,
-                    path,
-                    time_ns,
-                    color,
-                    label,
-                    linestyle=linestyle,
+                    positions,
+                    coordinate_system,
                 )
-            ax.legend(loc="lower left")
+                for path, color, label, linestyle in paths_to_draw:
+                    draw_world_map_path_links(
+                        ax,
+                        path,
+                        positions,
+                        color,
+                        label,
+                        linestyle,
+                        coordinate_system,
+                    )
+                draw_world_map_used_nodes(
+                    ax,
+                    network,
+                    paths_to_draw,
+                    positions,
+                    coordinate_system,
+                )
+                add_world_map_legend(ax)
             ax.set_title(
-                "%s focus %s at t=%.3gs\n"
-                "propagation-only RTT=%.3f ms, queue-aware estimate=%.3f ms, "
-                "hops=%d/%d"
-                % (
-                    _algorithm_label(algorithm),
-                    view_name.replace("_", " "),
-                    time_ns / 1e9,
-                    rtt_row["propagation_only_rtt_ms"],
-                    rtt_row["queue_aware_rtt_ms"],
-                    rtt_row["forward_hop_count"],
-                    rtt_row["reverse_hop_count"],
+                _route_plot_title(
+                    algorithm,
+                    view_name,
+                    time_ns,
+                    rtt_row,
                 )
             )
             time_tag = ("%g" % (time_ns / 1e9)).replace(".", "p")
@@ -1118,7 +1439,7 @@ def generate_route_plots(
                 time_tag,
             )
             output_file = os.path.join(graphical_routes_dir, filename)
-            _save_figure(fig, output_file)
+            _save_route_figure(fig, output_file)
             written.append(output_file)
     return written
 
@@ -1130,6 +1451,7 @@ def write_diagnostics(
     rtt_df,
     packet_sizes,
     route_visualization_enabled,
+    route_visualization_variants=(),
 ):
     with open(path, "w") as f_out:
         f_out.write("UDP/PDR estimated RTT diagnostics\n")
@@ -1153,8 +1475,12 @@ def write_diagnostics(
         )
         f_out.write(
             "queue_aware_rtt_is_packet_level_measured = false\n"
-            "route_visualization_enabled = %s\n\n"
-            % str(bool(route_visualization_enabled)).lower()
+            "route_visualization_enabled = %s\n"
+            "route_visualization_variants = %s\n\n"
+            % (
+                str(bool(route_visualization_enabled)).lower(),
+                ",".join(route_visualization_variants),
+            )
         )
         if not len(rtt_df):
             f_out.write("No RTT samples were generated.\n")
@@ -1226,19 +1552,18 @@ def analyze_run(run, algorithms, args):
     all_rtt_rows = []
     all_path_rows = []
     packet_sizes = {}
-    graphical_routes_dir = os.path.join(
-        comparison_dir,
-        "graphical_routes",
+    route_plot_variants = (
+        resolve_route_plot_variants(args.route_plot_variants)
+        if args.enable_route_visualization
+        else ()
     )
+    graphical_routes_dirs = route_plot_directories(
+        comparison_dir,
+        route_plot_variants,
+    )
+    position_cache = {}
     if args.enable_route_visualization:
-        for filename in os.listdir(graphical_routes_dir):
-            if not filename.endswith(".png"):
-                continue
-            if any(
-                filename.startswith(algorithm + "_focus_")
-                for algorithm in existing_algorithms
-            ):
-                os.remove(os.path.join(graphical_routes_dir, filename))
+        ensure_route_plot_directories(graphical_routes_dirs)
     for algorithm in existing_algorithms:
         algorithm_run_dir = os.path.join(run_dir, algorithm)
         print(
@@ -1259,13 +1584,16 @@ def analyze_run(run, algorithms, args):
         all_path_rows.extend(path_rows)
         packet_sizes[algorithm] = packet_size
         if args.enable_route_visualization:
-            generate_route_plots(
-                graphical_routes_dir,
-                algorithm,
-                route_records,
-                route_times_ns,
-                network,
-            )
+            for variant in route_plot_variants:
+                generate_route_plots(
+                    graphical_routes_dirs[variant],
+                    algorithm,
+                    route_records,
+                    route_times_ns,
+                    network,
+                    variant=variant,
+                    position_cache=position_cache,
+                )
 
     rtt_df = pd.DataFrame(all_rtt_rows, columns=RTT_TIMESERIES_COLUMNS)
     path_df = pd.DataFrame(all_path_rows, columns=PATH_TIMESERIES_COLUMNS)
@@ -1316,6 +1644,7 @@ def analyze_run(run, algorithms, args):
         rtt_df,
         packet_sizes,
         args.enable_route_visualization,
+        route_plot_variants,
     )
 
     if len(rtt_df):

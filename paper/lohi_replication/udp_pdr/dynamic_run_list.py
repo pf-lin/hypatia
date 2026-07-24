@@ -792,6 +792,15 @@ def add_analysis_output_arguments(parser):
         default="0,30,58",
         help="Comma-separated route plot times in seconds. Default: 0,30,58",
     )
+    parser.add_argument(
+        "--route-plot-variants",
+        choices=["both", "original", "world_map"],
+        default="both",
+        help=(
+            "Route figure variants to generate: the original longitude/latitude "
+            "view, the world-map view, or both. Default: both"
+        ),
+    )
 
 
 def describe_selection(args):

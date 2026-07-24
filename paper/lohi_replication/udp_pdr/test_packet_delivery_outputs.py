@@ -105,6 +105,26 @@ class PacketDeliveryOutputsTest(unittest.TestCase):
 
     def test_manifest_and_guides_are_created(self):
         with tempfile.TemporaryDirectory() as comparison_dir:
+            original_dir = os.path.join(comparison_dir, "graphical_routes")
+            world_map_dir = os.path.join(
+                comparison_dir,
+                "graphical_routes_world_map",
+            )
+            os.makedirs(original_dir)
+            os.makedirs(world_map_dir)
+            original_filename = "algorithm_lhtr_focus_forward_path_t0s.png"
+            world_map_filename = "algorithm_lhtr_focus_reverse_path_t0s.png"
+            with open(
+                os.path.join(original_dir, original_filename),
+                "wb",
+            ) as f_out:
+                f_out.write(b"original")
+            with open(
+                os.path.join(world_map_dir, world_map_filename),
+                "wb",
+            ) as f_out:
+                f_out.write(b"world map")
+
             write_result_guide(comparison_dir)
             write_deprecated_notes(comparison_dir)
             manifest_path = write_output_manifest(comparison_dir)
@@ -125,6 +145,14 @@ class PacketDeliveryOutputsTest(unittest.TestCase):
             self.assertIn("core/loss_attribution_breakdown_v3.csv", manifest)
             self.assertIn("large_optional", manifest)
             self.assertIn("deprecated", manifest)
+            self.assertIn(
+                "graphical_routes/" + original_filename,
+                manifest,
+            )
+            self.assertIn(
+                "graphical_routes_world_map/" + world_map_filename,
+                manifest,
+            )
 
 
 if __name__ == "__main__":
