@@ -1,6 +1,6 @@
 # Hotspot Formal Status (200s)
 
-Fixed configuration: `src754 <-> dst785`, ISL 10 Mbps, GSL 100 Mbps, simulation 200 s, traffic stop 198 s, LoHi `control_plane_only`, LHTR diagnostics enabled, RTT interval 1 s, route times `0,30,60,90,120,150,180,198`, route variants `original,world_map`.
+Fixed configuration: `src754 <-> dst785`, ISL 10 Mbps, GSL 100 Mbps, simulation 200 s, traffic stop 198 s, LoHi `control_plane_only`, LHTR diagnostics enabled, RTT interval 1 s, route times `0,30,60,90,120,150,180,198`, route variants `original,world_map,world_map_zoomed`.
 
 ## Scenario Status
 

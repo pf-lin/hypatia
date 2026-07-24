@@ -110,10 +110,16 @@ class PacketDeliveryOutputsTest(unittest.TestCase):
                 comparison_dir,
                 "graphical_routes_world_map",
             )
+            zoomed_dir = os.path.join(
+                comparison_dir,
+                "graphical_routes_world_map_zoomed",
+            )
             os.makedirs(original_dir)
             os.makedirs(world_map_dir)
+            os.makedirs(zoomed_dir)
             original_filename = "algorithm_lhtr_focus_forward_path_t0s.png"
             world_map_filename = "algorithm_lhtr_focus_reverse_path_t0s.png"
+            zoomed_filename = "algorithm_lhtr_focus_round_trip_path_t0s.png"
             with open(
                 os.path.join(original_dir, original_filename),
                 "wb",
@@ -124,6 +130,11 @@ class PacketDeliveryOutputsTest(unittest.TestCase):
                 "wb",
             ) as f_out:
                 f_out.write(b"world map")
+            with open(
+                os.path.join(zoomed_dir, zoomed_filename),
+                "wb",
+            ) as f_out:
+                f_out.write(b"zoomed world map")
 
             write_result_guide(comparison_dir)
             write_deprecated_notes(comparison_dir)
@@ -153,6 +164,13 @@ class PacketDeliveryOutputsTest(unittest.TestCase):
                 "graphical_routes_world_map/" + world_map_filename,
                 manifest,
             )
+            self.assertIn(
+                "graphical_routes_world_map_zoomed/" + zoomed_filename,
+                manifest,
+            )
+            with open(os.path.join(comparison_dir, "README.md")) as f_in:
+                result_guide = f_in.read()
+            self.assertIn("`graphical_routes_world_map_zoomed/`", result_guide)
 
 
 if __name__ == "__main__":

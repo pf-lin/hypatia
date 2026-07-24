@@ -1410,11 +1410,13 @@ python step_3_generate_plots.py <same run selection arguments> \
   --route-plot-times 0,30,58
 ```
 
-The visualization flag generates both variants from the same replayed paths
-and timestamps. Use `--route-plot-variants original` or
-`--route-plot-variants world_map` only when intentionally regenerating one
-variant (for example, to backfill world maps without touching existing
-original figures).
+The visualization flag defaults to `--route-plot-variants all`, generating the
+original, full world-map, and path-region zoomed world-map variants from the
+same replayed paths and timestamps. Use `--route-plot-variants original`,
+`--route-plot-variants world_map`, or
+`--route-plot-variants world_map_zoomed` when intentionally regenerating only
+one variant. The legacy value `both` remains available and means original plus
+the full world map; it does not include the zoomed variant.
 
 With the standard output layout, the generated files are:
 
@@ -1440,6 +1442,10 @@ comparison_packet_delivery/
     <algorithm>_focus_forward_path_t<time>s.png
     <algorithm>_focus_reverse_path_t<time>s.png
     <algorithm>_focus_round_trip_path_t<time>s.png
+  graphical_routes_world_map_zoomed/
+    <algorithm>_focus_forward_path_t<time>s.png
+    <algorithm>_focus_reverse_path_t<time>s.png
+    <algorithm>_focus_round_trip_path_t<time>s.png
 ```
 
 Start with the two summary CSVs and RTT comparison plots. Use the timeseries
@@ -1448,6 +1454,9 @@ and queue-data quality. `graphical_routes/` keeps the lightweight
 longitude/latitude view. `graphical_routes_world_map/` adds the Cartopy world
 map, the full satellite constellation and ground-station set, and highlighted
 labels for every satellite and ground station used by the selected path.
+`graphical_routes_world_map_zoomed/` keeps the same geographic context while
+zooming to the path region with surrounding map padding and collision-aware
+labels.
 
 ## LoHi Management Satellite Modes
 

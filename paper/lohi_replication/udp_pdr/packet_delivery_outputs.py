@@ -203,6 +203,9 @@ _DUPLICATE_PLOT_RE = re.compile(r"_bg_flow_count_\d+\.png$")
 ROUTE_VISUALIZATION_DIRECTORIES = {
     "graphical_routes": "Original longitude/latitude focus-flow route visualization.",
     "graphical_routes_world_map": "World-map focus-flow route visualization.",
+    "graphical_routes_world_map_zoomed": (
+        "Path-region zoomed world-map focus-flow route visualization."
+    ),
 }
 
 
@@ -367,9 +370,10 @@ def write_result_guide(comparison_dir):
             "`diagnostics/udp_focus_path_timeseries.csv`. Queue-aware RTT is a "
             "path-replay and queue-occupancy estimate, not packet-level measured RTT. "
             "With route visualization enabled, original longitude/latitude PNGs "
-            "are written under `graphical_routes/` and matching world-map PNGs "
-            "under `graphical_routes_world_map/`. Both variants use the same "
-            "selected route times.\n"
+            "are written under `graphical_routes/`, matching full-world PNGs "
+            "under `graphical_routes_world_map/`, and path-region zoomed PNGs "
+            "under `graphical_routes_world_map_zoomed/`. All variants use the "
+            "same selected route times.\n"
         )
     return path
 

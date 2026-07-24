@@ -19,7 +19,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from astropy import units as u
+from matplotlib.font_manager import FontProperties
 from matplotlib.lines import Line2D
+from matplotlib.path import Path as MatplotlibPath
+from matplotlib.transforms import Bbox
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "../../.."))
@@ -56,10 +59,14 @@ from satgen.tles import read_tles
 SPEED_OF_LIGHT_M_PER_S = 299792458.0
 DEFAULT_PACKET_SIZE_BYTES = 1500
 LEGACY_FOCUS_PAIR = (738, 793)
-ROUTE_PLOT_VARIANTS = ("original", "world_map")
+ROUTE_PLOT_VARIANTS = ("original", "world_map", "world_map_zoomed")
 ROUTE_PLOT_DIRECTORIES = {
     "original": "graphical_routes",
     "world_map": "graphical_routes_world_map",
+    "world_map_zoomed": "graphical_routes_world_map_zoomed",
+}
+GROUND_STATION_LABEL_ALIASES = {
+    "Kitakyushu-Fukuoka-M.M.A.": "Fukuoka",
 }
 
 RTT_TIMESERIES_COLUMNS = [
@@ -975,8 +982,7 @@ def node_lat_lon(network, node_id, time_ns):
 
 def plot_connection(ax, from_lon, from_lat, to_lon, to_lat, **kwargs):
     if abs(to_lon - from_lon) <= 180:
-        ax.plot([from_lon, to_lon], [from_lat, to_lat], **kwargs)
-        return
+        return ax.plot([from_lon, to_lon], [from_lat, to_lat], **kwargs)
     if from_lon < to_lon:
         from_lon += 360
     else:
@@ -987,18 +993,21 @@ def plot_connection(ax, from_lon, from_lat, to_lon, to_lat, **kwargs):
     normalized_to_lon = to_lon - 360 if to_lon > 180 else to_lon
     from_seam_lon = -180 if from_lon > 180 else 180
     to_seam_lon = -180 if to_lon > 180 else 180
-    ax.plot(
+    lines = ax.plot(
         [normalized_from_lon, from_seam_lon],
         [from_lat, seam_lat],
         **kwargs,
     )
     continuation_kwargs = dict(kwargs)
     continuation_kwargs.pop("label", None)
-    ax.plot(
-        [to_seam_lon, normalized_to_lon],
-        [seam_lat, to_lat],
-        **continuation_kwargs,
+    lines.extend(
+        ax.plot(
+            [to_seam_lon, normalized_to_lon],
+            [seam_lat, to_lat],
+            **continuation_kwargs,
+        )
     )
+    return lines
 
 
 def draw_path(ax, network, path, time_ns, color, label, linestyle="-"):
@@ -1035,8 +1044,10 @@ def draw_path(ax, network, path, time_ns, color, label, linestyle="-"):
 
 
 def resolve_route_plot_variants(value):
-    if value == "both":
+    if value == "all":
         return ROUTE_PLOT_VARIANTS
+    if value == "both":
+        return ROUTE_PLOT_VARIANTS[:2]
     if value not in ROUTE_PLOT_VARIANTS:
         raise ValueError("Unsupported route plot variant: %s" % value)
     return (value,)
@@ -1078,21 +1089,126 @@ def _load_cartopy():
     return ccrs, cfeature
 
 
-def _create_world_map_axes():
+def _minimal_longitude_arc(longitudes):
+    """Return the center and offsets of the shortest arc containing longitudes."""
+    if not longitudes:
+        raise ValueError("At least one longitude is required")
+    wrapped = sorted(float(longitude) % 360.0 for longitude in longitudes)
+    if len(wrapped) == 1:
+        center = wrapped[0]
+    else:
+        gaps = [
+            (
+                (wrapped[(index + 1) % len(wrapped)] - wrapped[index]) % 360.0,
+                index,
+            )
+            for index in range(len(wrapped))
+        ]
+        _, gap_start_index = max(gaps)
+        arc_start = wrapped[(gap_start_index + 1) % len(wrapped)]
+        unwrapped = [
+            longitude if longitude >= arc_start else longitude + 360.0
+            for longitude in wrapped
+        ]
+        center = (min(unwrapped) + max(unwrapped)) / 2.0
+    center = ((center + 180.0) % 360.0) - 180.0
+    offsets = [
+        ((float(longitude) - center + 180.0) % 360.0) - 180.0
+        for longitude in longitudes
+    ]
+    return center, offsets
+
+
+def _expand_interval(
+    lower,
+    upper,
+    padding,
+    minimum_span,
+    limits,
+    preserve_span_at_limits=True,
+):
+    lower = float(lower) - float(padding)
+    upper = float(upper) + float(padding)
+    if upper - lower < minimum_span:
+        center = (lower + upper) / 2.0
+        lower = center - minimum_span / 2.0
+        upper = center + minimum_span / 2.0
+    limit_lower, limit_upper = limits
+    if preserve_span_at_limits:
+        if lower < limit_lower:
+            upper += limit_lower - lower
+            lower = limit_lower
+        if upper > limit_upper:
+            lower -= upper - limit_upper
+            upper = limit_upper
+    return max(limit_lower, lower), min(limit_upper, upper)
+
+
+def calculate_zoomed_route_extent(paths_to_draw, positions):
+    """Calculate a padded, dateline-aware extent from the displayed paths."""
+    node_ids = list(
+        dict.fromkeys(
+            node
+            for path, _, _, _ in paths_to_draw
+            for node in path
+        )
+    )
+    if not node_ids:
+        raise ValueError("Cannot calculate a zoomed extent without path nodes")
+    latitudes = [positions[node_id][0] for node_id in node_ids]
+    longitudes = [positions[node_id][1] for node_id in node_ids]
+    center_longitude, longitude_offsets = _minimal_longitude_arc(longitudes)
+
+    longitude_span = max(longitude_offsets) - min(longitude_offsets)
+    longitude_padding = min(48.0, max(12.0, longitude_span * 0.45))
+    west, east = _expand_interval(
+        min(longitude_offsets),
+        max(longitude_offsets),
+        longitude_padding,
+        60.0,
+        (-179.5, 179.5),
+    )
+
+    latitude_span = max(latitudes) - min(latitudes)
+    latitude_padding = min(24.0, max(10.0, latitude_span * 0.35))
+    south, north = _expand_interval(
+        min(latitudes),
+        max(latitudes),
+        latitude_padding,
+        40.0,
+        (-89.5, 89.5),
+        preserve_span_at_limits=False,
+    )
+    return center_longitude, west, east, south, north
+
+
+def _create_world_map_axes(extent=None):
     ccrs, cfeature = _load_cartopy()
     coordinate_system = ccrs.PlateCarree()
+    center_longitude = extent[0] if extent is not None else 0.0
+    projection = ccrs.PlateCarree(central_longitude=center_longitude)
     fig = plt.figure(figsize=(11, 5.5))
-    ax = fig.add_subplot(1, 1, 1, projection=coordinate_system)
-    ax.set_global()
-    ax.add_feature(cfeature.OCEAN, zorder=0)
+    ax = fig.add_subplot(1, 1, 1, projection=projection)
+    if extent is None:
+        ax.set_global()
+    else:
+        _, west, east, south, north = extent
+        extent_coordinate_system = ccrs.PlateCarree(
+            central_longitude=center_longitude
+        )
+        ax.set_extent(
+            [west, east, south, north],
+            crs=extent_coordinate_system,
+        )
+    ax.add_feature(cfeature.OCEAN.with_scale("110m"), zorder=0)
     ax.add_feature(
-        cfeature.LAND,
+        cfeature.LAND.with_scale("110m"),
         zorder=0,
         edgecolor="black",
         linewidth=0.2,
     )
     ax.add_feature(
-        cfeature.BORDERS,
+        cfeature.BORDERS.with_scale("110m"),
         zorder=1,
         edgecolor="gray",
         linewidth=0.25,
@@ -1150,30 +1266,46 @@ def draw_world_map_path_links(
     linestyle,
     coordinate_system,
 ):
+    lines = []
     for index in range(1, len(path)):
         from_lat, from_lon = positions[path[index - 1]]
         to_lat, to_lon = positions[path[index]]
-        plot_connection(
-            ax,
-            from_lon,
-            from_lat,
-            to_lon,
-            to_lat,
-            color=color,
-            linewidth=1.8,
-            linestyle=linestyle,
-            label=label if index == 1 else None,
-            transform=coordinate_system,
-            zorder=3,
+        lines.extend(
+            plot_connection(
+                ax,
+                from_lon,
+                from_lat,
+                to_lon,
+                to_lat,
+                color=color,
+                linewidth=1.8,
+                linestyle=linestyle,
+                label=label if index == 1 else None,
+                transform=coordinate_system,
+                zorder=3,
+            )
         )
+    return lines
 
 
-def _ground_station_label(network, node_id):
+def _ground_station_label(network, node_id, shorten=False):
     ground_station = network.ground_stations[
         node_id - network.num_satellites
     ]
     name = str(ground_station.get("name", "")).strip()
+    if shorten:
+        name = GROUND_STATION_LABEL_ALIASES.get(name, name)
     return "%d: %s" % (node_id, name) if name else str(node_id)
+
+
+def _used_route_nodes(paths_to_draw):
+    return list(
+        dict.fromkeys(
+            node
+            for path, _, _, _ in paths_to_draw
+            for node in path
+        )
+    )
 
 
 def draw_world_map_used_nodes(
@@ -1182,14 +1314,9 @@ def draw_world_map_used_nodes(
     paths_to_draw,
     positions,
     coordinate_system,
+    annotate=True,
 ):
-    used_nodes = list(
-        dict.fromkeys(
-            node
-            for path, _, _, _ in paths_to_draw
-            for node in path
-        )
-    )
+    used_nodes = _used_route_nodes(paths_to_draw)
     for node in used_nodes:
         lat, lon = positions[node]
         is_satellite = node < network.num_satellites
@@ -1204,22 +1331,343 @@ def draw_world_map_used_nodes(
             transform=coordinate_system,
             zorder=4,
         )
+        if annotate:
+            ax.annotate(
+                (
+                    str(node)
+                    if is_satellite
+                    else _ground_station_label(network, node)
+                ),
+                xy=(lon, lat),
+                xytext=(-4 if lon > 150 else 4, -3 if lat > 75 else 3),
+                textcoords="offset points",
+                fontsize=6,
+                fontweight="bold",
+                color="#202020",
+                horizontalalignment="right" if lon > 150 else "left",
+                verticalalignment="top" if lat > 75 else "bottom",
+                transform=coordinate_system,
+                zorder=5,
+            )
+    return used_nodes
+
+
+def _display_point(ax, coordinate_system, latitude, longitude):
+    projected = ax.projection.transform_point(
+        longitude,
+        latitude,
+        coordinate_system,
+    )
+    return tuple(ax.transData.transform(projected))
+
+
+def _bbox_is_inside(inner, outer):
+    return (
+        inner.x0 >= outer.x0
+        and inner.x1 <= outer.x1
+        and inner.y0 >= outer.y0
+        and inner.y1 <= outer.y1
+    )
+
+
+def _candidate_text_bbox(
+    anchor,
+    offset_points,
+    width,
+    height,
+    horizontalalignment,
+    verticalalignment,
+    pixels_per_point,
+):
+    anchor_x = anchor[0] + offset_points[0] * pixels_per_point
+    anchor_y = anchor[1] + offset_points[1] * pixels_per_point
+    if horizontalalignment == "left":
+        x0 = anchor_x
+    elif horizontalalignment == "right":
+        x0 = anchor_x - width
+    else:
+        x0 = anchor_x - width / 2.0
+    if verticalalignment == "bottom":
+        y0 = anchor_y
+    elif verticalalignment == "top":
+        y0 = anchor_y - height
+    else:
+        y0 = anchor_y - height / 2.0
+    return Bbox.from_bounds(x0, y0, width, height).padded(2.5)
+
+
+def _route_node_neighbors(paths_to_draw):
+    neighbors = {}
+    for path, _, _, _ in paths_to_draw:
+        for index, node_id in enumerate(path):
+            adjacent = neighbors.setdefault(node_id, [])
+            if index:
+                adjacent.append(path[index - 1])
+            if index + 1 < len(path):
+                adjacent.append(path[index + 1])
+    return neighbors
+
+
+def _rendered_route_segments(route_lines):
+    """Return display-coordinate segments after Cartopy seam processing."""
+    route_segments = []
+    for line in route_lines:
+        transform = line.get_transform()
+        rendered_path = transform.transform_path_non_affine(
+            line.get_path()
+        ).transformed(transform.get_affine())
+        previous = None
+        for vertices, code in rendered_path.iter_segments(curves=False):
+            point = tuple(vertices[:2])
+            if code == MatplotlibPath.MOVETO:
+                previous = point
+            elif code == MatplotlibPath.LINETO:
+                if previous is not None:
+                    route_segments.append(
+                        MatplotlibPath([previous, point])
+                    )
+                previous = point
+            elif code == MatplotlibPath.CLOSEPOLY:
+                previous = None
+    return route_segments
+
+
+def _preferred_label_direction(
+    node_id,
+    display_positions,
+    neighbors,
+):
+    vectors = []
+    origin = np.asarray(display_positions[node_id], dtype=float)
+    for neighbor in neighbors.get(node_id, []):
+        vector = np.asarray(display_positions[neighbor], dtype=float) - origin
+        length = np.linalg.norm(vector)
+        if length:
+            vectors.append(vector / length)
+    if not vectors:
+        return np.asarray([1.0, 1.0]) / math.sqrt(2.0)
+    toward_route = np.sum(vectors, axis=0)
+    length = np.linalg.norm(toward_route)
+    if not length:
+        return np.asarray([1.0, 1.0]) / math.sqrt(2.0)
+    return -toward_route / length
+
+
+def draw_zoomed_world_map_labels(
+    fig,
+    ax,
+    network,
+    paths_to_draw,
+    positions,
+    coordinate_system,
+    legend,
+    route_lines,
+):
+    """Place used-node labels away from routes and existing map annotations."""
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    font_properties = FontProperties(size=6, weight="bold")
+    pixels_per_point = fig.dpi / 72.0
+    axes_bbox = ax.get_window_extent(renderer).padded(-3.0)
+    legend_bbox = (
+        legend.get_window_extent(renderer).padded(3.0)
+        if legend is not None
+        else None
+    )
+
+    used_nodes = _used_route_nodes(paths_to_draw)
+    used_node_set = set(used_nodes)
+    display_positions = {
+        node_id: _display_point(
+            ax,
+            coordinate_system,
+            positions[node_id][0],
+            positions[node_id][1],
+        )
+        for node_id in range(network.num_nodes)
+    }
+    neighbors = _route_node_neighbors(paths_to_draw)
+    route_segments = _rendered_route_segments(route_lines)
+    marker_bboxes = []
+    marker_padding = 5.0 * pixels_per_point
+    for node_id in used_nodes:
+        point = display_positions[node_id]
+        marker_bboxes.append(
+            Bbox.from_extents(
+                point[0] - marker_padding,
+                point[1] - marker_padding,
+                point[0] + marker_padding,
+                point[1] + marker_padding,
+            )
+        )
+    unused_points = [
+        point
+        for node_id, point in display_positions.items()
+        if node_id not in used_node_set
+        and axes_bbox.contains(point[0], point[1])
+    ]
+
+    diagonal = 1.0 / math.sqrt(2.0)
+    directions = [
+        (1.0, 0.0),
+        (-1.0, 0.0),
+        (0.0, 1.0),
+        (0.0, -1.0),
+        (diagonal, diagonal),
+        (-diagonal, diagonal),
+        (diagonal, -diagonal),
+        (-diagonal, -diagonal),
+    ]
+    ordered_nodes = sorted(
+        used_nodes,
+        key=lambda node_id: (
+            node_id < network.num_satellites,
+            -len(
+                str(node_id)
+                if node_id < network.num_satellites
+                else _ground_station_label(
+                    network,
+                    node_id,
+                    shorten=True,
+                )
+            ),
+        ),
+    )
+    occupied_label_bboxes = []
+    for node_id in ordered_nodes:
+        is_satellite = node_id < network.num_satellites
+        text = (
+            str(node_id)
+            if is_satellite
+            else _ground_station_label(network, node_id, shorten=True)
+        )
+        width, height, _ = renderer.get_text_width_height_descent(
+            text,
+            font_properties,
+            ismath=False,
+        )
+        anchor = display_positions[node_id]
+        preferred_direction = _preferred_label_direction(
+            node_id,
+            display_positions,
+            neighbors,
+        )
+        radii = (
+            (7.0, 11.0, 16.0, 23.0, 32.0, 44.0)
+            if is_satellite
+            else (18.0, 27.0, 38.0, 52.0, 70.0, 92.0)
+        )
+        candidates = []
+        for radius in radii:
+            for direction in directions:
+                direction_array = np.asarray(direction)
+                offset = (
+                    radius * direction[0],
+                    radius * direction[1],
+                )
+                horizontalalignment = (
+                    "left"
+                    if direction[0] > 0.1
+                    else "right" if direction[0] < -0.1 else "center"
+                )
+                verticalalignment = (
+                    "bottom"
+                    if direction[1] > 0.1
+                    else "top" if direction[1] < -0.1 else "center"
+                )
+                bbox = _candidate_text_bbox(
+                    anchor,
+                    offset,
+                    width,
+                    height,
+                    horizontalalignment,
+                    verticalalignment,
+                    pixels_per_point,
+                )
+                direction_penalty = 1.0 - float(
+                    np.dot(direction_array, preferred_direction)
+                )
+                score = radius + direction_penalty * 18.0
+                if not _bbox_is_inside(bbox, axes_bbox):
+                    score += 1.0e12
+                hard_bboxes = marker_bboxes + occupied_label_bboxes
+                if legend_bbox is not None:
+                    hard_bboxes.append(legend_bbox)
+                score += sum(
+                    1.0e9
+                    for obstacle in hard_bboxes
+                    if Bbox.overlaps(bbox, obstacle)
+                )
+                score += sum(
+                    5.0e8
+                    for segment in route_segments
+                    if segment.intersects_bbox(bbox, filled=True)
+                )
+                score += sum(
+                    2500.0
+                    for point in unused_points
+                    if bbox.contains(point[0], point[1])
+                )
+                candidates.append(
+                    (
+                        score,
+                        offset,
+                        horizontalalignment,
+                        verticalalignment,
+                        bbox,
+                        radius,
+                    )
+                )
+        (
+            _,
+            offset,
+            horizontalalignment,
+            verticalalignment,
+            chosen_bbox,
+            radius,
+        ) = min(candidates, key=lambda candidate: candidate[0])
+        occupied_label_bboxes.append(chosen_bbox)
+        lat, lon = positions[node_id]
+        arrow_properties = None
+        if not is_satellite:
+            arrow_properties = {
+                "arrowstyle": "-",
+                "color": "#444444",
+                "linewidth": 0.55,
+                "shrinkA": 2,
+                "shrinkB": 4,
+            }
+        elif radius > 16.0:
+            arrow_properties = {
+                "arrowstyle": "-",
+                "color": "#777777",
+                "linewidth": 0.35,
+                "shrinkA": 1,
+                "shrinkB": 3,
+            }
         ax.annotate(
-            str(node) if is_satellite else _ground_station_label(network, node),
+            text,
             xy=(lon, lat),
-            xytext=(-4 if lon > 150 else 4, -3 if lat > 75 else 3),
+            xytext=offset,
             textcoords="offset points",
-            fontsize=6,
-            fontweight="bold",
+            fontproperties=font_properties,
             color="#202020",
-            horizontalalignment="right" if lon > 150 else "left",
-            verticalalignment="top" if lat > 75 else "bottom",
+            horizontalalignment=horizontalalignment,
+            verticalalignment=verticalalignment,
             transform=coordinate_system,
-            zorder=5,
+            arrowprops=arrow_properties,
+            bbox={
+                "boxstyle": "round,pad=0.18",
+                "facecolor": "white",
+                "edgecolor": "#666666" if not is_satellite else "none",
+                "linewidth": 0.4,
+                "alpha": 0.86,
+            },
+            zorder=6,
         )
 
 
-def add_world_map_legend(ax):
+def add_world_map_legend(ax, outside_map=False):
     path_handles, path_labels = ax.get_legend_handles_labels()
     unique_path_handles = {}
     for handle, label in zip(path_handles, path_labels):
@@ -1269,7 +1717,16 @@ def add_world_map_legend(ax):
             ),
         ]
     )
-    ax.legend(handles=handles, loc="lower left", fontsize=7)
+    if outside_map:
+        return ax.legend(
+            handles=handles,
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.075),
+            fontsize=7,
+            ncol=3,
+            borderaxespad=0,
+        )
+    return ax.legend(handles=handles, loc="lower left", fontsize=7)
 
 
 def _route_plot_title(algorithm, view_name, time_ns, rtt_row):
@@ -1289,7 +1746,7 @@ def _route_plot_title(algorithm, view_name, time_ns, rtt_row):
     )
 
 
-def _save_route_figure(fig, output_file):
+def _save_route_figure(fig, output_file, apply_tight_layout=True):
     output_dir = os.path.dirname(output_file)
     os.makedirs(output_dir, exist_ok=True)
     file_descriptor, temporary_file = tempfile.mkstemp(
@@ -1299,7 +1756,11 @@ def _save_route_figure(fig, output_file):
     )
     os.close(file_descriptor)
     try:
-        _save_figure(fig, temporary_file)
+        if apply_tight_layout:
+            _save_figure(fig, temporary_file)
+        else:
+            fig.savefig(temporary_file, dpi=180, bbox_inches="tight")
+            plt.close(fig)
         os.replace(temporary_file, output_file)
     except BaseException:
         plt.close(fig)
@@ -1399,22 +1860,35 @@ def generate_route_plots(
                     time_ns,
                     position_cache,
                 )
-                fig, ax, coordinate_system = _create_world_map_axes()
+                extent = (
+                    calculate_zoomed_route_extent(
+                        paths_to_draw,
+                        positions,
+                    )
+                    if variant == "world_map_zoomed"
+                    else None
+                )
+                fig, ax, coordinate_system = _create_world_map_axes(
+                    extent=extent
+                )
                 draw_world_map_nodes(
                     ax,
                     network,
                     positions,
                     coordinate_system,
                 )
+                route_lines = []
                 for path, color, label, linestyle in paths_to_draw:
-                    draw_world_map_path_links(
-                        ax,
-                        path,
-                        positions,
-                        color,
-                        label,
-                        linestyle,
-                        coordinate_system,
+                    route_lines.extend(
+                        draw_world_map_path_links(
+                            ax,
+                            path,
+                            positions,
+                            color,
+                            label,
+                            linestyle,
+                            coordinate_system,
+                        )
                     )
                 draw_world_map_used_nodes(
                     ax,
@@ -1422,8 +1896,12 @@ def generate_route_plots(
                     paths_to_draw,
                     positions,
                     coordinate_system,
+                    annotate=variant != "world_map_zoomed",
                 )
-                add_world_map_legend(ax)
+                legend = add_world_map_legend(
+                    ax,
+                    outside_map=variant == "world_map_zoomed",
+                )
             ax.set_title(
                 _route_plot_title(
                     algorithm,
@@ -1432,6 +1910,18 @@ def generate_route_plots(
                     rtt_row,
                 )
             )
+            if variant == "world_map_zoomed":
+                fig.tight_layout()
+                draw_zoomed_world_map_labels(
+                    fig,
+                    ax,
+                    network,
+                    paths_to_draw,
+                    positions,
+                    coordinate_system,
+                    legend,
+                    route_lines,
+                )
             time_tag = ("%g" % (time_ns / 1e9)).replace(".", "p")
             filename = "%s_focus_%s_t%ss.png" % (
                 algorithm,
@@ -1439,7 +1929,11 @@ def generate_route_plots(
                 time_tag,
             )
             output_file = os.path.join(graphical_routes_dir, filename)
-            _save_route_figure(fig, output_file)
+            _save_route_figure(
+                fig,
+                output_file,
+                apply_tight_layout=variant != "world_map_zoomed",
+            )
             written.append(output_file)
     return written
 

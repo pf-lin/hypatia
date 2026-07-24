@@ -794,11 +794,18 @@ def add_analysis_output_arguments(parser):
     )
     parser.add_argument(
         "--route-plot-variants",
-        choices=["both", "original", "world_map"],
-        default="both",
+        choices=[
+            "all",
+            "both",
+            "original",
+            "world_map",
+            "world_map_zoomed",
+        ],
+        default="all",
         help=(
-            "Route figure variants to generate: the original longitude/latitude "
-            "view, the world-map view, or both. Default: both"
+            "Route figure variants to generate. `all` writes the original, "
+            "full world-map, and zoomed world-map views. `both` is the legacy "
+            "alias for original plus full world map. Default: all"
         ),
     )
 

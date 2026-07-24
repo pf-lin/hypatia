@@ -6,6 +6,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from run_hotspot_5level_60s_formal import (
     ALGORITHMS,
+    ROUTE_PLOT_DIRECTORIES,
     SCENARIOS,
     common_args,
     default_route_plot_times,
@@ -58,7 +59,16 @@ class HotspotFiveLevelFormalRunnerTest(unittest.TestCase):
         self.assertIn("--enable-route-visualization", step3)
         self.assertIn("0,30,58", step3)
         self.assertIn("--route-plot-variants", step3)
-        self.assertIn("both", step3)
+        variant_index = step3.index("--route-plot-variants") + 1
+        self.assertEqual(step3[variant_index], "all")
+        self.assertEqual(
+            ROUTE_PLOT_DIRECTORIES,
+            (
+                "graphical_routes",
+                "graphical_routes_world_map",
+                "graphical_routes_world_map_zoomed",
+            ),
+        )
         self.assertNotIn("--force", step2)
 
     def test_run_identity_and_metadata_are_formal_specific(self):
@@ -77,7 +87,7 @@ class HotspotFiveLevelFormalRunnerTest(unittest.TestCase):
         self.assertTrue(metadata["route_visualization_enabled"])
         self.assertEqual(
             metadata["route_plot_variants"],
-            ["original", "world_map"],
+            ["original", "world_map", "world_map_zoomed"],
         )
 
     def test_200s_defaults_use_two_second_drain_and_bounded_visualization(self):

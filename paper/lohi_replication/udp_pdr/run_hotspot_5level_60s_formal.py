@@ -42,10 +42,21 @@ BACKPRESSURE_FALLBACK = default_backpressure_fallback
 BACKPRESSURE_LOOP_GUARD = default_backpressure_loop_guard
 BACKPRESSURE_DIAGNOSTICS = default_backpressure_diagnostics
 BACKPRESSURE_DIAGNOSTICS_SAMPLE_LIMIT = default_backpressure_diagnostics_sample_limit
+ROUTE_PLOT_VARIANTS = (
+    "original",
+    "world_map",
+    "world_map_zoomed",
+)
 ROUTE_PLOT_DIRECTORIES = (
     "graphical_routes",
     "graphical_routes_world_map",
+    "graphical_routes_world_map_zoomed",
 )
+ROUTE_PLOT_DIRECTORY_LABELS = {
+    "graphical_routes": "original",
+    "graphical_routes_world_map": "world-map",
+    "graphical_routes_world_map_zoomed": "zoomed world-map",
+}
 ROUTE_PLOT_VIEWS = (
     "forward_path",
     "reverse_path",
@@ -652,7 +663,7 @@ def planned_commands(
             "--route-plot-times",
             route_plot_times_text(route_plot_times),
             "--route-plot-variants",
-            "both",
+            "all",
         ]
     )
     return step1, step2, step3
@@ -751,7 +762,7 @@ def formal_metadata(
         "rtt_sample_interval_s": rtt_sample_interval_s,
         "route_plot_count": len(route_plot_times),
         "route_plot_times_s": route_plot_times,
-        "route_plot_variants": ["original", "world_map"],
+        "route_plot_variants": list(ROUTE_PLOT_VARIANTS),
         "lohi_management_mode": "control_plane_only",
         "lhtr_diagnostics_enabled": True,
         "rtt_analysis_enabled": True,
@@ -997,20 +1008,12 @@ def build_summary(
                 notes.append("missing packet-delivery summary")
             if not rtt:
                 notes.append("missing RTT summary")
-            if missing_route_plots["graphical_routes"]:
-                notes.append(
-                    "missing original route plots (%d)"
-                    % len(missing_route_plots["graphical_routes"])
-                )
-            if missing_route_plots["graphical_routes_world_map"]:
-                notes.append(
-                    "missing world-map route plots (%d)"
-                    % len(
-                        missing_route_plots[
-                            "graphical_routes_world_map"
-                        ]
+            for dirname, label in ROUTE_PLOT_DIRECTORY_LABELS.items():
+                if missing_route_plots[dirname]:
+                    notes.append(
+                        "missing %s route plots (%d)"
+                        % (label, len(missing_route_plots[dirname]))
                     )
-                )
             route_plots_complete = not any(
                 missing_route_plots.values()
             )
@@ -1156,12 +1159,13 @@ def write_status(
             "GSL 100 Mbps, simulation %s s, traffic stop %s s, "
             "LoHi `control_plane_only`, LHTR diagnostics enabled, "
             "RTT interval %s s, route times `%s`, route variants "
-            "`original,world_map`.\n\n"
+            "`%s`.\n\n"
             % (
                 format_seconds(simulation_end_time_s),
                 format_seconds(traffic_stop_time_s),
                 format_seconds(rtt_sample_interval_s),
                 route_plot_times_text(route_plot_times),
+                ",".join(ROUTE_PLOT_VARIANTS),
             )
         )
         f_out.write("## Scenario Status\n\n")
