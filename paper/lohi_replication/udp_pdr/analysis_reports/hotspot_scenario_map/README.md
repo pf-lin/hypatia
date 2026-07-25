@@ -6,12 +6,45 @@ The focused manuscript figure is available in three formats:
 - `udp_pdr_hotspot_traffic_scenario_focused.svg` — editable vector artwork.
 - `udp_pdr_hotspot_traffic_scenario_focused.pdf` — one-page vector output.
 
-It follows the same Plate Carree projection, Natural Earth colors, and marker
-language as the existing `graphical_routes_world_map` figures. The map shows
-all 100 population-ranked candidate ground stations, while only the 26
-satellites used by the displayed routes at `t=0` are emphasized. This keeps
-the ground-station selection evidence visible without allowing the unused
-satellite constellation to obscure the traffic structure.
+## Background-pair count comparison
+
+Three additional, directly comparable variants use the same map extent,
+focus path, target corridor, congestion region, colors, and title:
+
+| Variant | Selection | Exact `t=0` target overlap | Route satellites |
+| --- | --- | ---: | ---: |
+| `bg10pairs` | Direction-diverse formal subset | 10/10 pairs | 50 |
+| `bg15pairs` | Maximum formal `t=0`-overlap subset | 15/15 pairs | 55 |
+| `bg20pairs` | Extended direction-diverse formal subset | 15/20 pairs | 85 |
+
+The three sets are nested. The 10-pair version contains formal pairs 1–7,
+18, 23, and 24; these add Manila–Kabul, Delhi–Fortaleza, and
+Los Angeles–Singapore to the seven strongest-overlap pairs. The 15-pair
+version adds Osaka–Nairobi, Nagoya–Dar es Salaam, Tehran–Xiamen,
+Karachi–Chongqing, and Wuhan–Ahmadabad. It is the largest subset of the
+formal H90/H100+ selection for which every displayed path overlaps the exact
+single-snapshot target trace at `t=0`.
+
+The 20-pair version additionally shows Shanghai–Madrid, Tokyo–Ankara,
+Shenyang–Jiddah, Lahore–Sydney, and Chengdu–Surat. These five pairs belong to
+the strict formal H90/H100+ selection, but their target overlap occurs at the
+selector's 29.9 or 59.9 s sample rather than at `t=0`. They are intentionally
+included to compare greater geographic and directional diversity without
+claiming that all 20 overlap the single `t=0` trace.
+
+Recommended use:
+
+- 10 pairs: cleanest main-paper figure with clearly different directions.
+- 15 pairs: strongest static evidence that every displayed route touches the
+  exact `t=0` corridor.
+- 20 pairs: useful comparison or supplementary figure showing the broadest
+  route diversity.
+
+The original five-pair focused map follows the same Plate Carree projection,
+Natural Earth colors, and marker language as the existing
+`graphical_routes_world_map` figures. It shows all 100 population-ranked
+candidate ground stations, while only the 26 satellites used by those five
+pairs and the focus path at `t=0` are emphasized.
 
 ## Why five representative background pairs
 
@@ -36,7 +69,7 @@ purple boundary is a padded bounding region derived from the exact common
 trace shared by the focus path and all five displayed background paths. Line
 widths and the region padding are schematic.
 
-## Suggested caption
+## Suggested caption for the five-pair figure
 
 > **UDP-PDR hotspot traffic scenario.** All 100 population-ranked candidate
 > ground stations are shown. Filled endpoints denote the bidirectional
@@ -46,12 +79,18 @@ widths and the region padding are schematic.
 > dashed purple region encloses the exact common trace of all six displayed
 > paths. Line widths and region padding are schematic.
 
+For the 10- or 15-pair variant, replace “five representative background
+pairs” and “26 satellites” with the count shown in the table above. For the
+20-pair comparison, state explicitly that 15 routes overlap the target trace
+at `t=0`, while the other five overlap it at a later formal selector sample.
+
 ## Regenerate
 
 From this directory:
 
 ```bash
 python3 plot_hotspot_scenario_map_focused.py
+python3 plot_hotspot_scenario_map_background_variants.py
 ```
 
 The script requires the checked-in H80 200-second Baseline forwarding state,
